@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -10,7 +10,9 @@
 
 #include "Stamp.h"
 
-#define MAX_DELTA_STAMP 1000
+//时间戳最大允许跳变30秒，主要是防止网络抖动导致的跳变
+#define MAX_DELTA_STAMP (30 * 1000)
+#define STAMP_LOOP_DELTA (60 * 1000)
 #define MAX_CTS 500
 #define ABS(x) ((x) > 0 ? (x) : (-x))
 
@@ -35,7 +37,8 @@ int64_t DeltaStamp::deltaStamp(int64_t stamp) {
 
     //时间戳增量为负，说明时间戳回环了或回退了
     _last_stamp = stamp;
-    return 0;
+    //如果时间戳回退不多，那么返回负值
+    return -ret < MAX_CTS ? ret : 0;
 }
 
 void Stamp::setPlayBack(bool playback) {
@@ -55,7 +58,7 @@ void Stamp::revise(int64_t dts, int64_t pts, int64_t &dts_out, int64_t &pts_out,
     }
 
     if (dts_out < _last_dts_out) {
-        WarnL << "dts回退:" << dts_out << " < " << _last_dts_out;
+//        WarnL << "dts回退:" << dts_out << " < " << _last_dts_out;
         dts_out = _last_dts_out;
         pts_out = _last_pts_out;
         return;
@@ -101,7 +104,7 @@ void Stamp::revise_l2(int64_t dts, int64_t pts, int64_t &dts_out, int64_t &pts_o
     }
 
     //pts和dts的差值
-    int pts_dts_diff = pts - dts;
+    int64_t pts_dts_diff = pts - dts;
 
     if (_last_dts_in != dts) {
         //时间戳发生变更
@@ -213,6 +216,64 @@ bool DtsGenerator::getDts_l(uint32_t pts, uint32_t &dts){
 
     //排序缓存尚未满
     return false;
+}
+
+void NtpStamp::setNtpStamp(uint32_t rtp_stamp, uint32_t sample_rate, uint64_t ntp_stamp_ms) {
+    update(uint64_t(rtp_stamp) * 1000 / sample_rate, ntp_stamp_ms);
+}
+
+void NtpStamp::update(uint32_t rtp_stamp_ms, uint64_t ntp_stamp_ms) {
+    _last_rtp_stamp_ms = rtp_stamp_ms;
+    _last_ntp_stamp_ms = ntp_stamp_ms;
+}
+
+uint64_t NtpStamp::getNtpStamp(uint32_t rtp_stamp, uint32_t sample_rate) {
+    if (rtp_stamp == _last_rtp_stamp) {
+        return _last_ntp_stamp_ms;
+    }
+    auto ret = getNtpStamp_l(rtp_stamp, sample_rate);
+    _last_rtp_stamp = rtp_stamp;
+    return ret;
+}
+
+uint64_t NtpStamp::getNtpStamp_l(uint32_t rtp_stamp, uint32_t sample_rate) {
+    uint64_t rtp_stamp_ms = uint64_t(rtp_stamp) * 1000 / sample_rate;
+    if (!_last_rtp_stamp_ms && !_last_ntp_stamp_ms) {
+        //尚未收到sender report rtcp包，那么赋值为本地系统时间戳吧
+        update(rtp_stamp_ms, getCurrentMillisecond(true));
+    }
+
+    if (rtp_stamp_ms >= _last_rtp_stamp_ms) {
+        auto diff = rtp_stamp_ms - _last_rtp_stamp_ms;
+        if (diff < MAX_DELTA_STAMP) {
+            //时间戳正常增长
+            update(rtp_stamp_ms, _last_ntp_stamp_ms + diff);
+            return _last_ntp_stamp_ms;
+        }
+        uint64_t max_rtp_ms = uint64_t(UINT32_MAX) * 1000 / sample_rate;
+        //时间戳大幅跳跃
+        if (_last_rtp_stamp_ms < STAMP_LOOP_DELTA && rtp_stamp_ms > max_rtp_ms - STAMP_LOOP_DELTA) {
+            //应该是rtp时间戳溢出+乱序
+            return _last_ntp_stamp_ms + diff - max_rtp_ms;
+        }
+        //不明原因的时间戳大幅跳跃，直接返回上次值
+        WarnL << "rtp stamp abnormal increased:" << _last_rtp_stamp << " -> " << rtp_stamp;
+        return _last_ntp_stamp_ms;
+    }
+    auto diff = _last_rtp_stamp_ms - rtp_stamp_ms;
+    if (diff < MAX_DELTA_STAMP) {
+        //正常范围的时间戳回退，说明收到rtp乱序了
+        return _last_ntp_stamp_ms - diff;
+    }
+    uint64_t max_rtp_ms = uint64_t(UINT32_MAX) * 1000 / sample_rate;
+    if (rtp_stamp_ms < STAMP_LOOP_DELTA && _last_rtp_stamp_ms > max_rtp_ms - STAMP_LOOP_DELTA) {
+        //确定是时间戳溢出
+        update(rtp_stamp_ms, _last_ntp_stamp_ms + (max_rtp_ms - diff));
+        return _last_ntp_stamp_ms;
+    }
+    //不明原因的时间戳回退，直接返回上次值
+    WarnL << "rtp stamp abnormal reduced:" << _last_rtp_stamp << " -> " << rtp_stamp;
+    return _last_ntp_stamp_ms;
 }
 
 }//namespace mediakit

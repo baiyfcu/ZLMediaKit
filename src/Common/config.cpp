@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -30,7 +30,7 @@ bool loadIniConfig(const char *ini_path){
         mINI::Instance().parseFile(ini);
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastReloadConfig);
         return true;
-    }catch (std::exception &ex) {
+    }catch (std::exception &) {
         InfoL << "dump ini file to:" << ini;
         mINI::Instance().dumpFile(ini);
         return false;
@@ -58,6 +58,7 @@ const string kBroadcastHttpBeforeAccess = "kBroadcastHttpBeforeAccess";
 //通用配置项目
 namespace General{
 #define GENERAL_FIELD "general."
+const string kMediaServerId = GENERAL_FIELD"mediaServerId";
 const string kFlowThreshold = GENERAL_FIELD"flowThreshold";
 const string kStreamNoneReaderDelayMS = GENERAL_FIELD"streamNoneReaderDelayMS";
 const string kMaxStreamWaitTimeMS = GENERAL_FIELD"maxStreamWaitMS";
@@ -68,6 +69,12 @@ const string kPublishToHls = GENERAL_FIELD"publishToHls";
 const string kPublishToMP4 = GENERAL_FIELD"publishToMP4";
 const string kMergeWriteMS = GENERAL_FIELD"mergeWriteMS";
 const string kModifyStamp = GENERAL_FIELD"modifyStamp";
+const string kHlsDemand = GENERAL_FIELD"hls_demand";
+const string kRtspDemand = GENERAL_FIELD"rtsp_demand";
+const string kRtmpDemand = GENERAL_FIELD"rtmp_demand";
+const string kTSDemand = GENERAL_FIELD"ts_demand";
+const string kFMP4Demand = GENERAL_FIELD"fmp4_demand";
+const string kEnableAudio = GENERAL_FIELD"enable_audio";
 
 onceToken token([](){
     mINI::Instance()[kFlowThreshold] = 1024;
@@ -80,6 +87,14 @@ onceToken token([](){
     mINI::Instance()[kPublishToMP4] = 0;
     mINI::Instance()[kMergeWriteMS] = 0;
     mINI::Instance()[kModifyStamp] = 0;
+    mINI::Instance()[kMediaServerId] = makeRandStr(16);
+    mINI::Instance()[kHlsDemand] = 0;
+    mINI::Instance()[kRtspDemand] = 0;
+    mINI::Instance()[kRtmpDemand] = 0;
+    mINI::Instance()[kTSDemand] = 0;
+    mINI::Instance()[kFMP4Demand] = 0;
+    mINI::Instance()[kEnableAudio] = 1;
+
 },nullptr);
 
 }//namespace General
@@ -104,7 +119,7 @@ const string kDirMenu = HTTP_FIELD"dirMenu";
 
 onceToken token([](){
     mINI::Instance()[kSendBufSize] = 64 * 1024;
-    mINI::Instance()[kMaxReqSize] = 4*1024;
+    mINI::Instance()[kMaxReqSize] = 4 * 10240;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirMenu] = true;
 
@@ -177,19 +192,13 @@ namespace Rtp {
 //RTP打包最大MTU,公网情况下更小
 const string kVideoMtuSize = RTP_FIELD"videoMtuSize";
 const string kAudioMtuSize = RTP_FIELD"audioMtuSize";
-//RTP排序缓存最大个数
-const string kMaxRtpCount = RTP_FIELD"maxRtpCount";
-//如果RTP序列正确次数累计达到该数字就启动清空排序缓存
-const string kClearCount = RTP_FIELD"clearCount";
-//最大RTP时间为13个小时，每13小时回环一次
-const string kCycleMS = RTP_FIELD"cycleMS";
+//rtp包最大长度限制，单位是KB
+const string kRtpMaxSize = RTP_FIELD"rtpMaxSize";
 
 onceToken token([](){
     mINI::Instance()[kVideoMtuSize] = 1400;
     mINI::Instance()[kAudioMtuSize] = 600;
-    mINI::Instance()[kMaxRtpCount] = 50;
-    mINI::Instance()[kClearCount] = 10;
-    mINI::Instance()[kCycleMS] = 13*60*60*1000;
+    mINI::Instance()[kRtpMaxSize] = 10;
 },nullptr);
 } //namespace Rtsp
 
@@ -254,6 +263,8 @@ const string kFileBufSize = HLS_FIELD"fileBufSize";
 const string kFilePath = HLS_FIELD"filePath";
 // 是否广播 ts 切片完成通知
 const string kBroadcastRecordTs = HLS_FIELD"broadcastRecordTs";
+//hls直播文件删除延时，单位秒
+const string kDeleteDelaySec = HLS_FIELD"deleteDelaySec";
 
 onceToken token([](){
     mINI::Instance()[kSegmentDuration] = 2;
@@ -262,6 +273,7 @@ onceToken token([](){
     mINI::Instance()[kFileBufSize] = 64 * 1024;
     mINI::Instance()[kFilePath] = "./www";
     mINI::Instance()[kBroadcastRecordTs] = false;
+    mINI::Instance()[kDeleteDelaySec] = 0;
 },nullptr);
 } //namespace Hls
 
@@ -271,14 +283,11 @@ namespace RtpProxy {
 #define RTP_PROXY_FIELD "rtp_proxy."
 //rtp调试数据保存目录
 const string kDumpDir = RTP_PROXY_FIELD"dumpDir";
-//是否限制udp数据来源ip和端口
-const string kCheckSource = RTP_PROXY_FIELD"checkSource";
 //rtp接收超时时间
 const string kTimeoutSec = RTP_PROXY_FIELD"timeoutSec";
 
 onceToken token([](){
     mINI::Instance()[kDumpDir] = "";
-    mINI::Instance()[kCheckSource] = 1;
     mINI::Instance()[kTimeoutSec] = 15;
 },nullptr);
 } //namespace RtpProxy
@@ -300,11 +309,125 @@ const string kBenchmarkMode = "benchmark_mode";
 
 }  // namespace mediakit
 
-
-void Assert_Throw(int failed, const char *exp, const char *func, const char *file, int line){
-    if(failed) {
+extern "C" {
+void Assert_Throw(int failed, const char *exp, const char *func, const char *file, int line) {
+    if (failed) {
         _StrPrinter printer;
-        printer << "Assertion failed: (" << exp << "), function " << func << ", file " << file << ", line " << line << ".";
+        printer << "Assertion failed: (" << exp << "), function " << func << ", file " << file << ", line " << line
+                << ".";
         throw std::runtime_error(printer);
     }
 }
+}
+
+#ifdef ENABLE_MEM_DEBUG
+
+static atomic<uint64_t> mem_usage(0);
+
+uint64_t getTotalMemUsage() {
+    return mem_usage.load();
+}
+
+extern "C" {
+
+#include <stdio.h>
+#define MAGIC_BYTES 0xFEFDFCFB
+#define MAGIC_BYTES_SIZE 4
+#define MEM_PREFIX_SIZE 8
+
+extern void *__real_malloc(size_t);
+extern void __real_free(void *);
+extern void *__real_realloc(void *ptr, size_t c);
+
+void *__wrap_malloc(size_t c) {
+    c += MEM_PREFIX_SIZE;
+    char *ret = (char *) __real_malloc(c);
+    if (ret) {
+        mem_usage += c;
+        *((uint32_t *) (ret)) = MAGIC_BYTES;
+        *((uint32_t *) (ret + MAGIC_BYTES_SIZE)) = c;
+        return ret + MEM_PREFIX_SIZE;
+    }
+    return nullptr;
+}
+
+void __wrap_free(void *ptr) {
+    if (!ptr) {
+        return;
+    }
+    ptr = (char *) ptr - MEM_PREFIX_SIZE;
+    uint32_t magic = *((uint32_t *) (ptr));
+    if (magic != MAGIC_BYTES) {
+        throw std::invalid_argument("attempt to free invalid memory");
+    }
+    mem_usage -= *((uint32_t *) ((char *) ptr + MAGIC_BYTES_SIZE));
+    __real_free(ptr);
+}
+
+void *__wrap_calloc(size_t __nmemb, size_t __size) {
+    auto size = __nmemb * __size;
+    auto ret = malloc(size);
+    if (ret) {
+        memset(ret, 0, size);
+    }
+    return ret;
+}
+
+void *__wrap_realloc(void *ptr, size_t c){
+    if (!ptr) {
+        return malloc(c);
+    }
+    c += MEM_PREFIX_SIZE;
+    ptr = (char *) ptr - MEM_PREFIX_SIZE;
+
+    uint32_t magic = *((uint32_t *) (ptr));
+    if (magic != MAGIC_BYTES) {
+        throw std::invalid_argument("attempt to realloc invalid memory");
+    }
+    auto old_size = *((uint32_t *) ((char *) ptr + MAGIC_BYTES_SIZE));
+    char *ret = (char *) __real_realloc(ptr, c);
+    if (ret) {
+        mem_usage += c - old_size;
+        *((uint32_t *) (ret)) = MAGIC_BYTES;
+        *((uint32_t *) (ret + MAGIC_BYTES_SIZE)) = c;
+        return ret + MEM_PREFIX_SIZE;
+    }
+    free(ptr);
+    mem_usage -= old_size;
+    return nullptr;
+}
+
+}
+
+void *operator new(std::size_t size) {
+    auto ret = malloc(size);
+    if (ret) {
+        return ret;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void *ptr) {
+    free(ptr);
+}
+
+void operator delete(void *ptr, std::size_t) {
+    free(ptr);
+}
+
+void *operator new[](std::size_t size) {
+    auto ret = malloc(size);
+    if (ret) {
+        return ret;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete[](void *ptr) {
+    free(ptr);
+}
+
+void operator delete[](void *ptr, std::size_t) {
+    free(ptr);
+}
+#endif

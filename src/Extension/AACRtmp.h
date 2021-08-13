@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -19,7 +19,7 @@ namespace mediakit{
 /**
  * aac Rtmp转adts类
  */
-class AACRtmpDecoder : public RtmpCodec , public ResourcePoolHelper<FrameImp> {
+class AACRtmpDecoder : public RtmpCodec{
 public:
     typedef std::shared_ptr<AACRtmpDecoder> Ptr;
 
@@ -37,7 +37,7 @@ public:
     }
 
 private:
-    void onGetAAC(const char *data, int len, uint32_t stamp);
+    void onGetAAC(const char *data, size_t len, uint32_t stamp);
 
 private:
     string _aac_cfg;
@@ -47,7 +47,7 @@ private:
 /**
  * aac adts转Rtmp类
  */
-class AACRtmpEncoder : public AACRtmpDecoder ,  public ResourcePoolHelper<RtmpPacket> {
+class AACRtmpEncoder : public AACRtmpDecoder{
 public:
     typedef std::shared_ptr<AACRtmpEncoder> Ptr;
 

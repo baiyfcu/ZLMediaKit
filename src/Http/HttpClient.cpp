@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -46,6 +46,7 @@ void HttpClient::sendRequest(const string &strUrl, float fTimeOutSec) {
     if (_path.empty()) {
         _path = "/";
     }
+    auto host_header = host;
     uint16_t port = atoi(FindField(host.data(), ":", NULL).data());
     if (port <= 0) {
         //默认端口
@@ -54,7 +55,7 @@ void HttpClient::sendRequest(const string &strUrl, float fTimeOutSec) {
         //服务器域名
         host = FindField(host.data(), NULL, ":");
     }
-    _header.emplace("Host", host);
+    _header.emplace("Host", host_header);
     _header.emplace("Tools", SERVER_NAME);
     _header.emplace("Connection", "keep-alive");
     _header.emplace("Accept", "*/*");
@@ -99,9 +100,6 @@ void HttpClient::onConnect(const SockException &ex) {
         return;
     }
 
-    //先假设http客户端只会接收一点点数据（只接受http头，节省内存）
-    getSock()->setReadBuffer(std::make_shared<BufferRaw>(1 * 1024));
-
     _totalBodySize = 0;
     _recvedBodySize = 0;
     HttpRequestSplitter::reset();
@@ -131,7 +129,7 @@ void HttpClient::onErr(const SockException &ex) {
     onDisconnect(ex);
 }
 
-int64_t HttpClient::onRecvHeader(const char *data, uint64_t len) {
+ssize_t HttpClient::onRecvHeader(const char *data, size_t len) {
     _parser.Parse(data);
     if(_parser.Url() == "302" || _parser.Url() == "301"){
         auto newUrl = _parser["Location"];
@@ -156,15 +154,12 @@ int64_t HttpClient::onRecvHeader(const char *data, uint64_t len) {
     }
 
     if(_parser["Transfer-Encoding"] == "chunked"){
-        //我们认为这种情况下后面应该有大量的数据过来，加大接收缓存提高性能
-        getSock()->setReadBuffer(std::make_shared<BufferRaw>(256 * 1024));
-
         //如果Transfer-Encoding字段等于chunked，则认为后续的content是不限制长度的
         _totalBodySize = -1;
-        _chunkedSplitter = std::make_shared<HttpChunkedSplitter>([this](const char *data,uint64_t len){
+        _chunkedSplitter = std::make_shared<HttpChunkedSplitter>([this](const char *data,size_t len){
             if(len > 0){
                 auto recvedBodySize = _recvedBodySize + len;
-                onResponseBody(data, len, recvedBodySize, INT64_MAX);
+                onResponseBody(data, len, recvedBodySize, SIZE_MAX);
                 _recvedBodySize = recvedBodySize;
             }else{
                 onResponseCompleted_l();
@@ -183,31 +178,24 @@ int64_t HttpClient::onRecvHeader(const char *data, uint64_t len) {
     //但是由于我们没必要等content接收完毕才回调onRecvContent(因为这样浪费内存并且要多次拷贝数据)
     //所以返回-1代表我们接下来分段接收content
     _recvedBodySize = 0;
-    if(_totalBodySize > 0){
-        //根据_totalBodySize设置接收缓存大小
-        getSock()->setReadBuffer(std::make_shared<BufferRaw>(MIN(_totalBodySize + 1,256 * 1024)));
-    }else{
-        getSock()->setReadBuffer(std::make_shared<BufferRaw>(256 * 1024));
-    }
-
     return -1;
 }
 
-void HttpClient::onRecvContent(const char *data, uint64_t len) {
+void HttpClient::onRecvContent(const char *data, size_t len) {
     if(_chunkedSplitter){
         _chunkedSplitter->input(data,len);
         return;
     }
     auto recvedBodySize = _recvedBodySize + len;
     if(_totalBodySize < 0){
-        //不限长度的content,最大支持INT64_MAX个字节
-        onResponseBody(data, len, recvedBodySize, INT64_MAX);
+        //不限长度的content,最大支持SIZE_MAX个字节
+        onResponseBody(data, len, recvedBodySize, SIZE_MAX);
         _recvedBodySize = recvedBodySize;
         return;
     }
 
     //固定长度的content
-    if ( recvedBodySize < _totalBodySize ) {
+    if (recvedBodySize < (size_t)_totalBodySize ) {
         //content还未接收完毕
         onResponseBody(data, len, recvedBodySize, _totalBodySize);
         _recvedBodySize = recvedBodySize;
@@ -216,7 +204,7 @@ void HttpClient::onRecvContent(const char *data, uint64_t len) {
 
     //content接收完毕
     onResponseBody(data, _totalBodySize - _recvedBodySize, _totalBodySize, _totalBodySize);
-    bool biggerThanExpected = recvedBodySize > _totalBodySize;
+    bool biggerThanExpected = recvedBodySize > (size_t)_totalBodySize;
     onResponseCompleted_l();
     if(biggerThanExpected) {
         //声明的content数据比真实的小，那么我们只截取前面部分的并断开链接

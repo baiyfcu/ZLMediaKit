@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -11,6 +11,8 @@
 #include "mk_player.h"
 #include "Util/logger.h"
 #include "Player/MediaPlayer.h"
+#include "Extension/H264.h"
+
 using namespace std;
 using namespace toolkit;
 using namespace mediakit;
@@ -167,6 +169,16 @@ API_EXPORT void API_CALL mk_player_pause(mk_player ctx, int pause) {
     });
 }
 
+API_EXPORT void API_CALL mk_player_speed(mk_player ctx, float speed) {
+    assert(ctx);
+    MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *) ctx);
+    auto player = obj.getPlayer();
+    player->getPoller()->async([speed, player]() {
+        //切换线程后再操作
+        player->speed(speed);
+    });
+}
+
 API_EXPORT void API_CALL mk_player_seekto(mk_player ctx, float progress) {
     assert(ctx);
     MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *)ctx);
@@ -177,14 +189,14 @@ API_EXPORT void API_CALL mk_player_seekto(mk_player ctx, float progress) {
     });
 }
 
-
-API_EXPORT void API_CALL mk_player_seektoByPos(mk_player ctx, int seekPos)
-{
-    MediaPlayer::Ptr& player = *((MediaPlayer::Ptr*)ctx);
-    player->getPoller()->async([seekPos, player]() {
+API_EXPORT void API_CALL mk_player_seekto_pos(mk_player ctx, int seek_pos) {
+    assert(ctx);
+    MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *) ctx);
+    auto player = obj.getPlayer();
+    player->getPoller()->async([seek_pos, player]() {
         //切换线程后再操作
-        player->seekTo((uint32_t)seekPos);
-        });
+        player->seekTo((uint32_t) seek_pos);
+    });
 }
 
 static void mk_player_set_on_event(mk_player ctx, on_mk_play_event cb, void *user_data, int type) {
@@ -207,11 +219,33 @@ API_EXPORT void API_CALL mk_player_set_on_data(mk_player ctx, on_mk_play_data cb
     obj.setOnData(cb,user_data);
 }
 
-API_EXPORT int API_CALL mk_player_video_codecId(mk_player ctx){
+API_EXPORT int API_CALL mk_player_video_codec_id(mk_player ctx){
     assert(ctx);
     MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *)ctx);
     auto track = dynamic_pointer_cast<VideoTrack>(obj->getTrack(TrackVideo));
     return track ? track->getCodecId() : CodecInvalid;
+}
+
+API_EXPORT int API_CALL mk_player_video_codec_id_vendor_head(mk_player ctx, char *vendor, char *head, int *head_len) {
+    assert(ctx);
+    MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *) ctx);
+    auto track = dynamic_pointer_cast<VideoTrack>(obj->getTrack(TrackVideo));
+    int codecId = track ? track->getCodecId() : CodecInvalid;
+    if (codecId == CodecH264) {
+        auto h264Track = dynamic_pointer_cast<H264Track>(obj->getTrack(TrackVideo));
+        auto pps = h264Track->getPps();
+        auto ppsLen = pps.size();
+        if (ppsLen >= (4 + 16)) {
+            std::string temVendor = std::string(pps.c_str() + 4, 16);
+            memcpy(vendor, temVendor.c_str(), temVendor.length());
+            if (ppsLen > (4 + 16)) {
+                std::string temHead = std::string(pps.c_str() + 20, ppsLen - 20);
+                memcpy(head, temHead.c_str(), temHead.length());
+                *head_len = temHead.length();
+            }
+        }
+    }
+    return codecId;
 }
 
 API_EXPORT int API_CALL mk_player_video_width(mk_player ctx) {
@@ -228,14 +262,14 @@ API_EXPORT int API_CALL mk_player_video_height(mk_player ctx) {
     return track ? track->getVideoHeight() : 0;
 }
 
-API_EXPORT int API_CALL mk_player_video_fps(mk_player ctx) {
+API_EXPORT float API_CALL mk_player_video_fps(mk_player ctx) {
     assert(ctx);
     MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *)ctx);
     auto track = dynamic_pointer_cast<VideoTrack>(obj->getTrack(TrackVideo));
     return track ? track->getVideoFps() : 0;
 }
 
-API_EXPORT int API_CALL mk_player_audio_codecId(mk_player ctx){
+API_EXPORT int API_CALL mk_player_audio_codec_id(mk_player ctx){
     assert(ctx);
     MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *)ctx);
     auto track = dynamic_pointer_cast<AudioTrack>(obj->getTrack(TrackAudio));
@@ -275,12 +309,10 @@ API_EXPORT float API_CALL mk_player_progress(mk_player ctx) {
     return obj->getProgress();
 }
 
-
-API_EXPORT int API_CALL mk_player_progress_pos(mk_player ctx)
-{
+API_EXPORT int API_CALL mk_player_progress_pos(mk_player ctx) {
     assert(ctx);
-    MediaPlayer::Ptr& player = *((MediaPlayer::Ptr*)ctx);
-    return player->getProgressPos();
+    MediaPlayerForC &obj = **((MediaPlayerForC::Ptr *) ctx);
+    return obj->getProgressPos();
 }
 
 API_EXPORT float API_CALL mk_player_loss_rate(mk_player ctx, int track_type) {

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -20,28 +20,39 @@ using namespace toolkit;
 
 namespace mediakit{
 
-class RtpSession : public TcpSession , public RtpSplitter , public MediaSourceEvent{
+class RtpSession : public Session , public RtpSplitter , public MediaSourceEvent{
 public:
     static const string kStreamID;
+    static const string kIsUDP;
+
     RtpSession(const Socket::Ptr &sock);
     ~RtpSession() override;
     void onRecv(const Buffer::Ptr &) override;
     void onError(const SockException &err) override;
     void onManager() override;
-    void attachServer(const TcpServer &server) override;
+    void attachServer(const Server &server) override;
 
 protected:
     // 通知其停止推流
     bool close(MediaSource &sender,bool force) override;
     // 观看总人数
     int totalReaderCount(MediaSource &sender) override;
-    void onRtpPacket(const char *data,uint64_t len) override;
+    // 收到rtp回调
+    void onRtpPacket(const char *data, size_t len) override;
+
+    const char *onSearchPacketTail(const char *data, size_t len) override;
 
 private:
-    RtpProcess::Ptr _process;
+    bool _is_udp = false;
+    bool _search_rtp = false;
+    bool _search_rtp_finished = false;
+    uint32_t _ssrc = 0;
     Ticker _ticker;
-    struct sockaddr addr;
     string _stream_id;
+    struct sockaddr _addr;
+    RtpProcess::Ptr _process;
+    std::shared_ptr<ObjectStatistic<TcpSession> > _statistic_tcp;
+    std::shared_ptr<ObjectStatistic<UdpSession> > _statistic_udp;
 };
 
 }//namespace mediakit

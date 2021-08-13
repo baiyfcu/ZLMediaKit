@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -23,6 +23,7 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
                          uint32_t bufSize,
                          float seg_duration,
                          uint32_t seg_number) : HlsMaker(seg_duration, seg_number) {
+    _poller = EventPollerPool::Instance().getPoller();
     _path_prefix = m3u8_file.substr(0, m3u8_file.rfind('/'));
     _path_hls = m3u8_file;
     _params = params;
@@ -35,22 +36,34 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
 }
 
 HlsMakerImp::~HlsMakerImp() {
-    clearCache();
+    clearCache(false);
 }
 
-void HlsMakerImp::clearCache() {
+void HlsMakerImp::clearCache(bool immediately) {
     //录制完了
     flushLastSegment(true);
-    if (isLive()) {
-        //hls直播才删除文件
-        clear();
-        _file = nullptr;
-        _segment_file_paths.clear();
+    if (!isLive()) {
+        return;
+    }
+
+    clear();
+    _file = nullptr;
+    _segment_file_paths.clear();
+
+    //hls直播才删除文件
+    GET_CONFIG(uint32_t, delay, Hls::kDeleteDelaySec);
+    if (!delay || immediately) {
         File::delete_file(_path_prefix.data());
+    } else {
+        auto path_prefix = _path_prefix;
+        _poller->doDelayTask(delay * 1000, [path_prefix]() {
+            File::delete_file(path_prefix.data());
+            return 0;
+        });
     }
 }
 
-string HlsMakerImp::onOpenSegment(int index) {
+string HlsMakerImp::onOpenSegment(uint64_t index) {
     string segment_name, segment_path;
     {
         auto strDate = getTimeStr("%Y-%m-%d");
@@ -79,7 +92,7 @@ string HlsMakerImp::onOpenSegment(int index) {
     return segment_name + "?" + _params;
 }
 
-void HlsMakerImp::onDelSegment(int index) {
+void HlsMakerImp::onDelSegment(uint64_t index) {
     auto it = _segment_file_paths.find(index);
     if (it == _segment_file_paths.end()) {
         return;
@@ -88,13 +101,16 @@ void HlsMakerImp::onDelSegment(int index) {
     _segment_file_paths.erase(it);
 }
 
-void HlsMakerImp::onWriteSegment(const char *data, int len) {
+void HlsMakerImp::onWriteSegment(const char *data, size_t len) {
     if (_file) {
         fwrite(data, len, 1, _file.get());
     }
+    if (_media_src) {
+        _media_src->onSegmentSize(len);
+    }
 }
 
-void HlsMakerImp::onWriteHls(const char *data, int len) {
+void HlsMakerImp::onWriteHls(const char *data, size_t len) {
     auto hls = makeFile(_path_hls);
     if (hls) {
         fwrite(data, len, 1, hls.get());
@@ -113,7 +129,7 @@ void HlsMakerImp::onFlushLastSegment(uint32_t duration_ms) {
     if (broadcastRecordTs) {
         //关闭ts文件以便获取正确的文件大小
         _file = nullptr;
-        _info.time_len = duration_ms / 1000.0;
+        _info.time_len = duration_ms / 1000.0f;
         struct stat fileData;
         stat(_info.file_path.data(), &fileData);
         _info.file_size = fileData.st_size;

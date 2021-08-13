@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -51,11 +51,6 @@ string System::execute(const string &cmd) {
 }
 
 #if !defined(ANDROID) && !defined(_WIN32)
-static string addr2line(const string &address) {
-    string cmd = StrPrinter << "addr2line -C -f -e " << exePath() << " " << address;
-    return System::execute(cmd);
-}
-
 static void sig_crash(int sig) {
     signal(sig, SIG_DFL);
     void *array[MAX_STACK_FRAMES];
@@ -68,6 +63,10 @@ static void sig_crash(int sig) {
         std::string symbol(strings[i]);
         ref.emplace_back(symbol);
 #if defined(__linux) || defined(__linux__)
+        static auto addr2line = [](const string &address) {
+            string cmd = StrPrinter << "addr2line -C -f -e " << exePath() << " " << address;
+            return System::execute(cmd);
+        };
         size_t pos1 = symbol.find_first_of("[");
         size_t pos2 = symbol.find_last_of("]");
         std::string address = symbol.substr(pos1 + 1, pos2 - pos1 - 1);
@@ -149,7 +148,7 @@ void System::systemSetup(){
         ss << "## exe:       " << exeName() << endl;
         ss << "## signal:    " << sig << endl;
         ss << "## stack:     " << endl;
-        for (int i = 0; i < stack.size(); ++i) {
+        for (size_t i = 0; i < stack.size(); ++i) {
             ss << "[" << i << "]: ";
             for (auto &str : stack[i]){
                 ss << str << endl;

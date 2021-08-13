@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -34,15 +34,15 @@ public:
 
     /**
      * 设置play结果回调，只触发一次；在play执行之前有效
-     * @param cb
+     * @param cb 回调对象
      */
     void setPlayCallbackOnce(const function<void(const SockException &ex)> &cb);
 
     /**
      * 设置主动关闭回调
-     * @param cb
+     * @param cb 回调对象
      */
-    void setOnClose(const function<void()> &cb);
+    void setOnClose(const function<void(const SockException &ex)> &cb);
 
     /**
      * 开始拉流播放
@@ -59,8 +59,13 @@ private:
     //MediaSourceEvent override
     bool close(MediaSource &sender,bool force) override;
     int totalReaderCount(MediaSource &sender) override;
+    MediaOriginType getOriginType(MediaSource &sender) const override;
+    string getOriginUrl(MediaSource &sender) const override;
+    std::shared_ptr<SockInfo> getOriginSock(MediaSource &sender) const override;
+
     void rePlay(const string &strUrl,int iFailedCnt);
     void onPlaySuccess();
+    void setDirectProxy();
 
 private:
     bool _enable_hls;
@@ -69,8 +74,9 @@ private:
     string _vhost;
     string _app;
     string _stream_id;
+    string _pull_url;
     Timer::Ptr _timer;
-    function<void()> _on_close;
+    function<void(const SockException &ex)> _on_close;
     function<void(const SockException &ex)> _on_play;
     MultiMediaSourceMuxer::Ptr _muxer;
 };

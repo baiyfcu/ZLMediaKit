@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -84,7 +84,7 @@ public:
      */
     virtual uint32_t getSsrc(TrackType trackType) {
         assert(trackType >= 0 && trackType < TrackMax);
-        auto track = _tracks[trackType];
+        auto &track = _tracks[trackType];
         if (!track) {
             return 0;
         }
@@ -96,7 +96,7 @@ public:
      */
     virtual uint16_t getSeqence(TrackType trackType) {
         assert(trackType >= 0 && trackType < TrackMax);
-        auto track = _tracks[trackType];
+        auto &track = _tracks[trackType];
         if (!track) {
             return 0;
         }
@@ -110,7 +110,7 @@ public:
         assert(trackType >= TrackInvalid && trackType < TrackMax);
         if (trackType != TrackInvalid) {
             //获取某track的时间戳
-            auto track = _tracks[trackType];
+            auto &track = _tracks[trackType];
             if (track) {
                 return track->_time_stamp;
             }
@@ -141,11 +141,11 @@ public:
      * 设置sdp
      */
     virtual void setSdp(const string &sdp) {
-        _sdp = sdp;
         SdpParser sdp_parser(sdp);
         _tracks[TrackVideo] = sdp_parser.getTrack(TrackVideo);
         _tracks[TrackAudio] = sdp_parser.getTrack(TrackAudio);
         _have_video = (bool) _tracks[TrackVideo];
+        _sdp = sdp_parser.toString();
         if (_ring) {
             regist();
         }
@@ -156,13 +156,15 @@ public:
      * @param rtp rtp包
      * @param keyPos 该包是否为关键帧的第一个包
      */
-    void onWrite(const RtpPacket::Ptr &rtp, bool keyPos) override {
+    void onWrite(RtpPacket::Ptr rtp, bool keyPos) override {
+        _speed[rtp->type] += rtp->size();
         assert(rtp->type >= 0 && rtp->type < TrackMax);
-        auto track = _tracks[rtp->type];
+        auto &track = _tracks[rtp->type];
+        auto stamp = rtp->getStampMS();
         if (track) {
-            track->_seq = rtp->sequence;
-            track->_time_stamp = rtp->timeStamp;
-            track->_ssrc = rtp->ssrc;
+            track->_seq = rtp->getSeq();
+            track->_time_stamp = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+            track->_ssrc = rtp->getSSRC();
         }
         if (!_ring) {
             weak_ptr<RtspMediaSource> weakSelf = dynamic_pointer_cast<RtspMediaSource>(shared_from_this());
@@ -181,7 +183,8 @@ public:
                 regist();
             }
         }
-        PacketCache<RtpPacket>::inputPacket(rtp->type == TrackVideo, rtp, keyPos);
+        bool is_video = rtp->type == TrackVideo;
+        PacketCache<RtpPacket>::inputPacket(stamp, is_video, std::move(rtp), keyPos);
     }
 
     void clearCache() override{
@@ -195,9 +198,9 @@ private:
      * @param rtp_list rtp包列表
      * @param key_pos 是否包含关键帧
      */
-    void onFlush(std::shared_ptr<List<RtpPacket::Ptr> > &rtp_list, bool key_pos) override {
+    void onFlush(std::shared_ptr<List<RtpPacket::Ptr> > rtp_list, bool key_pos) override {
         //如果不存在视频，那么就没有存在GOP缓存的意义，所以is_key一直为true确保一直清空GOP缓存
-        _ring->write(rtp_list, _have_video ? key_pos : true);
+        _ring->write(std::move(rtp_list), _have_video ? key_pos : true);
     }
 
 private:

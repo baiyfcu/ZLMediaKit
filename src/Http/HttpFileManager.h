@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -21,8 +21,8 @@ namespace mediakit {
 
 class HttpResponseInvokerImp{
 public:
-    typedef std::function<void(const string &codeOut, const StrCaseMap &headerOut, const HttpBody::Ptr &body)> HttpResponseInvokerLambda0;
-    typedef std::function<void(const string &codeOut, const StrCaseMap &headerOut, const string &body)> HttpResponseInvokerLambda1;
+    typedef std::function<void(int code, const StrCaseMap &headerOut, const HttpBody::Ptr &body)> HttpResponseInvokerLambda0;
+    typedef std::function<void(int code, const StrCaseMap &headerOut, const string &body)> HttpResponseInvokerLambda1;
 
     HttpResponseInvokerImp(){}
     ~HttpResponseInvokerImp(){}
@@ -31,8 +31,10 @@ public:
     HttpResponseInvokerImp(const HttpResponseInvokerLambda0 &lambda);
     HttpResponseInvokerImp(const HttpResponseInvokerLambda1 &lambda);
 
-    void operator()(const string &codeOut, const StrCaseMap &headerOut, const HttpBody::Ptr &body) const;
-    void operator()(const string &codeOut, const StrCaseMap &headerOut, const string &body) const;
+    void operator()(int code, const StrCaseMap &headerOut, const Buffer::Ptr &body) const;
+    void operator()(int code, const StrCaseMap &headerOut, const HttpBody::Ptr &body) const;
+    void operator()(int code, const StrCaseMap &headerOut, const string &body) const;
+
     void responseFile(const StrCaseMap &requestHeader,const StrCaseMap &responseHeader,const string &filePath) const;
     operator bool();
 private:
@@ -44,7 +46,7 @@ private:
  */
 class HttpFileManager  {
 public:
-    typedef function<void(const string &status_code, const string &content_type, const StrCaseMap &responseHeader, const HttpBody::Ptr &body)> invoker;
+    typedef function<void(int code, const string &content_type, const StrCaseMap &responseHeader, const HttpBody::Ptr &body)> invoker;
 
     /**
      * 访问文件或文件夹

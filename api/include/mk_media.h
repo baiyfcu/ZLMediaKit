@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -42,22 +42,22 @@ API_EXPORT void API_CALL mk_media_release(mk_media ctx);
 /**
  * 添加视频轨道
  * @param ctx 对象指针
- * @param track_id  0:CodecH264/1:CodecH265
+ * @param codec_id  0:CodecH264/1:CodecH265
  * @param width 视频宽度
  * @param height 视频高度
  * @param fps 视频fps
  */
-API_EXPORT void API_CALL mk_media_init_video(mk_media ctx, int track_id, int width, int height, int fps);
+API_EXPORT void API_CALL mk_media_init_video(mk_media ctx, int codec_id, int width, int height, float fps);
 
 /**
  * 添加音频轨道
  * @param ctx 对象指针
- * @param track_id  2:CodecAAC/3:CodecG711A/4:CodecG711U/5:OPUS
+ * @param codec_id  2:CodecAAC/3:CodecG711A/4:CodecG711U/5:OPUS
  * @param channel 通道数
  * @param sample_bit 采样位数，只支持16
  * @param sample_rate 采样率
  */
-API_EXPORT void API_CALL mk_media_init_audio(mk_media ctx, int track_id, int sample_rate, int channels, int sample_bit);
+API_EXPORT void API_CALL mk_media_init_audio(mk_media ctx, int codec_id, int sample_rate, int channels, int sample_bit);
 
 /**
  * 初始化h264/h265/aac完毕后调用此函数，
@@ -143,12 +143,42 @@ API_EXPORT void API_CALL mk_media_set_on_close(mk_media ctx, on_mk_media_close c
 typedef int(API_CALL *on_mk_media_seek)(void *user_data,uint32_t stamp_ms);
 
 /**
+ * 收到客户端的pause或resume请求时触发该回调
+ * @param user_data 用户数据指针,通过mk_media_set_on_pause设置
+ * @param pause 1:暂停, 0: 恢复
+ */
+typedef int(API_CALL* on_mk_media_pause)(void* user_data, int pause);
+
+/**
+ * 收到客户端的speed请求时触发该回调
+ * @param user_data 用户数据指针,通过mk_media_set_on_pause设置
+ * @param speed 0.5 1.0 2.0
+ */
+typedef int(API_CALL* on_mk_media_speed)(void* user_data, float speed);
+
+/**
  * 监听播放器seek请求事件
  * @param ctx 对象指针
  * @param cb 回调指针
  * @param user_data 用户数据指针
  */
 API_EXPORT void API_CALL mk_media_set_on_seek(mk_media ctx, on_mk_media_seek cb, void *user_data);
+
+/**
+ * 监听播放器pause请求事件
+ * @param ctx 对象指针
+ * @param cb 回调指针
+ * @param user_data 用户数据指针
+ */
+API_EXPORT void API_CALL mk_media_set_on_pause(mk_media ctx, on_mk_media_pause cb, void* user_data);
+
+/**
+ * 监听播放器pause请求事件
+ * @param ctx 对象指针
+ * @param cb 回调指针
+ * @param user_data 用户数据指针
+ */
+API_EXPORT void API_CALL mk_media_set_on_speed(mk_media ctx, on_mk_media_speed cb, void* user_data);
 
 /**
  * 获取总的观看人数
@@ -172,6 +202,31 @@ typedef void(API_CALL *on_mk_media_source_regist)(void *user_data, mk_media_sour
  * @param user_data 用户数据指针
  */
 API_EXPORT void API_CALL mk_media_set_on_regist(mk_media ctx, on_mk_media_source_regist cb, void *user_data);
+
+/**
+ * rtp推流成功与否的回调(第一次成功后，后面将一直重试)
+ */
+typedef on_mk_media_source_send_rtp_result on_mk_media_send_rtp_result;
+
+/**
+ * 开始发送一路ps-rtp流(通过ssrc区分多路)
+ * @param ctx 对象指针
+ * @param dst_url 目标ip或域名
+ * @param dst_port 目标端口
+ * @param ssrc rtp的ssrc，10进制的字符串打印
+ * @param is_udp 是否为udp
+ * @param cb 启动成功或失败回调
+ * @param user_data 回调用户指针
+ */
+API_EXPORT void API_CALL mk_media_start_send_rtp(mk_media ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int is_udp, on_mk_media_send_rtp_result cb, void *user_data);
+
+/**
+ * 停止某路或全部ps-rtp发送
+ * @param ctx 对象指针
+ * @param ssrc rtp的ssrc，10进制的字符串打印，如果为null或空字符串，则停止所有rtp推流
+ * @return 1成功，0失败
+ */
+API_EXPORT int API_CALL mk_media_stop_send_rtp(mk_media ctx, const char *ssrc);
 
 #ifdef __cplusplus
 }

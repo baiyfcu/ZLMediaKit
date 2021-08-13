@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -24,7 +24,7 @@ namespace mediakit{
  * 将 h264 over rtsp-rtp 解复用出 h264-Frame
  * rfc3984
  */
-class H264RtpDecoder : public RtpCodec , public ResourcePoolHelper<H264Frame> {
+class H264RtpDecoder : public RtpCodec{
 public:
     typedef std::shared_ptr<H264RtpDecoder> Ptr;
 
@@ -41,14 +41,22 @@ public:
     CodecId getCodecId() const override{
         return CodecH264;
     }
+
 private:
+    bool singleFrame(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp);
+    bool unpackStapA(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp);
+    bool mergeFu(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp, uint16_t seq);
+
     bool decodeRtp(const RtpPacket::Ptr &rtp);
-    void onGetH264(const H264Frame::Ptr &frame);
     H264Frame::Ptr obtainFrame();
+    void outputFrame(const RtpPacket::Ptr &rtp, const H264Frame::Ptr &frame);
+
 private:
-    H264Frame::Ptr _h264frame;
+    bool _gop_dropped = false;
+    bool _fu_dropped = true;
+    uint16_t _last_seq = 0;
+    H264Frame::Ptr _frame;
     DtsGenerator _dts_generator;
-    int _lastSeq = 0;
 };
 
 /**
@@ -59,17 +67,17 @@ public:
     typedef std::shared_ptr<H264RtpEncoder> Ptr;
 
     /**
-     * @param ui32Ssrc ssrc
-     * @param ui32MtuSize mtu大小
-     * @param ui32SampleRate 采样率，强制为90000
-     * @param ui8PayloadType pt类型
-     * @param ui8Interleaved rtsp interleaved
+     * @param ssrc ssrc
+     * @param mtu mtu大小
+     * @param sample_rate 采样率，强制为90000
+     * @param pt pt类型
+     * @param interleaved rtsp interleaved
      */
-    H264RtpEncoder(uint32_t ui32Ssrc,
-                   uint32_t ui32MtuSize = 1400,
-                   uint32_t ui32SampleRate = 90000,
-                   uint8_t ui8PayloadType = 96,
-                   uint8_t ui8Interleaved = TrackVideo * 2);
+    H264RtpEncoder(uint32_t ssrc,
+                   uint32_t mtu = 1400,
+                   uint32_t sample_rate = 90000,
+                   uint8_t pt = 96,
+                   uint8_t interleaved = TrackVideo * 2);
     ~H264RtpEncoder() {}
 
     /**
@@ -77,8 +85,18 @@ public:
      * @param frame 帧数据，必须
      */
     void inputFrame(const Frame::Ptr &frame) override;
+
 private:
-    void makeH264Rtp(const void *pData, unsigned int uiLen, bool bMark,  bool gop_pos, uint32_t uiStamp);
+    void insertConfigFrame(uint32_t pts);
+    void inputFrame_l(const Frame::Ptr &frame, bool is_mark);
+    void packRtp(const char *data, size_t len, uint32_t pts, bool is_mark, bool gop_pos);
+    void packRtpFu(const char *data, size_t len, uint32_t pts, bool is_mark, bool gop_pos);
+    void packRtpStapA(const char *data, size_t len, uint32_t pts, bool is_mark, bool gop_pos);
+
+private:
+    Frame::Ptr _sps;
+    Frame::Ptr _pps;
+    Frame::Ptr _last_frame;
 };
 
 }//namespace mediakit{

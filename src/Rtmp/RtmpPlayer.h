@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -38,16 +38,17 @@ public:
 
     void play(const string &strUrl) override;
     void pause(bool bPause) override;
+    void speed(float speed) override;
     void teardown() override;
 
 protected:
     virtual bool onCheckMeta(const AMFValue &val) = 0;
-    virtual void onMediaData(const RtmpPacket::Ptr &chunk_data) = 0;
+    virtual void onMediaData(RtmpPacket::Ptr chunk_data) = 0;
     uint32_t getProgressMilliSecond() const;
     void seekToMilliSecond(uint32_t ms);
 
 protected:
-    void onMediaData_l(const RtmpPacket::Ptr &chunk_data);
+    void onMediaData_l(RtmpPacket::Ptr chunk_data);
     //在获取config帧后才触发onPlayResult_l(而不是收到play命令回复)，所以此时所有track都初始化完毕了
     void onPlayResult_l(const SockException &ex, bool handshake_done);
 
@@ -56,10 +57,10 @@ protected:
     void onConnect(const SockException &err) override;
     void onErr(const SockException &ex) override;
     //from RtmpProtocol
-    void onRtmpChunk(RtmpPacket &chunk_data) override;
+    void onRtmpChunk(RtmpPacket::Ptr chunk_data) override;
     void onStreamDry(uint32_t stream_index) override;
-    void onSendRawData(const Buffer::Ptr &buffer) override {
-        send(buffer);
+    void onSendRawData(Buffer::Ptr buffer) override {
+        send(std::move(buffer));
     }
 
     template<typename FUNC>

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -16,6 +16,13 @@ using namespace mediakit;
 API_EXPORT mk_pusher API_CALL mk_pusher_create(const char *schema,const char *vhost,const char *app, const char *stream){
     assert(schema && vhost && app && schema);
     MediaPusher::Ptr *obj = new MediaPusher::Ptr(new MediaPusher(schema,vhost,app,stream));
+    return obj;
+}
+
+API_EXPORT mk_pusher API_CALL mk_pusher_create_src(mk_media_source ctx){
+    assert(ctx);
+    MediaSource *src = (MediaSource *)ctx;
+    MediaPusher::Ptr *obj = new MediaPusher::Ptr(new MediaPusher(src->shared_from_this()));
     return obj;
 }
 

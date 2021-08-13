@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -30,19 +30,8 @@ public:
     uint32_t time_stamp = 0;
 };
 
-//FMP4直播合并写策略类
-class FMP4FlushPolicy : public FlushPolicy{
-public:
-    FMP4FlushPolicy() = default;
-    ~FMP4FlushPolicy() = default;
-
-    uint32_t getStamp(const FMP4Packet::Ptr &packet) {
-        return packet->time_stamp;
-    }
-};
-
 //FMP4直播源
-class FMP4MediaSource : public MediaSource, public RingDelegate<FMP4Packet::Ptr>, public PacketCache<FMP4Packet, FMP4FlushPolicy>{
+class FMP4MediaSource : public MediaSource, public RingDelegate<FMP4Packet::Ptr>, public PacketCache<FMP4Packet>{
 public:
     using Ptr = std::shared_ptr<FMP4MediaSource>;
     using RingDataType = std::shared_ptr<List<FMP4Packet::Ptr> >;
@@ -92,21 +81,23 @@ public:
      * @param packet FMP4包
      * @param key 是否为关键帧第一个包
      */
-    void onWrite(const FMP4Packet::Ptr &packet, bool key) override {
+    void onWrite(FMP4Packet::Ptr packet, bool key) override {
         if (!_ring) {
             createRing();
         }
         if (key) {
             _have_video = true;
         }
-        PacketCache<FMP4Packet, FMP4FlushPolicy>::inputPacket(true, packet, key);
+        _speed[TrackVideo] += packet->size();
+        auto stamp = packet->time_stamp;
+        PacketCache<FMP4Packet>::inputPacket(stamp, true, std::move(packet), key);
     }
 
     /**
      * 情况GOP缓存
      */
     void clearCache() override {
-        PacketCache<FMP4Packet, FMP4FlushPolicy>::clearCache();
+        PacketCache<FMP4Packet>::clearCache();
         _ring->clearCache();
     }
 
@@ -131,9 +122,9 @@ private:
      * @param packet_list 合并写缓存列队
      * @param key_pos 是否包含关键帧
      */
-    void onFlush(std::shared_ptr<List<FMP4Packet::Ptr> > &packet_list, bool key_pos) override {
+    void onFlush(std::shared_ptr<List<FMP4Packet::Ptr> > packet_list, bool key_pos) override {
         //如果不存在视频，那么就没有存在GOP缓存的意义，所以确保一直清空GOP缓存
-        _ring->write(packet_list, _have_video ? key_pos : true);
+        _ring->write(std::move(packet_list), _have_video ? key_pos : true);
     }
 
 private:

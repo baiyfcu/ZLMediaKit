@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -43,9 +43,14 @@ public:
 
     void seekTo(float fProgress) override {
         fProgress = MAX(float(0), MIN(fProgress, float(1.0)));
-        seekToMilliSecond(fProgress * getDuration() * 1000);
+        seekToMilliSecond((uint32_t)(fProgress * getDuration() * 1000));
     }
 
+    void seekTo(uint32_t seekPos) override {
+        uint32_t pos = MAX(float(0), MIN(seekPos, getDuration())) * 1000;
+        seekToMilliSecond(pos);
+    }
+    
     void play(const string &strUrl) override {
         PlayerImp<RtmpPlayer, RtmpDemuxer>::play(strUrl);
     }
@@ -63,19 +68,20 @@ private:
         return true;
     }
 
-    void onMediaData(const RtmpPacket::Ptr &chunkData) override {
-        if (_rtmp_src) {
-            if (!_set_meta_data && !chunkData->isCfgFrame()) {
-                _set_meta_data = true;
-                _rtmp_src->setMetaData(TitleMeta().getMetadata());
-            }
-            _rtmp_src->onWrite(chunkData);
-        }
+    void onMediaData(RtmpPacket::Ptr chunkData) override {
         if (!_delegate) {
             //这个流没有metadata
             _delegate.reset(new RtmpDemuxer());
         }
         _delegate->inputRtmp(chunkData);
+
+        if (_rtmp_src) {
+            if (!_set_meta_data && !chunkData->isCfgFrame()) {
+                _set_meta_data = true;
+                _rtmp_src->setMetaData(TitleMeta().getMetadata());
+            }
+            _rtmp_src->onWrite(std::move(chunkData));
+        }
     }
 
 private:

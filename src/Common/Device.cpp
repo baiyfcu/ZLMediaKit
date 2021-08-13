@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -16,6 +16,13 @@
 #include "Extension/G711.h"
 #include "Extension/H264.h"
 #include "Extension/H265.h"
+#ifdef ENABLE_FAAC
+#include "Codec/AACEncoder.h"
+#endif //ENABLE_FAAC
+
+#ifdef ENABLE_X264
+#include "Codec/H264Encoder.h"
+#endif //ENABLE_X264
 using namespace toolkit;
 
 namespace mediakit {
@@ -26,8 +33,8 @@ DevChannel::DevChannel(const string &vhost, const string &app, const string &str
 
 DevChannel::~DevChannel() {}
 
-#ifdef ENABLE_X264
 void DevChannel::inputYUV(char* apcYuv[3], int aiYuvLen[3], uint32_t uiStamp) {
+#ifdef ENABLE_X264
     //TimeTicker1(50);
     if (!_pH264Enc) {
         _pH264Enc.reset(new H264Encoder());
@@ -43,11 +50,13 @@ void DevChannel::inputYUV(char* apcYuv[3], int aiYuvLen[3], uint32_t uiStamp) {
             inputH264((char *) pOut[i].pucData, pOut[i].iLength, uiStamp);
         }
     }
-}
+#else
+    WarnL << "h264编码未启用,该方法无效,编译时请打开ENABLE_X264选项";
 #endif //ENABLE_X264
+}
 
-#ifdef ENABLE_FAAC
 void DevChannel::inputPCM(char* pcData, int iDataLen, uint32_t uiStamp) {
+#ifdef ENABLE_FAAC
     if (!_pAacEnc) {
         _pAacEnc.reset(new AACEncoder());
         if (!_pAacEnc->init(_audio->iSampleRate, _audio->iChannel, _audio->iSampleBit)) {
@@ -62,8 +71,10 @@ void DevChannel::inputPCM(char* pcData, int iDataLen, uint32_t uiStamp) {
             inputAAC((char *) pucOut + 7, iRet - 7, uiStamp, (char *)pucOut);
         }
     }
-}
+#else
+    WarnL << "aac编码未启用,该方法无效,编译时请打开ENABLE_FAAC选项";
 #endif //ENABLE_FAAC
+}
 
 void DevChannel::inputH264(const char *data, int len, uint32_t dts, uint32_t pts) {
     if(dts == 0){
@@ -76,7 +87,7 @@ void DevChannel::inputH264(const char *data, int len, uint32_t dts, uint32_t pts
     //由于rtmp/hls/mp4需要缓存时间戳相同的帧，
     //所以使用FrameNoCacheAble类型的帧反而会在转换成FrameCacheAble时多次内存拷贝
     //在此处只拷贝一次，性能开销更低
-    H264Frame::Ptr frame = std::make_shared<H264Frame>();
+    auto frame = FrameImp::create<H264Frame>();
     frame->_dts = dts;
     frame->_pts = pts;
     frame->_buffer.assign(data, len);
@@ -95,7 +106,7 @@ void DevChannel::inputH265(const char *data, int len, uint32_t dts, uint32_t pts
     //由于rtmp/hls/mp4需要缓存时间戳相同的帧，
     //所以使用FrameNoCacheAble类型的帧反而会在转换成FrameCacheAble时多次内存拷贝
     //在此处只拷贝一次，性能开销更低
-    H265Frame::Ptr frame = std::make_shared<H265Frame>();
+    auto frame = FrameImp::create<H265Frame>();
     frame->_dts = dts;
     frame->_pts = pts;
     frame->_buffer.assign(data, len);
@@ -164,6 +175,10 @@ void DevChannel::initAudio(const AudioInfo &info) {
         case CodecOpus : addTrack(std::make_shared<OpusTrack>()); break;
         default: WarnL << "不支持该类型的音频编码类型:" << info.codecId; break;
     }
+}
+
+MediaOriginType DevChannel::getOriginType(MediaSource &sender) const {
+    return MediaOriginType::device_chn;
 }
 
 } /* namespace mediakit */

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -101,6 +101,9 @@ public:
      */
     virtual void setMetaData(const AMFValue &metadata) {
         _metadata = metadata;
+        _metadata.set("server", SERVER_NAME);
+        _have_video = _metadata["videocodecid"];
+        _have_audio = _metadata["audiocodecid"];
         if (_ring) {
             regist();
         }
@@ -118,18 +121,23 @@ public:
      * 输入rtmp包
      * @param pkt rtmp包
      */
-    void onWrite(const RtmpPacket::Ptr &pkt, bool = true) override {
+    void onWrite(RtmpPacket::Ptr pkt, bool = true) override {
+        bool is_video = pkt->type_id == MSG_VIDEO;
+        _speed[is_video ? TrackVideo : TrackAudio] += pkt->size();
         //保存当前时间戳
         switch (pkt->type_id) {
             case MSG_VIDEO : _track_stamps[TrackVideo] = pkt->time_stamp, _have_video = true; break;
-            case MSG_AUDIO : _track_stamps[TrackAudio] = pkt->time_stamp; break;
+            case MSG_AUDIO : _track_stamps[TrackAudio] = pkt->time_stamp, _have_audio = true; break;
             default :  break;
         }
 
         if (pkt->isCfgFrame()) {
             lock_guard<recursive_mutex> lock(_mtx);
             _config_frame_map[pkt->type_id] = pkt;
-            return;
+            if (!_ring) {
+                //注册后收到config帧更新到各播放器
+                return;
+            }
         }
 
         if (!_ring) {
@@ -151,7 +159,9 @@ public:
                 regist();
             }
         }
-        PacketCache<RtmpPacket>::inputPacket(pkt->type_id == MSG_VIDEO, pkt, pkt->isVideoKeyFrame());
+        bool key = pkt->isVideoKeyFrame();
+        auto stamp  = pkt->time_stamp;
+        PacketCache<RtmpPacket>::inputPacket(stamp, is_video, std::move(pkt), key);
     }
 
     /**
@@ -179,19 +189,28 @@ public:
         _ring->clearCache();
     }
 
+    bool haveVideo() const {
+        return _have_video;
+    }
+
+    bool haveAudio() const {
+        return _have_audio;
+    }
+
 private:
     /**
     * 批量flush rtmp包时触发该函数
     * @param rtmp_list rtmp包列表
     * @param key_pos 是否包含关键帧
     */
-    void onFlush(std::shared_ptr<List<RtmpPacket::Ptr> > &rtmp_list, bool key_pos) override {
+    void onFlush(std::shared_ptr<List<RtmpPacket::Ptr> > rtmp_list, bool key_pos) override {
         //如果不存在视频，那么就没有存在GOP缓存的意义，所以is_key一直为true确保一直清空GOP缓存
-        _ring->write(rtmp_list, _have_video ? key_pos : true);
+        _ring->write(std::move(rtmp_list), _have_video ? key_pos : true);
     }
 
 private:
     bool _have_video = false;
+    bool _have_audio = false;
     int _ring_size;
     uint32_t _track_stamps[TrackMax] = {0};
     AMFValue _metadata;

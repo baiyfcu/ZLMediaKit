@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -33,7 +33,8 @@ public:
     MP4Recorder(const string &strPath,
                 const string &strVhost,
                 const string &strApp,
-                const string &strStreamId);
+                const string &strStreamId,
+                size_t max_second);
     virtual ~MP4Recorder();
 
     /**
@@ -55,14 +56,15 @@ private:
     void closeFile();
     void asyncClose();
 private:
+    bool _haveVideo = false;
+    size_t _max_second;
     string _strPath;
     string _strFile;
     string _strFileTmp;
-    Ticker _createFileTicker;
     RecordInfo _info;
-    bool _haveVideo = false;
     MP4Muxer::Ptr _muxer;
     list<Track::Ptr> _tracks;
+	uint64_t _baseSec = 0;
 };
 
 #endif ///ENABLE_MP4

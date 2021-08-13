@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -22,23 +22,50 @@ using namespace toolkit;
 namespace mediakit{
 
 typedef enum {
-    CodecInvalid = -1,
-    CodecH264 = 0,
-    CodecH265,
-    CodecAAC,
-    CodecG711A,
-    CodecG711U,
-    CodecOpus,
-    CodecMax = 0x7FFF
-} CodecId;
-
-typedef enum {
     TrackInvalid = -1,
     TrackVideo = 0,
     TrackAudio,
     TrackTitle,
-    TrackMax = 3
+    TrackApplication,
+    TrackMax
 } TrackType;
+
+#define CODEC_MAP(XX) \
+    XX(CodecH264,  TrackVideo, 0, "H264")          \
+    XX(CodecH265,  TrackVideo, 1, "H265")          \
+    XX(CodecAAC,   TrackAudio, 2, "mpeg4-generic") \
+    XX(CodecG711A, TrackAudio, 3, "PCMA")          \
+    XX(CodecG711U, TrackAudio, 4, "PCMU")          \
+    XX(CodecOpus,  TrackAudio, 5, "opus")          \
+    XX(CodecL16,   TrackAudio, 6, "L16")           \
+    XX(CodecVP8,   TrackVideo, 7, "VP8")           \
+    XX(CodecVP9,   TrackVideo, 8, "VP9")           \
+    XX(CodecAV1,   TrackVideo, 9, "AV1X")
+
+typedef enum {
+    CodecInvalid = -1,
+#define XX(name, type, value, str) name = value,
+    CODEC_MAP(XX)
+#undef XX
+    CodecMax
+} CodecId;
+
+/**
+ * 字符串转媒体类型转
+ */
+TrackType getTrackType(const string &str);
+
+/**
+ * 媒体类型转字符串
+ */
+const char* getTrackString(TrackType type);
+
+/**
+ * 根据SDP中描述获取codec_id
+ * @param str
+ * @return
+ */
+CodecId getCodecId(const string &str);
 
 /**
  * 获取编码器名称
@@ -68,12 +95,12 @@ public:
     /**
      * 获取编码器名称
      */
-    const char *getCodecName();
+    const char *getCodecName() const;
 
     /**
      * 获取音视频类型
      */
-    TrackType getTrackType();
+    TrackType getTrackType() const;
 };
 
 /**
@@ -100,7 +127,7 @@ public:
      * 前缀长度，譬如264前缀为0x00 00 00 01,那么前缀长度就是4
      * aac前缀则为7个字节
      */
-    virtual uint32_t prefixSize() const = 0;
+    virtual size_t prefixSize() const = 0;
 
     /**
      * 返回是否为关键帧
@@ -118,20 +145,47 @@ public:
     virtual bool cacheAble() const { return true; }
 
     /**
+     * 该帧是否可以丢弃
+     * SEI/AUD帧可以丢弃
+     * 默认都不能丢帧
+     */
+    virtual bool dropAble() const { return false; }
+
+    /**
+     * 是否为可解码帧
+     * sps pps等帧不能解码
+     */
+    virtual bool decodeAble() const {
+        if (getTrackType() != TrackVideo) {
+            //非视频帧都可以解码
+            return true;
+        }
+        //默认非sps pps帧都可以解码
+        return !configFrame();
+    }
+
+    /**
      * 返回可缓存的frame
      */
     static Ptr getCacheAbleFrame(const Ptr &frame);
+
+private:
+    //对象个数统计
+    ObjectStatistic<Frame> _statistic;
 };
 
 class FrameImp : public Frame {
 public:
-    typedef std::shared_ptr<FrameImp> Ptr;
+    using Ptr = std::shared_ptr<FrameImp>;
+
+    template<typename C=FrameImp>
+    static std::shared_ptr<C> create();
 
     char *data() const override{
         return (char *)_buffer.data();
     }
 
-    uint32_t size() const override {
+    size_t size() const override {
         return _buffer.size();
     }
 
@@ -143,7 +197,7 @@ public:
         return _pts ? _pts : _dts;
     }
 
-    uint32_t prefixSize() const override{
+    size_t prefixSize() const override{
         return _prefix_size;
     }
 
@@ -161,10 +215,21 @@ public:
 
 public:
     CodecId _codec_id = CodecInvalid;
-    string _buffer;
     uint32_t _dts = 0;
     uint32_t _pts = 0;
-    uint32_t _prefix_size = 0;
+    size_t _prefix_size = 0;
+    BufferLikeString _buffer;
+
+private:
+    //对象个数统计
+    ObjectStatistic<FrameImp> _statistic;
+
+protected:
+    friend class ResourcePool_l<FrameImp>;
+    FrameImp() = default;
+
+    template<typename C>
+    static std::shared_ptr<C> create_l();
 };
 
 /**
@@ -177,7 +242,7 @@ template<typename Parent>
 class FrameInternal : public Parent{
 public:
     typedef std::shared_ptr<FrameInternal> Ptr;
-    FrameInternal(const Frame::Ptr &parent_frame, char *ptr, uint32_t size, int prefix_size)
+    FrameInternal(const Frame::Ptr &parent_frame, char *ptr, size_t size, size_t prefix_size)
             : Parent(ptr, size, parent_frame->dts(), parent_frame->pts(), prefix_size) {
         _parent_frame = parent_frame;
     }
@@ -186,24 +251,6 @@ public:
     }
 private:
     Frame::Ptr _parent_frame;
-};
-
-/**
- * 循环池辅助类
- */
-template <typename T>
-class ResourcePoolHelper{
-public:
-    ResourcePoolHelper(int size = 8){
-        _pool.setSize(size);
-    }
-    virtual ~ResourcePoolHelper(){}
-
-    std::shared_ptr<T> obtainObj(){
-        return _pool.obtain();
-    }
-private:
-    ResourcePool<T> _pool;
 };
 
 /**
@@ -298,7 +345,7 @@ public:
     /**
      * 返回代理个数
      */
-    int size() const {
+    size_t size() const {
         return _delegates_write.size();
     }
 private:
@@ -315,12 +362,12 @@ class FrameFromPtr : public Frame{
 public:
     typedef std::shared_ptr<FrameFromPtr> Ptr;
 
-    FrameFromPtr(CodecId codec_id, char *ptr, uint32_t size, uint32_t dts, uint32_t pts = 0, int prefix_size = 0)
+    FrameFromPtr(CodecId codec_id, char *ptr, size_t size, uint32_t dts, uint32_t pts = 0, size_t prefix_size = 0)
             : FrameFromPtr(ptr, size, dts, pts, prefix_size) {
         _codec_id = codec_id;
     }
 
-    FrameFromPtr(char *ptr, uint32_t size, uint32_t dts, uint32_t pts = 0, int prefix_size = 0){
+    FrameFromPtr(char *ptr, size_t size, uint32_t dts, uint32_t pts = 0, size_t prefix_size = 0){
         _ptr = ptr;
         _size = size;
         _dts = dts;
@@ -332,7 +379,7 @@ public:
         return _ptr;
     }
 
-    uint32_t size() const override {
+    size_t size() const override {
         return _size;
     }
 
@@ -344,7 +391,7 @@ public:
         return _pts ? _pts : dts();
     }
 
-    uint32_t prefixSize() const override{
+    size_t prefixSize() const override{
         return _prefix_size;
     }
 
@@ -376,10 +423,10 @@ protected:
 
 protected:
     char *_ptr;
-    uint32_t _size;
     uint32_t _dts;
     uint32_t _pts = 0;
-    uint32_t _prefix_size;
+    size_t _size;
+    size_t _prefix_size;
     CodecId _codec_id = CodecInvalid;
 };
 
@@ -399,7 +446,7 @@ public:
      * @param prefix 帧前缀长度
      * @param offset buffer有效数据偏移量
      */
-    FrameWrapper(const Buffer::Ptr &buf, int64_t dts, int64_t pts, int prefix, int offset) : Parent(buf->data() + offset, buf->size() - offset, dts, pts, prefix){
+    FrameWrapper(const Buffer::Ptr &buf, uint32_t dts, uint32_t pts, size_t prefix, size_t offset) : Parent(buf->data() + offset, buf->size() - offset, dts, pts, prefix){
         _buf = buf;
     }
 
@@ -412,7 +459,7 @@ public:
      * @param offset buffer有效数据偏移量
      * @param codec 帧类型
      */
-    FrameWrapper(const Buffer::Ptr &buf, int64_t dts, int64_t pts, int prefix, int offset, CodecId codec) : Parent(codec, buf->data() + offset, buf->size() - offset, dts, pts, prefix){
+    FrameWrapper(const Buffer::Ptr &buf, uint32_t dts, uint32_t pts, size_t prefix, size_t offset, CodecId codec) : Parent(codec, buf->data() + offset, buf->size() - offset, dts, pts, prefix){
         _buf = buf;
     }
 
@@ -425,6 +472,35 @@ public:
 
 private:
     Buffer::Ptr _buf;
+};
+
+/**
+ * 合并一些时间戳相同的frame
+ */
+class FrameMerger {
+public:
+    using onOutput = function<void(uint32_t dts, uint32_t pts, const Buffer::Ptr &buffer, bool have_key_frame)>;
+    using Ptr = std::shared_ptr<FrameMerger>;
+    enum {
+        none = 0,
+        h264_prefix,
+        mp4_nal_size,
+    };
+
+    FrameMerger(int type);
+    ~FrameMerger() = default;
+
+    void clear();
+    void inputFrame(const Frame::Ptr &frame, const onOutput &cb, BufferLikeString *buffer = nullptr);
+
+private:
+    bool willFlush(const Frame::Ptr &frame) const;
+    void doMerge(BufferLikeString &buffer, const Frame::Ptr &frame) const;
+
+private:
+    int _type;
+    bool _have_decode_able_frame = false;
+    List<Frame::Ptr> _frame_cache;
 };
 
 }//namespace mediakit

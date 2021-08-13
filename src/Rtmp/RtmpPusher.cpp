@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -47,6 +47,7 @@ void RtmpPusher::teardown() {
 }
 
 void RtmpPusher::onPublishResult(const SockException &ex, bool handshake_done) {
+    DebugL << ex.what();
     if (ex.getErrCode() == Err_shutdown) {
         //主动shutdown的，不触发回调
         return;
@@ -65,7 +66,7 @@ void RtmpPusher::onPublishResult(const SockException &ex, bool handshake_done) {
     }
 
     if (ex) {
-        teardown();
+        shutdown(SockException(Err_shutdown,"teardown"));
     }
 }
 
@@ -92,7 +93,7 @@ void RtmpPusher::publish(const string &url)  {
     }
 
     weak_ptr<RtmpPusher> weakSelf = dynamic_pointer_cast<RtmpPusher>(shared_from_this());
-    float publishTimeOutSec = (*this)[kTimeoutMS].as<int>() / 1000.0;
+    float publishTimeOutSec = (*this)[kTimeoutMS].as<int>() / 1000.0f;
     _publish_timer.reset(new Timer(publishTimeOutSec, [weakSelf]() {
         auto strongSelf = weakSelf.lock();
         if (!strongSelf) {
@@ -119,9 +120,6 @@ void RtmpPusher::onConnect(const SockException &err){
         onPublishResult(err, false);
         return;
     }
-    //推流器不需要多大的接收缓存，节省内存占用
-    getSock()->setReadBuffer(std::make_shared<BufferRaw>(1 * 1024));
-
     weak_ptr<RtmpPusher> weak_self = dynamic_pointer_cast<RtmpPusher>(shared_from_this());
     startClientSession([weak_self]() {
         auto strong_self = weak_self.lock();
@@ -175,9 +173,10 @@ inline void RtmpPusher::send_createStream() {
     });
 }
 
+#define RTMP_STREAM_LIVE    "live"
 inline void RtmpPusher::send_publish() {
     AMFEncoder enc;
-    enc << "publish" << ++_send_req_id << nullptr << _stream_id << _app;
+    enc << "publish" << ++_send_req_id << nullptr << _stream_id << RTMP_STREAM_LIVE;
     sendRequest(MSG_CMD, enc.data());
 
     addOnStatusCB([this](AMFValue &val) {
@@ -213,8 +212,8 @@ inline void RtmpPusher::send_metaData(){
             return;
         }
 
-        int i = 0;
-        int size = pkt->size();
+        size_t i = 0;
+        auto size = pkt->size();
         strong_self->setSendFlushFlag(false);
         pkt->for_each([&](const RtmpPacket::Ptr &rtmp) {
             if (++i == size) {
@@ -282,7 +281,8 @@ void RtmpPusher::onCmd_onStatus(AMFDecoder &dec) {
     }
 }
 
-void RtmpPusher::onRtmpChunk(RtmpPacket &chunk_data) {
+void RtmpPusher::onRtmpChunk(RtmpPacket::Ptr packet) {
+    auto &chunk_data = *packet;
     switch (chunk_data.type_id) {
         case MSG_CMD:
         case MSG_CMD3: {
@@ -294,7 +294,7 @@ void RtmpPusher::onRtmpChunk(RtmpPacket &chunk_data) {
                 g_mapCmd.emplace("onStatus", &RtmpPusher::onCmd_onStatus);
             });
 
-            AMFDecoder dec(chunk_data.buffer, 0);
+            AMFDecoder dec(chunk_data.buffer, 0, chunk_data.type_id == MSG_CMD3 ? 3 : 0);
             std::string type = dec.load<std::string>();
             auto it = g_mapCmd.find(type);
             if (it != g_mapCmd.end()) {

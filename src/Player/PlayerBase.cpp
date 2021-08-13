@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -16,12 +16,6 @@
 using namespace toolkit;
 
 namespace mediakit {
-
-//字符串是否以xx结尾
-static bool end_of(const string &str, const string &substr){
-    auto pos = str.rfind(substr);
-    return pos != string::npos && pos == str.size() - substr.size();
-}
 
 PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller,const string &url_in) {
     static auto releasePlayer = [](PlayerBase *ptr){
@@ -54,7 +48,7 @@ PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller,const st
         return PlayerBase::Ptr(new RtmpPlayerImp(poller),releasePlayer);
     }
 
-    if ((strcasecmp("http",prefix.data()) == 0 || strcasecmp("https",prefix.data()) == 0) && end_of(url, ".m3u8")) {
+    if ((strcasecmp("http",prefix.data()) == 0 || strcasecmp("https",prefix.data()) == 0) && end_with(url, ".m3u8")) {
         return PlayerBase::Ptr(new HlsPlayerImp(poller),releasePlayer);
     }
 
@@ -70,7 +64,7 @@ PlayerBase::PlayerBase() {
 
 ///////////////////////////Demuxer//////////////////////////////
 bool Demuxer::isInited(int analysisMs) {
-    if(analysisMs && _ticker.createdTime() > analysisMs){
+    if(analysisMs && _ticker.createdTime() > (uint64_t)analysisMs){
         //analysisMs毫秒后强制初始化完毕
         return true;
     }
@@ -112,13 +106,25 @@ float Demuxer::getDuration() const {
     return _fDuration;
 }
 
-void Demuxer::onAddTrack(const Track::Ptr &track){
+void Demuxer::addTrack(const Track::Ptr &track){
     if(_listener){
-        _listener->onAddTrack(track);
+        _listener->addTrack(track);
     }
 }
 
-void Demuxer::setTrackListener(Demuxer::Listener *listener) {
+void Demuxer::addTrackCompleted(){
+    if(_listener){
+        _listener->addTrackCompleted();
+    }
+}
+
+void Demuxer::resetTracks() {
+    if (_listener) {
+        _listener->resetTracks();
+    }
+}
+
+void Demuxer::setTrackListener(TrackListener *listener) {
     _listener = listener;
 }
 

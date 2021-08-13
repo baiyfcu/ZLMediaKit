@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -12,44 +12,38 @@
 
 namespace mediakit{
 
-RtpPacket::Ptr RtpInfo::makeRtp(TrackType type, const void* data, unsigned int len, bool mark, uint32_t uiStamp) {
-    uint16_t ui16RtpLen = len + 12;
-    uint32_t ts = htonl((_ui32SampleRate / 1000) * uiStamp);
-    uint16_t sq = htons(_ui16Sequence);
-    uint32_t sc = htonl(_ui32Ssrc);
+RtpPacket::Ptr RtpInfo::makeRtp(TrackType type, const void* data, size_t len, bool mark, uint32_t stamp) {
+    uint16_t payload_len = (uint16_t) (len + RtpPacket::kRtpHeaderSize);
+    auto rtp = RtpPacket::create();
+    rtp->setCapacity(payload_len + RtpPacket::kRtpTcpHeaderSize);
+    rtp->setSize(payload_len + RtpPacket::kRtpTcpHeaderSize);
+    rtp->sample_rate = _sample_rate;
+    rtp->type = type;
 
-    auto rtppkt = ResourcePoolHelper<RtpPacket>::obtainObj();
-    rtppkt->setCapacity(len + 16);
-    rtppkt->setSize(len + 16);
+    //rtsp over tcp 头
+    auto ptr = (uint8_t *) rtp->data();
+    ptr[0] = '$';
+    ptr[1] = _interleaved;
+    ptr[2] = payload_len >> 8;
+    ptr[3] = payload_len & 0xFF;
 
-    unsigned char *pucRtp = (unsigned char *)rtppkt->data();
-    pucRtp[0] = '$';
-    pucRtp[1] = _ui8Interleaved;
-    pucRtp[2] = ui16RtpLen >> 8;
-    pucRtp[3] = ui16RtpLen & 0x00FF;
-    pucRtp[4] = 0x80;
-    pucRtp[5] = (mark << 7) | _ui8PayloadType;
-    memcpy(&pucRtp[6], &sq, 2);
-    memcpy(&pucRtp[8], &ts, 4);
-    //ssrc
-    memcpy(&pucRtp[12], &sc, 4);
+    //rtp头
+    auto header = rtp->getHeader();
+    header->version = RtpPacket::kRtpVersion;
+    header->padding = 0;
+    header->ext = 0;
+    header->csrc = 0;
+    header->mark = mark;
+    header->pt = _pt;
+    header->seq = htons(_seq++);
+    header->stamp = htonl(uint64_t(stamp) * _sample_rate / 1000);
+    header->ssrc = htonl(_ssrc);
 
-    if(data){
-        //payload
-        memcpy(&pucRtp[16], data, len);
+    //有效负载
+    if (data) {
+        memcpy(&ptr[RtpPacket::kRtpHeaderSize + RtpPacket::kRtpTcpHeaderSize], data, len);
     }
-
-    rtppkt->PT = _ui8PayloadType;
-    rtppkt->interleaved = _ui8Interleaved;
-    rtppkt->mark = mark;
-    rtppkt->sequence = _ui16Sequence;
-    rtppkt->timeStamp = uiStamp;
-    rtppkt->ssrc = _ui32Ssrc;
-    rtppkt->type = type;
-    rtppkt->offset = 16;
-    _ui16Sequence++;
-    _ui32TimeStamp = uiStamp;
-    return rtppkt;
+    return rtp;
 }
 
 }//namespace mediakit

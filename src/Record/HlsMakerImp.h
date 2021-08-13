@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -47,14 +47,15 @@ public:
 
      /**
       * 清空缓存
+      * @param immediately 时候立即删除
       */
-     void clearCache();
+     void clearCache(bool immediately = true);
 
 protected:
-    string onOpenSegment(int index) override ;
-    void onDelSegment(int index) override;
-    void onWriteSegment(const char *data, int len) override;
-    void onWriteHls(const char *data, int len) override;
+    string onOpenSegment(uint64_t index) override ;
+    void onDelSegment(uint64_t index) override;
+    void onWriteSegment(const char *data, size_t len) override;
+    void onWriteHls(const char *data, size_t len) override;
     void onFlushLastSegment(uint32_t duration_ms) override;
 
 private:
@@ -69,7 +70,8 @@ private:
     std::shared_ptr<FILE> _file;
     std::shared_ptr<char> _file_buf;
     HlsMediaSource::Ptr _media_src;
-    map<int /*index*/,string/*file_path*/> _segment_file_paths;
+    EventPoller::Ptr _poller;
+    map<uint64_t/*index*/,string/*file_path*/> _segment_file_paths;
 };
 
 }//namespace mediakit

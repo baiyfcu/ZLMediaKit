@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -11,6 +11,7 @@
 #if defined(ENABLE_RTPPROXY)
 #include "RtpServer.h"
 #include "RtpSelector.h"
+#include "Rtcp/RtcpContext.h"
 namespace mediakit{
 
 RtpServer::RtpServer() {
@@ -22,41 +23,132 @@ RtpServer::~RtpServer() {
     }
 }
 
+class RtcpHelper : public RtcpContext, public std::enable_shared_from_this<RtcpHelper> {
+public:
+    using Ptr = std::shared_ptr<RtcpHelper>;
+
+    RtcpHelper(Socket::Ptr rtcp_sock, uint32_t sample_rate) : RtcpContext(true){
+        _rtcp_sock = std::move(rtcp_sock);
+        _sample_rate = sample_rate;
+    }
+
+    void onRecvRtp(const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len){
+        //统计rtp接受情况，用于发送rr包
+        auto header = (RtpHeader *) buf->data();
+        onRtp(ntohs(header->seq), ntohl(header->stamp), 0/*不发送sr,所以可以设置为0*/ , _sample_rate, buf->size());
+        sendRtcp(ntohl(header->ssrc), addr, addr_len);
+    }
+
+    void startRtcp(){
+        weak_ptr<RtcpHelper> weak_self = shared_from_this();
+        _rtcp_sock->setOnRead([weak_self](const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len) {
+            //用于接受rtcp打洞包
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
+                return;
+            }
+            if (!strong_self->_rtcp_addr) {
+                //只设置一次rtcp对端端口
+                strong_self->_rtcp_addr = std::make_shared<struct sockaddr>();
+                memcpy(strong_self->_rtcp_addr.get(), addr, addr_len);
+            }
+            auto rtcps = RtcpHeader::loadFromBytes(buf->data(), buf->size());
+            for (auto &rtcp : rtcps) {
+                strong_self->onRtcp(rtcp);
+            }
+        });
+    }
+
+private:
+    void sendRtcp(uint32_t rtp_ssrc, struct sockaddr *addr, int addr_len){
+        //每5秒发送一次rtcp
+        if (_ticker.elapsedTime() < 5000) {
+            return;
+        }
+        _ticker.resetTime();
+
+        auto rtcp_addr = _rtcp_addr.get();
+        if (!rtcp_addr) {
+            //默认的，rtcp端口为rtp端口+1
+            ((sockaddr_in *) addr)->sin_port = htons(ntohs(((sockaddr_in *) addr)->sin_port) + 1);
+            //未收到rtcp打洞包时，采用默认的rtcp端口
+            rtcp_addr = addr;
+        }
+        _rtcp_sock->send(createRtcpRR(rtp_ssrc + 1, rtp_ssrc), rtcp_addr, addr_len);
+    }
+
+private:
+    Ticker _ticker;
+    Socket::Ptr _rtcp_sock;
+    uint32_t _sample_rate;
+    std::shared_ptr<struct sockaddr> _rtcp_addr;
+};
+
 void RtpServer::start(uint16_t local_port, const string &stream_id,  bool enable_tcp, const char *local_ip) {
     //创建udp服务器
-    Socket::Ptr udp_server = Socket::createSocket(nullptr, false);
-    if (!udp_server->bindUdpSock(local_port, local_ip)) {
-        throw std::runtime_error(StrPrinter << "bindUdpSock on " << local_ip << ":" << local_port << " failed:" << get_uv_errmsg(true));
+    Socket::Ptr rtp_socket = Socket::createSocket(nullptr, true);
+    Socket::Ptr rtcp_socket = Socket::createSocket(nullptr, true);
+    if (local_port == 0) {
+        //随机端口，rtp端口采用偶数
+        auto pair = std::make_pair(rtp_socket, rtcp_socket);
+        makeSockPair(pair, local_ip);
+        //取偶数端口
+        rtp_socket = pair.first;
+        rtcp_socket = pair.second;
+    } else if (!rtp_socket->bindUdpSock(local_port, local_ip)) {
+        //用户指定端口
+        throw std::runtime_error(StrPrinter << "创建rtp端口 " << local_ip << ":" << local_port << " 失败:" << get_uv_errmsg(true));
+    } else if(!rtcp_socket->bindUdpSock(rtp_socket->get_local_port() + 1, local_ip)) {
+        // rtcp端口
+        throw std::runtime_error(StrPrinter << "创建rtcp端口 " << local_ip << ":" << local_port << " 失败:" << get_uv_errmsg(true));
     }
+
     //设置udp socket读缓存
-    SockUtil::setRecvBuf(udp_server->rawFD(), 4 * 1024 * 1024);
+    SockUtil::setRecvBuf(rtp_socket->rawFD(), 4 * 1024 * 1024);
 
     TcpServer::Ptr tcp_server;
     if (enable_tcp) {
         //创建tcp服务器
-        tcp_server = std::make_shared<TcpServer>(udp_server->getPoller());
+        tcp_server = std::make_shared<TcpServer>(rtp_socket->getPoller());
         (*tcp_server)[RtpSession::kStreamID] = stream_id;
-        tcp_server->start<RtpSession>(udp_server->get_local_port(), local_ip);
+        (*tcp_server)[RtpSession::kIsUDP] = 0;
+        tcp_server->start<RtpSession>(rtp_socket->get_local_port(), local_ip);
     }
 
+    //创建udp服务器
+    UdpServer::Ptr udp_server;
     RtpProcess::Ptr process;
     if (!stream_id.empty()) {
         //指定了流id，那么一个端口一个流(不管是否包含多个ssrc的多个流，绑定rtp源后，会筛选掉ip端口不匹配的流)
+        //由于是一个端口一个流，单线程处理即可
         process = RtpSelector::Instance().getProcess(stream_id, true);
-        udp_server->setOnRead([udp_server, process](const Buffer::Ptr &buf, struct sockaddr *addr, int) {
-            process->inputRtp(udp_server, buf->data(), buf->size(), addr);
+        RtcpHelper::Ptr helper = std::make_shared<RtcpHelper>(std::move(rtcp_socket), 90000);
+        helper->startRtcp();
+        rtp_socket->setOnRead([rtp_socket, process, helper](const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len) {
+            helper->onRecvRtp(buf, addr, addr_len);
+            process->inputRtp(true, rtp_socket, buf->data(), buf->size(), addr);
         });
     } else {
-        //未指定流id，一个端口多个流，通过ssrc来分流
+#if 1
+        //单端口多线程接收多个流，根据ssrc区分流
+        udp_server = std::make_shared<UdpServer>(rtp_socket->getPoller());
+        (*udp_server)[RtpSession::kIsUDP] = 1;
+        udp_server->start<RtpSession>(rtp_socket->get_local_port(), local_ip);
+        rtp_socket = nullptr;
+#else
+        //单端口单线程接收多个流
         auto &ref = RtpSelector::Instance();
-        udp_server->setOnRead([&ref, udp_server](const Buffer::Ptr &buf, struct sockaddr *addr, int) {
-            ref.inputRtp(udp_server, buf->data(), buf->size(), addr);
+        rtp_socket->setOnRead([&ref, rtp_socket](const Buffer::Ptr &buf, struct sockaddr *addr, int) {
+            ref.inputRtp(rtp_socket, buf->data(), buf->size(), addr);
         });
+#endif
     }
 
-    _on_clearup = [udp_server, process, stream_id]() {
-        //去除循环引用
-        udp_server->setOnRead(nullptr);
+    _on_clearup = [rtp_socket, process, stream_id]() {
+        if (rtp_socket) {
+            //去除循环引用
+            rtp_socket->setOnRead(nullptr);
+        }
         if (process) {
             //删除rtp处理器
             RtpSelector::Instance().delProcess(stream_id, process.get());
@@ -65,6 +157,7 @@ void RtpServer::start(uint16_t local_port, const string &stream_id,  bool enable
 
     _tcp_server = tcp_server;
     _udp_server = udp_server;
+    _rtp_socket = rtp_socket;
     _rtp_process = process;
 }
 
@@ -74,12 +167,8 @@ void RtpServer::setOnDetach(const function<void()> &cb){
     }
 }
 
-EventPoller::Ptr RtpServer::getPoller() {
-    return _udp_server->getPoller();
-}
-
 uint16_t RtpServer::getPort() {
-    return _udp_server ? _udp_server->get_local_port() : 0;
+    return _udp_server ? _udp_server->getPort() : _rtp_socket->get_local_port();
 }
 
 }//namespace mediakit

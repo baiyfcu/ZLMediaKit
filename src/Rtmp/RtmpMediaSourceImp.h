@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -27,7 +27,7 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
-class RtmpMediaSourceImp: public RtmpMediaSource, public Demuxer::Listener , public MultiMediaSourceMuxer::Listener {
+class RtmpMediaSourceImp: public RtmpMediaSource, public TrackListener , public MultiMediaSourceMuxer::Listener {
 public:
     typedef std::shared_ptr<RtmpMediaSourceImp> Ptr;
 
@@ -60,12 +60,12 @@ public:
     /**
      * 输入rtmp并解析
      */
-    void onWrite(const RtmpPacket::Ptr &pkt, bool = true) override {
+    void onWrite(RtmpPacket::Ptr pkt, bool = true) override {
         if (!_all_track_ready || _muxer->isEnabled()) {
             //未获取到所有Track后，或者开启转协议，那么需要解复用rtmp
             _demuxer->inputRtmp(pkt);
         }
-        RtmpMediaSource::onWrite(pkt);
+        RtmpMediaSource::onWrite(std::move(pkt));
     }
 
     /**
@@ -86,7 +86,7 @@ public:
         _muxer->setMediaListener(getListener());
         _muxer->setTrackListener(static_pointer_cast<RtmpMediaSourceImp>(shared_from_this()));
         //让_muxer对象拦截一部分事件(比如说录像相关事件)
-        setListener(_muxer);
+        MediaSource::setListener(_muxer);
 
         for(auto &track : _demuxer->getTracks(false)){
             _muxer->addTrack(track);
@@ -97,10 +97,25 @@ public:
     /**
      * _demuxer触发的添加Track事件
      */
-    void onAddTrack(const Track::Ptr &track) override {
+    void addTrack(const Track::Ptr &track) override {
         if(_muxer){
             _muxer->addTrack(track);
             track->addDelegate(_muxer);
+        }
+    }
+
+    /**
+     * _demuxer触发的Track添加完毕事件
+     */
+    void addTrackCompleted() override {
+        if (_muxer) {
+            _muxer->addTrackCompleted();
+        }
+    }
+
+    void resetTracks() override {
+        if (_muxer) {
+            _muxer->resetTracks();
         }
     }
 
@@ -112,10 +127,24 @@ public:
 
         if (_recreate_metadata) {
             //更新metadata
-            for (auto &track : _muxer->getTracks(*this)) {
+            for (auto &track : _muxer->getTracks()) {
                 Metadata::addTrack(_metadata, track);
             }
             RtmpMediaSource::updateMetaData(_metadata);
+        }
+    }
+
+    /**
+     * 设置事件监听器
+     * @param listener 监听器
+     */
+    void setListener(const std::weak_ptr<MediaSourceEvent> &listener) override{
+        if (_muxer) {
+            //_muxer对象不能处理的事件再给listener处理
+            _muxer->setMediaListener(listener);
+        } else {
+            //未创建_muxer对象，事件全部给listener处理
+            MediaSource::setListener(listener);
         }
     }
 

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -12,7 +12,7 @@
 #include "Extension/Factory.h"
 namespace mediakit{
 
-VideoMeta::VideoMeta(const VideoTrack::Ptr &video,int datarate ){
+VideoMeta::VideoMeta(const VideoTrack::Ptr &video){
     if(video->getVideoWidth() > 0 ){
         _metadata.set("width", video->getVideoWidth());
     }
@@ -22,13 +22,17 @@ VideoMeta::VideoMeta(const VideoTrack::Ptr &video,int datarate ){
     if(video->getVideoFps() > 0 ){
         _metadata.set("framerate", video->getVideoFps());
     }
-    _metadata.set("videodatarate", datarate);
+    if (video->getBitRate()) {
+        _metadata.set("videodatarate", video->getBitRate() / 1024);
+    }
     _codecId = video->getCodecId();
     _metadata.set("videocodecid", Factory::getAmfByCodecId(_codecId));
 }
 
-AudioMeta::AudioMeta(const AudioTrack::Ptr &audio,int datarate){
-    _metadata.set("audiodatarate", datarate);
+AudioMeta::AudioMeta(const AudioTrack::Ptr &audio){
+    if (audio->getBitRate()) {
+        _metadata.set("audiodatarate", audio->getBitRate() / 1024);
+    }
     if(audio->getAudioSampleRate() > 0){
         _metadata.set("audiosamplerate", audio->getAudioSampleRate());
     }
@@ -127,4 +131,23 @@ void Metadata::addTrack(AMFValue &metadata, const Track::Ptr &track) {
         metadata.set(key, value);
     });
 }
+
+RtmpPacket::Ptr RtmpPacket::create(){
+#if 0
+    static ResourcePool<RtmpPacket> packet_pool;
+    static onceToken token([]() {
+        packet_pool.setSize(1024);
+    });
+    auto ret = packet_pool.obtain();
+    ret->clear();
+    return ret;
+#else
+    return Ptr(new RtmpPacket);
+#endif
+}
+
 }//namespace mediakit
+
+namespace toolkit {
+    StatisticImp(mediakit::RtmpPacket);
+}

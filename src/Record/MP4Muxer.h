@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -72,8 +72,8 @@ private:
         int track_id = -1;
         Stamp stamp;
     };
-    List<Frame::Ptr> _frameCached;
     unordered_map<int, track_info> _codec_to_trackid;
+    FrameMerger _frame_merger{FrameMerger::mp4_nal_size};
 };
 
 class MP4Muxer : public MP4MuxerInterface{

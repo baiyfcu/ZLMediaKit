@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -25,7 +25,7 @@ namespace mediakit{
  * 将 h265 over rtsp-rtp 解复用出 h265-Frame
  * 《草案（H265-over-RTP）draft-ietf-payload-rtp-h265-07.pdf》
  */
-class H265RtpDecoder : public RtpCodec , public ResourcePoolHelper<H265Frame> {
+class H265RtpDecoder : public RtpCodec {
 public:
     typedef std::shared_ptr<H265RtpDecoder> Ptr;
 
@@ -42,14 +42,23 @@ public:
     CodecId getCodecId() const override{
         return CodecH265;
     }
+
 private:
+    bool unpackAp(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp);
+    bool mergeFu(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp, uint16_t seq);
+    bool singleFrame(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint32_t stamp);
+
     bool decodeRtp(const RtpPacket::Ptr &rtp);
-    void onGetH265(const H265Frame::Ptr &frame);
     H265Frame::Ptr obtainFrame();
+    void outputFrame(const RtpPacket::Ptr &rtp, const H265Frame::Ptr &frame);
+
 private:
-    H265Frame::Ptr _h265frame;
+    bool _using_donl_field = false;
+    bool _gop_dropped = false;
+    bool _fu_dropped = true;
+    uint16_t _last_seq = 0;
+    H265Frame::Ptr _frame;
     DtsGenerator _dts_generator;
-    int _lastSeq = 0;
 };
 
 /**
@@ -78,8 +87,6 @@ public:
      * @param frame 帧数据，必须
      */
     void inputFrame(const Frame::Ptr &frame) override;
-private:
-    void makeH265Rtp(int nal_type,const void *pData, unsigned int uiLen, bool bMark, bool first_packet,uint32_t uiStamp);
 };
 
 }//namespace mediakit{

@@ -1,17 +1,15 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <map>
 #include <signal.h>
 #include <iostream>
-#include "Util/MD5.h"
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Util/SSLBox.h"
@@ -27,6 +25,11 @@
 #include "Rtp/RtpServer.h"
 #include "WebApi.h"
 #include "WebHook.h"
+#include "../webrtc/Sdp.h"
+
+#if defined(ENABLE_VERSION)
+#include "Version.h"
+#endif
 
 #if !defined(_WIN32)
 #include "System.h"
@@ -146,10 +149,21 @@ public:
                              false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
                              "启动事件触发线程数",/*该选项说明文字*/
                              nullptr);
+
+#if defined(ENABLE_VERSION)
+        (*_parser) << Option('v', "version", Option::ArgNone, nullptr, false, "显示版本号",
+                             [](const std::shared_ptr<ostream> &stream, const string &arg) -> bool {
+                                 //版本信息
+                                 *stream << "编译日期: " << BUILD_TIME << std::endl;
+                                 *stream << "当前git分支: " << BRANCH_TIME << std::endl;
+                                 *stream << "当前git hash值: " << COMMIT_HASH << std::endl;
+                                 throw ExitException();
+                             });
+#endif
     }
 
-    virtual ~CMD_main() {}
-    virtual const char *description() const {
+    ~CMD_main() override{}
+    const char *description() const override{
         return "主程序命令参数";
     }
 };
@@ -201,6 +215,8 @@ int start_main(int argc,char *argv[]) {
         CMD_main cmd_main;
         try {
             cmd_main.operator()(argc, argv);
+        } catch (ExitException &) {
+            return 0;
         } catch (std::exception &ex) {
             cout << ex.what() << endl;
             return -1;
@@ -212,6 +228,8 @@ int start_main(int argc,char *argv[]) {
         g_ini_file = cmd_main["config"];
         string ssl_file = cmd_main["ssl"];
         int threads = cmd_main["threads"];
+
+        setThreadName("main thread");
 
         //设置日志
         Logger::Instance().add(std::make_shared<ConsoleChannel>("ConsoleChannel", logLevel));

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -26,6 +26,7 @@
 #include "RtpReceiver.h"
 #include "RtspMediaSourceImp.h"
 #include "Common/Stamp.h"
+#include "Rtcp/RtcpContext.h"
 
 using namespace std;
 using namespace toolkit;
@@ -37,18 +38,20 @@ class RtspSession;
 class BufferRtp : public Buffer{
 public:
     typedef std::shared_ptr<BufferRtp> Ptr;
-    BufferRtp(const RtpPacket::Ptr & pkt,uint32_t offset = 0 ):_rtp(pkt),_offset(offset){}
-    virtual ~BufferRtp(){}
+    BufferRtp(Buffer::Ptr pkt, size_t offset = 0) : _offset(offset),_rtp(std::move(pkt)) {}
+    ~BufferRtp() override{}
 
     char *data() const override {
         return (char *)_rtp->data() + _offset;
     }
-    uint32_t size() const override {
+
+    size_t size() const override {
         return _rtp->size() - _offset;
     }
+
 private:
-    RtpPacket::Ptr _rtp;
-    uint32_t _offset;
+    size_t _offset;
+    Buffer::Ptr _rtp;
 };
 
 class RtspSession: public TcpSession, public RtspSplitter, public RtpReceiver , public MediaSourceEvent{
@@ -71,18 +74,30 @@ protected:
     //收到完整的rtsp包回调，包括sdp等content数据
     void onWholeRtspPacket(Parser &parser) override;
     //收到rtp包回调
-    void onRtpPacket(const char *data, uint64_t len) override;
+    void onRtpPacket(const char *data, size_t len) override;
     //从rtsp头中获取Content长度
-    int64_t getContentLength(Parser &parser) override;
+    ssize_t getContentLength(Parser &parser) override;
+
     ////RtpReceiver override////
-    void onRtpSorted(const RtpPacket::Ptr &rtp, int track_idx) override;
-    ////MediaSourceEvent override////
-    bool close(MediaSource &sender, bool force) override ;
+    void onRtpSorted(RtpPacket::Ptr rtp, int track_idx) override;
+    void onBeforeRtpSorted(const RtpPacket::Ptr &rtp, int track_index) override;
+
+    ///////MediaSourceEvent override///////
+    // 关闭
+    bool close(MediaSource &sender, bool force) override;
+    // 播放总人数
     int totalReaderCount(MediaSource &sender) override;
+    // 获取媒体源类型
+    MediaOriginType getOriginType(MediaSource &sender) const override;
+    // 获取媒体源url或者文件路径
+    string getOriginUrl(MediaSource &sender) const override;
+    // 获取媒体源客户端相关信息
+    std::shared_ptr<SockInfo> getOriginSock(MediaSource &sender) const override;
+
     /////TcpSession override////
-    int send(const Buffer::Ptr &pkt) override;
+    ssize_t send(Buffer::Ptr pkt) override;
     //收到RTCP包回调
-    virtual void onRtcpPacket(int track_idx, SdpTrack::Ptr &track, unsigned char *data, unsigned int len);
+    virtual void onRtcpPacket(int track_idx, SdpTrack::Ptr &track, const char *data, size_t len);
 
 private:
     //处理options方法,获取服务器能力
@@ -117,7 +132,7 @@ private:
     void send_NotAcceptable();
     //获取track下标
     int getTrackIndexByTrackType(TrackType type);
-    int getTrackIndexByControlSuffix(const string &control_suffix);
+    int getTrackIndexByControlUrl(const string &control_url);
     int getTrackIndexByInterleaved(int interleaved);
     //一般用于接收udp打洞包，也用于rtsp推流
     void onRcvPeerUdpData(int interleaved, const Buffer::Ptr &buf, const struct sockaddr &addr);
@@ -139,12 +154,11 @@ private:
     //发送rtp给客户端
     void sendRtpPacket(const RtspMediaSource::RingDataType &pkt);
     //触发rtcp发送
-    void onSendRtpPacket(const RtpPacket::Ptr &rtp);
+    void updateRtcpContext(const RtpPacket::Ptr &rtp);
     //回复客户端
     bool sendRtspResponse(const string &res_code, const std::initializer_list<string> &header, const string &sdp = "", const char *protocol = "RTSP/1.0");
     bool sendRtspResponse(const string &res_code, const StrCaseMap &header = StrCaseMap(), const string &sdp = "", const char *protocol = "RTSP/1.0");
-    //服务器发送rtcp
-    void sendSenderReport(bool over_tcp, int track_idx);
+
     //设置socket标志
     void setSocketFlags();
 
@@ -157,8 +171,6 @@ private:
     Rtsp::eRtpType _rtp_type = Rtsp::RTP_Invalid;
     //收到的seq，回复时一致
     int _cseq = 0;
-    //rtsp推流起始时间戳，目的是为了同步
-    int64_t _start_stamp[2] = {-1, -1};
     //消耗的总流量
     uint64_t _bytes_usage = 0;
     //ContentBase
@@ -183,11 +195,6 @@ private:
     //sdp里面有效的track,包含音频或视频
     vector<SdpTrack::Ptr> _sdp_track;
 
-    //rtcp统计,trackid idx 为数组下标
-    RtcpCounter _rtcp_counter[2];
-    //rtcp发送时间,trackid idx 为数组下标
-    Ticker _rtcp_send_tickers[2];
-
     ////////RTP over udp////////
     //RTP端口,trackid idx 为数组下标
     Socket::Ptr _rtp_socks[2];
@@ -203,6 +210,12 @@ private:
     //一次发送 get 一次发送post，需要通过x-sessioncookie关联起来
     string _http_x_sessioncookie;
     function<void(const Buffer::Ptr &)> _on_recv;
+    ////////// rtcp ////////////////
+    //rtcp发送时间,trackid idx 为数组下标
+    Ticker _rtcp_send_tickers[2];
+    //统计rtp并发送rtcp
+    vector<RtcpContext::Ptr> _rtcp_context;
+    bool _send_sr_rtcp[2] = {true, true};
 };
 
 /**

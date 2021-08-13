@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -48,58 +48,66 @@ static uint8_t s_mute_adts[] = {0xff, 0xf1, 0x6c, 0x40, 0x2d, 0x3f, 0xfc, 0x00, 
 
 PlayerProxy::PlayerProxy(const string &vhost, const string &app, const string &stream_id,
                          bool enable_hls, bool enable_mp4, int retry_count, const EventPoller::Ptr &poller)
-                        : MediaPlayer(poller) {
+        : MediaPlayer(poller) {
     _vhost = vhost;
     _app = app;
     _stream_id = stream_id;
     _enable_hls = enable_hls;
     _enable_mp4 = enable_mp4;
     _retry_count = retry_count;
+    _on_close = [](const SockException &) {};
 }
 
-void PlayerProxy::setPlayCallbackOnce(const function<void(const SockException &ex)> &cb){
+void PlayerProxy::setPlayCallbackOnce(const function<void(const SockException &ex)> &cb) {
     _on_play = cb;
 }
 
-void PlayerProxy::setOnClose(const function<void()> &cb){
-    _on_close = cb;
+void PlayerProxy::setOnClose(const function<void(const SockException &ex)> &cb) {
+    _on_close = cb ? cb : [](const SockException &) {};
 }
 
 void PlayerProxy::play(const string &strUrlTmp) {
     weak_ptr<PlayerProxy> weakSelf = shared_from_this();
     std::shared_ptr<int> piFailedCnt(new int(0)); //连续播放失败次数
-    setOnPlayResult([weakSelf,strUrlTmp,piFailedCnt](const SockException &err) {
+    setOnPlayResult([weakSelf, strUrlTmp, piFailedCnt](const SockException &err) {
         auto strongSelf = weakSelf.lock();
-        if(!strongSelf) {
+        if (!strongSelf) {
             return;
         }
 
-        if(strongSelf->_on_play) {
+        if (strongSelf->_on_play) {
             strongSelf->_on_play(err);
             strongSelf->_on_play = nullptr;
         }
 
-        if(!err) {
+        if (!err) {
             // 播放成功
             *piFailedCnt = 0;//连续播放失败次数清0
             strongSelf->onPlaySuccess();
-        }else if(*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
+        } else if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
             // 播放失败，延时重试播放
-            strongSelf->rePlay(strUrlTmp,(*piFailedCnt)++);
+            strongSelf->rePlay(strUrlTmp, (*piFailedCnt)++);
+        } else {
+            //达到了最大重试次数，回调关闭
+            strongSelf->_on_close(err);
         }
     });
-    setOnShutdown([weakSelf,strUrlTmp,piFailedCnt](const SockException &err) {
+    setOnShutdown([weakSelf, strUrlTmp, piFailedCnt](const SockException &err) {
         auto strongSelf = weakSelf.lock();
-        if(!strongSelf) {
+        if (!strongSelf) {
             return;
         }
-        if(strongSelf->_muxer) {
+
+        //注销直接拉流代理产生的流：#532
+        strongSelf->setMediaSource(nullptr);
+
+        if (strongSelf->_muxer) {
             auto tracks = strongSelf->MediaPlayer::getTracks(false);
-            for (auto & track : tracks){
+            for (auto &track : tracks) {
                 track->delDelegate(strongSelf->_muxer.get());
             }
 
-            GET_CONFIG(bool,resetWhenRePlay,General::kResetWhenRePlay);
+            GET_CONFIG(bool, resetWhenRePlay, General::kResetWhenRePlay);
             if (resetWhenRePlay) {
                 strongSelf->_muxer.reset();
             } else {
@@ -107,25 +115,32 @@ void PlayerProxy::play(const string &strUrlTmp) {
             }
         }
         //播放异常中断，延时重试播放
-        if(*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
-            strongSelf->rePlay(strUrlTmp,(*piFailedCnt)++);
+        if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
+            strongSelf->rePlay(strUrlTmp, (*piFailedCnt)++);
+        } else {
+            //达到了最大重试次数，回调关闭
+            strongSelf->_on_close(err);
         }
     });
     MediaPlayer::play(strUrlTmp);
+    _pull_url = strUrlTmp;
+    setDirectProxy();
+}
 
+void PlayerProxy::setDirectProxy() {
     MediaSource::Ptr mediaSource;
-    if(dynamic_pointer_cast<RtspPlayer>(_delegate)){
+    if (dynamic_pointer_cast<RtspPlayer>(_delegate)) {
         //rtsp拉流
-        GET_CONFIG(bool,directProxy,Rtsp::kDirectProxy);
-        if(directProxy){
+        GET_CONFIG(bool, directProxy, Rtsp::kDirectProxy);
+        if (directProxy) {
             mediaSource = std::make_shared<RtspMediaSource>(_vhost, _app, _stream_id);
         }
-    } else if(dynamic_pointer_cast<RtmpPlayer>(_delegate)){
+    } else if (dynamic_pointer_cast<RtmpPlayer>(_delegate)) {
         //rtmp拉流,rtmp强制直接代理
         mediaSource = std::make_shared<RtmpMediaSource>(_vhost, _app, _stream_id);
     }
-    if(mediaSource){
-        setMediaSouce(mediaSource);
+    if (mediaSource) {
+        setMediaSource(mediaSource);
         mediaSource->setListener(shared_from_this());
     }
 }
@@ -134,23 +149,24 @@ PlayerProxy::~PlayerProxy() {
     _timer.reset();
 }
 
-void PlayerProxy::rePlay(const string &strUrl,int iFailedCnt){
-    auto iDelay = MAX(2 * 1000, MIN(iFailedCnt * 3000, 60*1000));
+void PlayerProxy::rePlay(const string &strUrl, int iFailedCnt) {
+    auto iDelay = MAX(2 * 1000, MIN(iFailedCnt * 3000, 60 * 1000));
     weak_ptr<PlayerProxy> weakSelf = shared_from_this();
-    _timer = std::make_shared<Timer>(iDelay / 1000.0f,[weakSelf,strUrl,iFailedCnt]() {
+    _timer = std::make_shared<Timer>(iDelay / 1000.0f, [weakSelf, strUrl, iFailedCnt]() {
         //播放失败次数越多，则延时越长
         auto strongPlayer = weakSelf.lock();
-        if(!strongPlayer) {
+        if (!strongPlayer) {
             return false;
         }
-        WarnL << "重试播放[" << iFailedCnt << "]:"  << strUrl;
+        WarnL << "重试播放[" << iFailedCnt << "]:" << strUrl;
         strongPlayer->MediaPlayer::play(strUrl);
+        strongPlayer->setDirectProxy();
         return false;
     }, getPoller());
 }
 
-bool PlayerProxy::close(MediaSource &sender,bool force) {
-    if(!force && totalReaderCount()){
+bool PlayerProxy::close(MediaSource &sender, bool force) {
+    if (!force && totalReaderCount()) {
         return false;
     }
 
@@ -162,17 +178,15 @@ bool PlayerProxy::close(MediaSource &sender,bool force) {
             return;
         }
         strongSelf->_muxer.reset();
-        strongSelf->setMediaSouce(nullptr);
+        strongSelf->setMediaSource(nullptr);
         strongSelf->teardown();
-        if (strongSelf->_on_close) {
-            strongSelf->_on_close();
-        }
     });
+    _on_close(SockException(Err_shutdown, "closed by user"));
     WarnL << sender.getSchema() << "/" << sender.getVhost() << "/" << sender.getApp() << "/" << sender.getId() << " " << force;
     return true;
 }
 
-int PlayerProxy::totalReaderCount(){
+int PlayerProxy::totalReaderCount() {
     return (_muxer ? _muxer->totalReaderCount() : 0) + (_pMediaSrc ? _pMediaSrc->readerCount() : 0);
 }
 
@@ -180,17 +194,29 @@ int PlayerProxy::totalReaderCount(MediaSource &sender) {
     return totalReaderCount();
 }
 
-class MuteAudioMaker : public FrameDispatcher{
+MediaOriginType PlayerProxy::getOriginType(MediaSource &sender) const {
+    return MediaOriginType::pull;
+}
+
+string PlayerProxy::getOriginUrl(MediaSource &sender) const {
+    return _pull_url;
+}
+
+std::shared_ptr<SockInfo> PlayerProxy::getOriginSock(MediaSource &sender) const {
+    return getSockInfo();
+}
+
+class MuteAudioMaker : public FrameDispatcher {
 public:
     typedef std::shared_ptr<MuteAudioMaker> Ptr;
 
-    MuteAudioMaker(){};
+    MuteAudioMaker() {};
     ~MuteAudioMaker() override {}
 
     void inputFrame(const Frame::Ptr &frame) override {
-        if(frame->getTrackType() == TrackVideo){
+        if (frame->getTrackType() == TrackVideo) {
             auto audio_idx = frame->dts() / MUTE_ADTS_DATA_MS;
-            if(_audio_idx != audio_idx){
+            if (_audio_idx != audio_idx) {
                 _audio_idx = audio_idx;
                 auto aacFrame = std::make_shared<FrameFromStaticPtr>(CodecAAC, (char *)MUTE_ADTS_DATA, MUTE_ADTS_DATA_LEN, _audio_idx * MUTE_ADTS_DATA_MS, 0 ,ADTS_HEADER_LEN);
                 FrameDispatcher::inputFrame(aacFrame);
@@ -199,10 +225,10 @@ public:
     }
 
 private:
-    class FrameFromStaticPtr : public FrameFromPtr{
+    class FrameFromStaticPtr : public FrameFromPtr {
     public:
-        template <typename ... ARGS>
-        FrameFromStaticPtr(ARGS && ...args) : FrameFromPtr(std::forward<ARGS>(args)...) {};
+        template<typename ... ARGS>
+        FrameFromStaticPtr(ARGS &&...args) : FrameFromPtr(std::forward<ARGS>(args)...) {};
         ~FrameFromStaticPtr() override = default;
 
         bool cacheAble() const override {
@@ -211,11 +237,11 @@ private:
     };
 
 private:
-    int _audio_idx = 0;
+    uint32_t _audio_idx = 0;
 };
 
 void PlayerProxy::onPlaySuccess() {
-    GET_CONFIG(bool,resetWhenRePlay,General::kResetWhenRePlay);
+    GET_CONFIG(bool, resetWhenRePlay, General::kResetWhenRePlay);
     if (dynamic_pointer_cast<RtspMediaSource>(_pMediaSrc)) {
         //rtsp拉流代理
         if (resetWhenRePlay || !_muxer) {

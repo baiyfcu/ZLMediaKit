@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -31,7 +31,7 @@ string Recorder::getRecordPath(Recorder::type type, const string &vhost, const s
             }
             //Here we use the customized file path.
             if (!customized_path.empty()) {
-                m3u8FilePath = customized_path + "/hls.m3u8";
+                return File::absolutePath(m3u8FilePath, customized_path);
             }
             return File::absolutePath(m3u8FilePath, hlsPath);
         }
@@ -46,7 +46,7 @@ string Recorder::getRecordPath(Recorder::type type, const string &vhost, const s
             }
             //Here we use the customized file path.
             if (!customized_path.empty()) {
-                mp4FilePath = customized_path + "/";
+                return File::absolutePath(mp4FilePath, customized_path);
             }
             return File::absolutePath(mp4FilePath, recordPath);
         }
@@ -55,27 +55,30 @@ string Recorder::getRecordPath(Recorder::type type, const string &vhost, const s
     }
 }
 
-std::shared_ptr<MediaSinkInterface> Recorder::createRecorder(type type, const string &vhost, const string &app, const string &stream_id, const string &customized_path){
+std::shared_ptr<MediaSinkInterface> Recorder::createRecorder(type type, const string &vhost, const string &app, const string &stream_id, const string &customized_path, size_t max_second){
     auto path = Recorder::getRecordPath(type, vhost, app, stream_id, customized_path);
     switch (type) {
         case Recorder::type_hls: {
 #if defined(ENABLE_HLS)
-            auto ret = std::make_shared<HlsRecorder>(path, string(VHOST_KEY) + "=" + vhost);
+            GET_CONFIG(bool, enable_vhost, General::kEnableVhost);
+            auto ret = std::make_shared<HlsRecorder>(path, enable_vhost ? string(VHOST_KEY) + "=" + vhost : "");
             ret->setMediaSource(vhost, app, stream_id);
             return ret;
+#else
+            throw std::invalid_argument("hls相关功能未打开，请开启ENABLE_HLS宏后编译再测试");
 #endif
-            return nullptr;
+
         }
 
         case Recorder::type_mp4: {
 #if defined(ENABLE_MP4)
-            return std::make_shared<MP4Recorder>(path, vhost, app, stream_id);
+            return std::make_shared<MP4Recorder>(path, vhost, app, stream_id, max_second);
+#else
+            throw std::invalid_argument("mp4相关功能未打开，请开启ENABLE_MP4宏后编译再测试");
 #endif
-            return nullptr;
         }
 
-        default:
-            return nullptr;
+        default: throw std::invalid_argument("未知的录制类型");
     }
 }
 
@@ -87,13 +90,13 @@ bool Recorder::isRecording(type type, const string &vhost, const string &app, co
     return src->isRecording(type);
 }
 
-bool Recorder::startRecord(type type, const string &vhost, const string &app, const string &stream_id,const string &customized_path){
+bool Recorder::startRecord(type type, const string &vhost, const string &app, const string &stream_id,const string &customized_path, size_t max_second){
     auto src = MediaSource::find(vhost, app, stream_id);
     if (!src) {
         WarnL << "未找到相关的MediaSource,startRecord失败:" << vhost << "/" << app << "/" << stream_id;
         return false;
     }
-    return src->setupRecord(type, true, customized_path);
+    return src->setupRecord(type, true, customized_path, max_second);
 }
 
 bool Recorder::stopRecord(type type, const string &vhost, const string &app, const string &stream_id){
@@ -101,7 +104,7 @@ bool Recorder::stopRecord(type type, const string &vhost, const string &app, con
     if(!src){
         return false;
     }
-    return src->setupRecord(type, false, "");
+    return src->setupRecord(type, false, "", 0);
 }
 
 } /* namespace mediakit */

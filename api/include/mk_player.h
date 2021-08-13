@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -37,7 +37,7 @@ typedef void(API_CALL *on_mk_play_event)(void *user_data,int err_code,const char
  * @param dts 解码时间戳，单位毫秒
  * @param pts 显示时间戳，单位毫秒
  */
-typedef void(API_CALL *on_mk_play_data)(void *user_data,int track_type,int codec_id,void *data,int len,uint32_t dts,uint32_t pts);
+typedef void(API_CALL *on_mk_play_data)(void *user_data,int track_type,int codec_id,void *data,size_t len, uint32_t dts,uint32_t pts);
 
 /**
  * 创建一个播放器,支持rtmp[s]/rtsp[s]
@@ -74,6 +74,13 @@ API_EXPORT void API_CALL mk_player_play(mk_player ctx, const char *url);
 API_EXPORT void API_CALL mk_player_pause(mk_player ctx, int pause);
 
 /**
+ * 倍数播放，仅对点播有用
+ * @param ctx 播放器指针
+ * @param speed 0.5 1.0 2.0 
+ */
+API_EXPORT void API_CALL mk_player_speed(mk_player ctx, float speed);
+
+/**
  * 设置点播进度条
  * @param ctx 对象指针
  * @param progress 取值范围未 0.0～1.0
@@ -83,9 +90,9 @@ API_EXPORT void API_CALL mk_player_seekto(mk_player ctx, float progress);
 /**
  * 设置点播进度条
  * @param ctx 对象指针
- * @param seekPos 取值范围 相对于开始时间增量 单位秒
+ * @param seek_pos 取值范围 相对于开始时间增量 单位秒
  */
-API_EXPORT void API_CALL mk_player_seektoByPos(mk_player ctx, int seekPos);
+API_EXPORT void API_CALL mk_player_seekto_pos(mk_player ctx, int seek_pos);
 
 /**
  * 设置播放器开启播放结果回调函数
@@ -117,7 +124,16 @@ API_EXPORT void API_CALL mk_player_set_on_data(mk_player ctx, on_mk_play_data cb
  * 获取视频codec_id -1：不存在 0：H264，1：H265，2：AAC 3.G711A 4.G711U
  * @param ctx 播放器指针
  */
-API_EXPORT int API_CALL mk_player_video_codecId(mk_player ctx);
+API_EXPORT int API_CALL mk_player_video_codec_id(mk_player ctx);
+
+/**
+ * 获取视频codec_id, vendor类型, 私有头数据  codec_id -1：不存在 0：H264，1：H265，2：AAC 3.G711A 4.G711U
+ * @param ctx 播放器指针
+ * @param vendor 输出厂家类型 如果是私有流 应该是H264另外还有厂家类型
+ * @param head 厂家SDK头数据
+ * @param head 厂家SDK头数据长度
+ */
+API_EXPORT int API_CALL mk_player_video_codec_id_vendor_head(mk_player ctx, char* vendor, char* head, int* headLen);
 
 /**
  * 获取视频宽度
@@ -132,13 +148,13 @@ API_EXPORT int API_CALL mk_player_video_height(mk_player ctx);
 /**
  * 获取视频帧率
  */
-API_EXPORT int API_CALL mk_player_video_fps(mk_player ctx);
+API_EXPORT float API_CALL mk_player_video_fps(mk_player ctx);
 
 /**
  * 获取音频codec_id -1：不存在 0：H264，1：H265，2：AAC 3.G711A 4.G711U
  * @param ctx 播放器指针
  */
-API_EXPORT int API_CALL mk_player_audio_codecId(mk_player ctx);
+API_EXPORT int API_CALL mk_player_audio_codec_id(mk_player ctx);
 
 /**
  * 获取音频采样率

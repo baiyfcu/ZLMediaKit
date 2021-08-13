@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -60,7 +60,7 @@ void MP4MuxerInterface::resetTracks() {
     _started = false;
     _have_video = false;
     _mov_writter = nullptr;
-    _frameCached.clear();
+    _frame_merger.clear();
     _codec_to_trackid.clear();
 }
 
@@ -86,52 +86,22 @@ void MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
     int64_t dts_out, pts_out;
 
     switch (frame->getCodecId()) {
-        case CodecH264: {
-            int type = H264_TYPE(*((uint8_t *)frame->data() + frame->prefixSize()));
-            if(type == H264Frame::NAL_SEI){
-                break;
-            }
-        }
+        case CodecH264:
         case CodecH265: {
             //这里的代码逻辑是让SPS、PPS、IDR这些时间戳相同的帧打包到一起当做一个帧处理，
-            if (!_frameCached.empty() && _frameCached.back()->dts() != frame->dts()) {
-                Frame::Ptr back = _frameCached.back();
-                //求相对时间戳
-                track_info.stamp.revise(back->dts(), back->pts(), dts_out, pts_out);
-
-                if (_frameCached.size() != 1) {
-                    //缓存中有多帧，需要按照mp4格式合并一起
-                    string merged;
-                    _frameCached.for_each([&](const Frame::Ptr &frame) {
-                        uint32_t nalu_size = frame->size() - frame->prefixSize();
-                        nalu_size = htonl(nalu_size);
-                        merged.append((char *) &nalu_size, 4);
-                        merged.append(frame->data() + frame->prefixSize(), frame->size() - frame->prefixSize());
-                    });
-                    mp4_writer_write(_mov_writter.get(),
-                                       track_info.track_id,
-                                       merged.data(),
-                                       merged.size(),
-                                       pts_out,
-                                       dts_out,
-                                       back->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0);
-                } else {
-                    //缓存中只有一帧视频
-                    mp4_writer_write_l(_mov_writter.get(),
-                                       track_info.track_id,
-                                       back->data() + back->prefixSize(),
-                                       back->size() - back->prefixSize(),
-                                       pts_out,
-                                       dts_out,
-                                       back->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0,
-                                       1/*需要生成头4个字节的MP4格式start code*/);
-                }
-                _frameCached.clear();
-            }
-            //缓存帧，时间戳相同的帧合并一起写入mp4
-            _frameCached.emplace_back(Frame::getCacheAbleFrame(frame));
-        }
+            _frame_merger.inputFrame(frame, [&](uint32_t dts, uint32_t pts, const Buffer::Ptr &buffer, bool have_idr) {
+                track_info.stamp.revise(dts, pts, dts_out, pts_out);
+                mp4_writer_write(_mov_writter.get(),
+                                 track_info.track_id,
+                                 buffer->data(),
+                                 buffer->size(),
+                                 pts_out,
+                                 dts_out,
+                                 have_idr ? MOV_AV_FLAG_KEYFREAME : 0);
+            });
             break;
+        }
+
         default: {
             track_info.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
             mp4_writer_write(_mov_writter.get(),
@@ -141,8 +111,9 @@ void MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
                              pts_out,
                              dts_out,
                              frame->keyFrame() ? MOV_AV_FLAG_KEYFREAME : 0);
-        }
             break;
+        }
+
     }
 }
 
@@ -248,7 +219,7 @@ void MP4MuxerInterface::addTrack(const Track::Ptr &track) {
             struct mpeg4_avc_t avc = {0};
             string sps_pps = string("\x00\x00\x00\x01", 4) + h264_track->getSps() +
                              string("\x00\x00\x00\x01", 4) + h264_track->getPps();
-            h264_annexbtomp4(&avc, sps_pps.data(), sps_pps.size(), NULL, 0, NULL, NULL);
+            h264_annexbtomp4(&avc, sps_pps.data(), (int)sps_pps.size(), NULL, 0, NULL, NULL);
 
             uint8_t extra_data[1024];
             int extra_data_size = mpeg4_avc_decoder_configuration_record_save(&avc, extra_data, sizeof(extra_data));
@@ -283,7 +254,7 @@ void MP4MuxerInterface::addTrack(const Track::Ptr &track) {
             string vps_sps_pps = string("\x00\x00\x00\x01", 4) + h265_track->getVps() +
                                  string("\x00\x00\x00\x01", 4) + h265_track->getSps() +
                                  string("\x00\x00\x00\x01", 4) + h265_track->getPps();
-            h265_annexbtomp4(&hevc, vps_sps_pps.data(), vps_sps_pps.size(), NULL, 0, NULL, NULL);
+            h265_annexbtomp4(&hevc, vps_sps_pps.data(), (int)vps_sps_pps.size(), NULL, 0, NULL, NULL);
 
             uint8_t extra_data[1024];
             int extra_data_size = mpeg4_hevc_decoder_configuration_record_save(&hevc, extra_data, sizeof(extra_data));

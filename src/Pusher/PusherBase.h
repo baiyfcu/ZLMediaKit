@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -109,6 +109,11 @@ public:
         }
         _shutdownCB = cb;
     }
+
+    std::shared_ptr<SockInfo> getSockInfo() const{
+        return dynamic_pointer_cast<SockInfo>(_delegate);
+    }
+
 protected:
     PusherBase::Event _shutdownCB;
     PusherBase::Event _publishCB;

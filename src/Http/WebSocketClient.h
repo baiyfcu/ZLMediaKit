@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -32,7 +32,7 @@ class HttpWsClient;
 template <typename ClientType,WebSocketHeader::Type DataType>
 class ClientTypeImp : public ClientType {
 public:
-    typedef function<int(const Buffer::Ptr &buf)> onBeforeSendCB;
+    typedef function<ssize_t (const Buffer::Ptr &buf)> onBeforeSendCB;
     friend class HttpWsClient<ClientType,DataType>;
 
     template<typename ...ArgsType>
@@ -43,11 +43,11 @@ protected:
     /**
      * 发送前拦截并打包为websocket协议
      */
-    int send(const Buffer::Ptr &buf) override{
+    ssize_t send(Buffer::Ptr buf) override{
         if(_beforeSendCB){
             return _beforeSendCB(buf);
         }
-        return ClientType::send(buf);
+        return ClientType::send(std::move(buf));
     }
 
     /**
@@ -120,7 +120,7 @@ protected:
      * @return 返回后续content的长度；-1:后续数据全是content；>=0:固定长度content
      *          需要指出的是，在http头中带有Content-Length字段时，该返回值无效
      */
-    int64_t onResponseHeader(const string &status,const HttpHeader &headers) override {
+    ssize_t onResponseHeader(const string &status,const HttpHeader &headers) override {
         if(status == "101"){
             auto Sec_WebSocket_Accept = encodeBase64(SHA1::encode_bin(_Sec_WebSocket_Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
             if(Sec_WebSocket_Accept == const_cast<HttpHeader &>(headers)["Sec-WebSocket-Accept"]){
@@ -147,7 +147,7 @@ protected:
     /**
      * 接收websocket负载数据
      */
-    void onResponseBody(const char *buf,int64_t size,int64_t recvedSize,int64_t totalSize) override{
+    void onResponseBody(const char *buf,size_t size,size_t recvedSize,size_t totalSize) override{
         if(_onRecv){
             //完成websocket握手后，拦截websocket数据并解析
             _onRecv(buf, size);
@@ -220,7 +220,7 @@ protected:
      * @param len 负载数据长度
      * @param recved 已接收数据长度(包含本次数据长度)，等于header._payload_len时则接受完毕
      */
-    void onWebSocketDecodePayload(const WebSocketHeader &header, const uint8_t *ptr, uint64_t len, uint64_t recved) override{
+    void onWebSocketDecodePayload(const WebSocketHeader &header, const uint8_t *ptr, size_t len, size_t recved) override{
         _payload_section.append((char *)ptr,len);
     }
 
@@ -287,8 +287,8 @@ protected:
      * @param ptr 数据指针
      * @param len 数据指针长度
      */
-    void onWebSocketEncodeData(const Buffer::Ptr &buffer) override{
-        HttpClientImp::send(buffer);
+    void onWebSocketEncodeData(Buffer::Ptr buffer) override{
+        HttpClientImp::send(std::move(buffer));
     }
 
 private:
@@ -316,7 +316,7 @@ private:
             //触发连接成功事件
             _delegate.onConnect(ex);
             //拦截websocket数据接收
-            _onRecv = [this](const char *data, int len){
+            _onRecv = [this](const char *data, size_t len){
                 //解析websocket数据包
                 this->WebSocketSplitter::decode((uint8_t *)data, len);
             };
@@ -337,7 +337,7 @@ private:
 
 private:
     string _Sec_WebSocket_Key;
-    function<void(const char *data, int len)> _onRecv;
+    function<void(const char *data, size_t len)> _onRecv;
     ClientTypeImp<ClientType,DataType> &_delegate;
     string _payload_section;
     string _payload_cache;
@@ -384,6 +384,10 @@ public:
 
     void startWebSocket(const string &ws_url,float fTimeOutSec = 3){
         _wsClient->startWsClient(ws_url,fTimeOutSec);
+    }
+
+    HttpClient &getHttpClient() {
+        return *_wsClient;
     }
 
 private:

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -11,185 +11,115 @@
 #include "Common/config.h"
 #include "RtpReceiver.h"
 
-#define POP_HEAD(trackidx) \
-        auto it = _rtp_sort_cache_map[trackidx].begin(); \
-        onRtpSorted(it->second, trackidx); \
-        _rtp_sort_cache_map[trackidx].erase(it);
-
-#define AV_RB16(x)                           \
-    ((((const uint8_t*)(x))[0] << 8) |          \
-      ((const uint8_t*)(x))[1])
-
-#define RTP_MAX_SIZE (10 * 1024)
-
 namespace mediakit {
 
-RtpReceiver::RtpReceiver() {}
-RtpReceiver::~RtpReceiver() {}
+RtpTrack::RtpTrack() {
+    setOnSort([this](uint16_t seq, RtpPacket::Ptr &packet) {
+        onRtpSorted(std::move(packet));
+    });
+}
 
-bool RtpReceiver::handleOneRtp(int track_index, TrackType type, int samplerate, unsigned char *rtp_raw_ptr, unsigned int rtp_raw_len) {
-    if(rtp_raw_len < 12){
-        WarnL << "rtp包太小:" << rtp_raw_len;
-        return false;
+uint32_t RtpTrack::getSSRC() const {
+    return _ssrc;
+}
+
+void RtpTrack::clear() {
+    _ssrc = 0;
+    _ssrc_alive.resetTime();
+    PacketSortor<RtpPacket::Ptr>::clear();
+}
+
+RtpPacket::Ptr RtpTrack::inputRtp(TrackType type, int sample_rate, uint8_t *ptr, size_t len) {
+    if (len < RtpPacket::kRtpHeaderSize) {
+        WarnL << "rtp包太小:" << len;
+        return nullptr;
     }
-
-    uint8_t padding = 0;
-    if (rtp_raw_ptr[0] & 0x20) {
-        //获取padding大小
-        padding = rtp_raw_ptr[rtp_raw_len - 1];
-        //移除padding flag
-        rtp_raw_ptr[0] &= ~0x20;
-        //移除padding字节
-        rtp_raw_len -= padding;
+    GET_CONFIG(uint32_t, rtpMaxSize, Rtp::kRtpMaxSize);
+    if (len > 1024 * rtpMaxSize) {
+        WarnL << "超大的rtp包:" << len << " > " << 1024 * rtpMaxSize;
+        return nullptr;
     }
-
-    auto rtp_ptr = _rtp_pool.obtain();
-    auto &rtp = *rtp_ptr;
-
-    rtp.type = type;
-    rtp.interleaved = 2 * type;
-    rtp.mark = rtp_raw_ptr[1] >> 7;
-    rtp.PT = rtp_raw_ptr[1] & 0x7F;
-
-    //序列号,内存对齐
-    memcpy(&rtp.sequence, rtp_raw_ptr + 2, 2);
-    rtp.sequence = ntohs(rtp.sequence);
-
-    //时间戳,内存对齐
-    memcpy(&rtp.timeStamp, rtp_raw_ptr + 4, 4);
-    rtp.timeStamp = ntohl(rtp.timeStamp);
-
-    if(!samplerate){
+    if (!sample_rate) {
         //无法把时间戳转换成毫秒
-        return false;
+        return nullptr;
     }
-    //时间戳转换成毫秒
-    rtp.timeStamp = rtp.timeStamp * 1000LL / samplerate;
+    RtpHeader *header = (RtpHeader *) ptr;
+    if (header->version != RtpPacket::kRtpVersion) {
+        throw BadRtpException("非法的rtp，version字段非法");
+    }
+    if (!header->getPayloadSize(len)) {
+        //无有效负载的rtp包
+        return nullptr;
+    }
 
-    //ssrc,内存对齐
-    memcpy(&rtp.ssrc, rtp_raw_ptr + 8, 4);
-    rtp.ssrc = ntohl(rtp.ssrc);
+    //比对缓存ssrc
+    auto ssrc = ntohl(header->ssrc);
 
-    if (_ssrc[track_index] != rtp.ssrc) {
-        if (_ssrc[track_index] == 0) {
-            //保存SSRC至track对象
-            _ssrc[track_index] = rtp.ssrc;
-        }else{
-            //ssrc错误
-            WarnL << "ssrc错误:" << rtp.ssrc << " != " << _ssrc[track_index];
-            if (_ssrc_err_count[track_index]++ > 10) {
-                //ssrc切换后清除老数据
-                WarnL << "ssrc更换:" << _ssrc[track_index] << " -> " << rtp.ssrc;
-                _rtp_sort_cache_map[track_index].clear();
-                _ssrc[track_index] = rtp.ssrc;
-            }
-            return false;
+    if (!_ssrc) {
+        //记录并锁定ssrc
+        _ssrc = ssrc;
+        _ssrc_alive.resetTime();
+    } else if (_ssrc == ssrc) {
+        //ssrc匹配正确,刷新计时器
+        _ssrc_alive.resetTime();
+    } else {
+        //ssrc错误
+        if (_ssrc_alive.elapsedTime() < 3 * 1000) {
+            //接受正确ssrc的rtp在10秒内，那么我们认为存在多路rtp,忽略掉ssrc不匹配的rtp
+            WarnL << "ssrc不匹配,rtp已丢弃:" << ssrc << " != " << _ssrc;
+            return nullptr;
         }
+        InfoL << "rtp流ssrc切换:" << _ssrc << " -> " << ssrc;
+        _ssrc = ssrc;
+        _ssrc_alive.resetTime();
     }
 
-    //ssrc匹配正确，不匹配计数清零
-    _ssrc_err_count[track_index] = 0;
+    auto rtp = RtpPacket::create();
+    //需要添加4个字节的rtp over tcp头
+    rtp->setCapacity(RtpPacket::kRtpTcpHeaderSize + len);
+    rtp->setSize(RtpPacket::kRtpTcpHeaderSize + len);
+    rtp->sample_rate = sample_rate;
+    rtp->type = type;
 
-    //获取rtp中媒体数据偏移量
-    rtp.offset 	= 12 + 4;
-    int csrc     	= rtp_raw_ptr[0] & 0x0f;
-    int ext      	= rtp_raw_ptr[0] & 0x10;
-    rtp.offset 	+= 4 * csrc;
-    if (ext && rtp_raw_len >= rtp.offset) {
-        /* calculate the header extension length (stored as number of 32-bit words) */
-        ext = (AV_RB16(rtp_raw_ptr + rtp.offset - 2) + 1) << 2;
-        rtp.offset += ext;
-    }
-
-    if(rtp_raw_len + 4 <= rtp.offset){
-        WarnL << "无有效负载的rtp包:" << rtp_raw_len << " <= " << (int)rtp.offset;
-        return false;
-    }
-
-    if(rtp_raw_len > RTP_MAX_SIZE){
-        WarnL << "超大的rtp包:" << rtp_raw_len << " > " << RTP_MAX_SIZE;
-        return false;
-    }
-
-    //设置rtp负载长度
-    rtp.setCapacity(rtp_raw_len + 4);
-    rtp.setSize(rtp_raw_len + 4);
-    uint8_t *payload_ptr = (uint8_t *)rtp.data();
-    payload_ptr[0] = '$';
-    payload_ptr[1] = rtp.interleaved;
-    payload_ptr[2] = rtp_raw_len >> 8;
-    payload_ptr[3] = (rtp_raw_len & 0x00FF);
-    //拷贝rtp负载
-    memcpy(payload_ptr + 4, rtp_raw_ptr, rtp_raw_len);
-    //排序rtp
-    sortRtp(rtp_ptr,track_index);
-    return true;
+    //赋值4个字节的rtp over tcp头
+    uint8_t *data = (uint8_t *) rtp->data();
+    data[0] = '$';
+    data[1] = 2 * type;
+    data[2] = (len >> 8) & 0xFF;
+    data[3] = len & 0xFF;
+    //拷贝rtp
+    memcpy(&data[4], ptr, len);
+    //设置ntp时间戳
+    rtp->ntp_stamp = _ntp_stamp.getNtpStamp(ntohl(rtp->getHeader()->stamp), sample_rate);
+    onBeforeRtpSorted(rtp);
+    sortPacket(rtp->getSeq(), rtp);
+    return rtp;
 }
 
-void RtpReceiver::sortRtp(const RtpPacket::Ptr &rtp,int track_index){
-    if(rtp->sequence != _last_seq[track_index] + 1 && _last_seq[track_index] != 0){
-        //包乱序或丢包
-        _seq_ok_count[track_index] = 0;
-        _sort_started[track_index] = true;
-        if(_last_seq[track_index] > rtp->sequence && _last_seq[track_index] - rtp->sequence > 0xFF){
-            //sequence回环，清空所有排序缓存
-            while (_rtp_sort_cache_map[track_index].size()) {
-                POP_HEAD(track_index)
-            }
-            ++_seq_cycle_count[track_index];
-        }
-    }else{
-        //正确序列的包
-        _seq_ok_count[track_index]++;
-    }
+void RtpTrack::setNtpStamp(uint32_t rtp_stamp, uint32_t sample_rate, uint64_t ntp_stamp_ms){
+    _ntp_stamp.setNtpStamp(rtp_stamp, sample_rate, ntp_stamp_ms);
+}
 
-    _last_seq[track_index] = rtp->sequence;
+////////////////////////////////////////////////////////////////////////////////////
 
-    //开始排序缓存
-    if (_sort_started[track_index]) {
-        _rtp_sort_cache_map[track_index].emplace(rtp->sequence, rtp);
-        GET_CONFIG(uint32_t,clearCount,Rtp::kClearCount);
-        GET_CONFIG(uint32_t,maxRtpCount,Rtp::kMaxRtpCount);
-        if (_seq_ok_count[track_index] >= clearCount) {
-            //网络环境改善，需要清空排序缓存
-            _seq_ok_count[track_index] = 0;
-            _sort_started[track_index] = false;
-            while (_rtp_sort_cache_map[track_index].size()) {
-                POP_HEAD(track_index)
-            }
-        } else if (_rtp_sort_cache_map[track_index].size() >= maxRtpCount) {
-            //排序缓存溢出
-            POP_HEAD(track_index)
-        }
-    }else{
-        //正确序列
-        onRtpSorted(rtp, track_index);
+void RtpTrackImp::setOnSorted(OnSorted cb) {
+    _on_sorted = std::move(cb);
+}
+
+void RtpTrackImp::setBeforeSorted(BeforeSorted cb) {
+    _on_before_sorted = std::move(cb);
+}
+
+void RtpTrackImp::onRtpSorted(RtpPacket::Ptr rtp) {
+    if (_on_sorted) {
+        _on_sorted(std::move(rtp));
     }
 }
 
-void RtpReceiver::clear() {
-    CLEAR_ARR(_last_seq);
-    CLEAR_ARR(_ssrc);
-    CLEAR_ARR(_ssrc_err_count);
-    CLEAR_ARR(_seq_ok_count);
-    CLEAR_ARR(_sort_started);
-    CLEAR_ARR(_seq_cycle_count);
-
-    _rtp_sort_cache_map[0].clear();
-    _rtp_sort_cache_map[1].clear();
+void RtpTrackImp::onBeforeRtpSorted(const RtpPacket::Ptr &rtp) {
+    if (_on_before_sorted) {
+        _on_before_sorted(rtp);
+    }
 }
-
-void RtpReceiver::setPoolSize(int size) {
-    _rtp_pool.setSize(size);
-}
-
-int RtpReceiver::getJitterSize(int track_index){
-    return _rtp_sort_cache_map[track_index].size();
-}
-
-int RtpReceiver::getCycleCount(int track_index){
-    return _seq_cycle_count[track_index];
-}
-
 
 }//namespace mediakit

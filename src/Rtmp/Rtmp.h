@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -115,12 +115,57 @@ public:
 
 class RtmpHeader {
 public:
-    uint8_t flags;
+#if __BYTE_ORDER == __BIG_ENDIAN
+    uint8_t fmt : 2;
+    uint8_t chunk_id : 6;
+#else
+    uint8_t chunk_id : 6;
+    //0、1、2、3分别对应 12、8、4、1长度
+    uint8_t fmt : 2;
+#endif
     uint8_t time_stamp[3];
     uint8_t body_size[3];
     uint8_t type_id;
     uint8_t stream_index[4]; /* Note, this is little-endian while others are BE */
 }PACKED;
+
+class FLVHeader {
+public:
+    //FLV
+    char flv[3];
+    //File version (for example, 0x01 for FLV version 1)
+    uint8_t version;
+#if __BYTE_ORDER == __BIG_ENDIAN
+    //保留,置0
+    uint8_t : 5;
+    //是否有音频
+    uint8_t have_audio: 1;
+    //保留,置0
+    uint8_t : 1;
+    //是否有视频
+    uint8_t have_video: 1;
+#else
+    //是否有视频
+    uint8_t have_video: 1;
+    //保留,置0
+    uint8_t : 1;
+    //是否有音频
+    uint8_t have_audio: 1;
+    //保留,置0
+    uint8_t : 5;
+#endif
+    //The length of this header in bytes,固定为9
+    uint32_t length;
+} PACKED;
+
+class RtmpTagHeader {
+public:
+    uint8_t type = 0;
+    uint8_t data_size[3] = {0};
+    uint8_t timestamp[3] = {0};
+    uint8_t timestamp_ex = 0;
+    uint8_t streamid[3] = {0}; /* Always 0. */
+} PACKED;
 
 #if defined(_WIN32)
 #pragma pack(pop)
@@ -128,39 +173,33 @@ public:
 
 class RtmpPacket : public Buffer{
 public:
-    typedef std::shared_ptr<RtmpPacket> Ptr;
+    friend class RtmpProtocol;
+    using Ptr = std::shared_ptr<RtmpPacket>;
+    bool is_abs_stamp;
     uint8_t type_id;
-    uint32_t body_size = 0;
-    uint32_t time_stamp = 0;
-    bool is_abs_stamp = false;
-    uint32_t ts_field = 0;
+    uint32_t time_stamp;
+    uint32_t ts_field;
     uint32_t stream_index;
     uint32_t chunk_id;
-    std::string buffer;
+    size_t body_size;
+    BufferLikeString buffer;
 
 public:
+    static Ptr create();
+
     char *data() const override{
         return (char*)buffer.data();
     }
-    uint32_t size() const override {
+    size_t size() const override {
         return buffer.size();
     }
 
-public:
-    RtmpPacket() = default;
-    RtmpPacket(const RtmpPacket &that) = delete;
-    RtmpPacket &operator=(const RtmpPacket &that) = delete;
-    RtmpPacket &operator=(RtmpPacket &&that) = delete;
-
-    RtmpPacket(RtmpPacket &&that){
-        type_id = that.type_id;
-        body_size = that.body_size;
-        time_stamp = that.time_stamp;
-        is_abs_stamp = that.is_abs_stamp;
-        ts_field = that.ts_field;
-        stream_index = that.stream_index;
-        chunk_id = that.chunk_id;
-        buffer = std::move(that.buffer);
+    void clear(){
+        is_abs_stamp = false;
+        time_stamp = 0;
+        ts_field = 0;
+        body_size = 0;
+        buffer.clear();
     }
 
     bool isVideoKeyFrame() const {
@@ -214,6 +253,26 @@ public:
         const static int channel[] = { 1, 2 };
         return channel[flvStereoOrMono];
     }
+
+private:
+    friend class ResourcePool_l<RtmpPacket>;
+    RtmpPacket(){
+        clear();
+    }
+
+    RtmpPacket &operator=(const RtmpPacket &that) {
+        is_abs_stamp = that.is_abs_stamp;
+        stream_index = that.stream_index;
+        body_size = that.body_size;
+        type_id = that.type_id;
+        ts_field = that.ts_field;
+        time_stamp = that.time_stamp;
+        return *this;
+    }
+
+private:
+    //对象个数统计
+    ObjectStatistic<RtmpPacket> _statistic;
 };
 
 /**
@@ -242,10 +301,10 @@ public:
     typedef std::shared_ptr<TitleMeta> Ptr;
 
     TitleMeta(float dur_sec = 0,
-              uint64_t fileSize = 0,
+              size_t fileSize = 0,
               const map<string,string> &header = map<string,string>()){
         _metadata.set("duration", dur_sec);
-        _metadata.set("fileSize", 0);
+        _metadata.set("fileSize", (int)fileSize);
         _metadata.set("server",SERVER_NAME);
         for (auto &pr : header){
             _metadata.set(pr.first, pr.second);
@@ -261,7 +320,7 @@ class VideoMeta : public Metadata{
 public:
     typedef std::shared_ptr<VideoMeta> Ptr;
 
-    VideoMeta(const VideoTrack::Ptr &video,int datarate = 5000);
+    VideoMeta(const VideoTrack::Ptr &video);
     virtual ~VideoMeta(){}
 
     CodecId getCodecId() const override{
@@ -275,7 +334,7 @@ class AudioMeta : public Metadata{
 public:
     typedef std::shared_ptr<AudioMeta> Ptr;
 
-    AudioMeta(const AudioTrack::Ptr &audio,int datarate = 160);
+    AudioMeta(const AudioTrack::Ptr &audio);
 
     virtual ~AudioMeta(){}
 

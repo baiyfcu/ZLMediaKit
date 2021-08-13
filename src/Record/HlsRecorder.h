@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -21,7 +21,7 @@ public:
     HlsRecorder(const string &m3u8_file, const string &params){
         GET_CONFIG(uint32_t, hlsNum, Hls::kSegmentNum);
         GET_CONFIG(uint32_t, hlsBufSize, Hls::kFileBufSize);
-        GET_CONFIG(uint32_t, hlsDuration, Hls::kSegmentDuration);
+        GET_CONFIG(float, hlsDuration, Hls::kSegmentDuration);
         _hls = std::make_shared<HlsMakerImp>(m3u8_file, params, hlsBufSize, hlsDuration, hlsNum);
         //清空上次的残余文件
         _hls->clearCache();
@@ -34,7 +34,7 @@ public:
     }
 
     void setListener(const std::weak_ptr<MediaSourceEvent> &listener) {
-        _listener = listener;
+        setDelegate(listener);
         _hls->getMediaSource()->setListener(shared_from_this());
         //先注册媒体流，后续可以按需生成
         _hls->getMediaSource()->registHls(false);
@@ -45,9 +45,10 @@ public:
     }
 
     void onReaderChanged(MediaSource &sender, int size) override {
+        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
         //hls保留切片个数为0时代表为hls录制(不删除切片)，那么不管有无观看者都一直生成hls
-        _enabled = _hls->isLive() ? size : true;
-        if (!size && _hls->isLive()) {
+        _enabled = hls_demand ? (_hls->isLive() ? size : true) : true;
+        if (!size && _hls->isLive() && hls_demand) {
             //hls直播时，如果无人观看就删除视频缓存，目的是为了防止视频跳跃
             _clear_cache = true;
         }
@@ -55,23 +56,29 @@ public:
     }
 
     bool isEnabled() {
+        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
         //缓存尚未清空时，还允许触发inputFrame函数，以便及时清空缓存
-        return _clear_cache ? true : _enabled;
+        return hls_demand ? (_clear_cache ? true : _enabled) : true;
     }
 
-    void inputFrame(const Frame::Ptr &frame) override{
-        if (_clear_cache) {
+    void inputFrame(const Frame::Ptr &frame) override {
+        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
+        if (_clear_cache && hls_demand) {
             _clear_cache = false;
             _hls->clearCache();
         }
-        if (_enabled) {
+        if (_enabled || !hls_demand) {
             TsMuxer::inputFrame(frame);
         }
     }
 
 private:
-    void onTs(const void *packet, int bytes, uint32_t timestamp, bool is_idr_fast_packet) override {
-        _hls->inputData((char *) packet, bytes, timestamp, is_idr_fast_packet);
+    void onTs(std::shared_ptr<Buffer> buffer, uint32_t timestamp, bool is_idr_fast_packet) override {
+        if (!buffer) {
+            _hls->inputData(nullptr, 0, timestamp, is_idr_fast_packet);
+        } else {
+            _hls->inputData(buffer->data(), buffer->size(), timestamp, is_idr_fast_packet);
+        }
     }
 
 private:

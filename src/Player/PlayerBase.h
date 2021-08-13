@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -19,6 +19,7 @@
 #include "Util/mini.h"
 #include "Util/RingBuffer.h"
 #include "Common/MediaSource.h"
+#include "Common/MediaSink.h"
 #include "Extension/Frame.h"
 #include "Extension/Track.h"
 using namespace toolkit;
@@ -63,6 +64,12 @@ public:
      * @param bPause
      */
     virtual void pause(bool bPause) {}
+
+    /**
+     * 倍数播放
+     * @param speed 1.0 2.0 0.5
+     */
+    virtual void speed(float speed) {}
 
     /**
      * 中断播放
@@ -115,7 +122,7 @@ public:
      * 设置一个MediaSource，直接生产rtsp/rtmp代理
      * @param src
      */
-    virtual void setMediaSouce(const MediaSource::Ptr & src) {}
+    virtual void setMediaSource(const MediaSource::Ptr & src) {}
 
     /**
      * 获取丢包率，只支持rtsp
@@ -145,15 +152,16 @@ public:
     typedef std::shared_ptr<PlayerImp> Ptr;
 
     template<typename ...ArgsType>
-    PlayerImp(ArgsType &&...args):Parent(std::forward<ArgsType>(args)...){}
+    PlayerImp(ArgsType &&...args):Parent(std::forward<ArgsType>(args)...) {}
+    virtual ~PlayerImp() {}
 
-    virtual ~PlayerImp(){}
     void setOnShutdown(const function<void(const SockException &)> &cb) override {
         if (_delegate) {
             _delegate->setOnShutdown(cb);
         }
         _shutdownCB = cb;
     }
+
     void setOnPlayResult(const function<void(const SockException &ex)> &cb) override {
         if (_delegate) {
             _delegate->setOnPlayResult(cb);
@@ -168,31 +176,35 @@ public:
         _resumeCB = cb;
     }
 
-    bool isInited(int analysisMs) override{
+    bool isInited(int analysisMs) override {
         if (_delegate) {
             return _delegate->isInited(analysisMs);
         }
         return Parent::isInited(analysisMs);
     }
+
     float getDuration() const override {
         if (_delegate) {
             return _delegate->getDuration();
         }
         return Parent::getDuration();
     }
-    float getProgress() const override{
+
+    float getProgress() const override {
         if (_delegate) {
             return _delegate->getProgress();
         }
         return Parent::getProgress();
     }
+
     uint32_t getProgressPos() const override {
         if (_delegate) {
             return _delegate->getProgressPos();
         }
         return Parent::getProgressPos();
     }
-    void seekTo(float fProgress) override{
+
+    void seekTo(float fProgress) override {
         if (_delegate) {
             return _delegate->seekTo(fProgress);
         }
@@ -206,19 +218,24 @@ public:
         return Parent::seekTo(seekPos);
     }
 
-    void setMediaSouce(const MediaSource::Ptr & src) override {
+    void setMediaSource(const MediaSource::Ptr &src) override {
         if (_delegate) {
-            _delegate->setMediaSouce(src);
+            _delegate->setMediaSource(src);
         }
         _pMediaSrc = src;
     }
 
-    vector<Track::Ptr> getTracks(bool trackReady = true) const override{
+    vector<Track::Ptr> getTracks(bool trackReady = true) const override {
         if (_delegate) {
             return _delegate->getTracks(trackReady);
         }
         return Parent::getTracks(trackReady);
     }
+
+    std::shared_ptr<SockInfo> getSockInfo() const {
+        return dynamic_pointer_cast<SockInfo>(_delegate);
+    }
+
 protected:
     void onShutdown(const SockException &ex) override {
         if (_shutdownCB) {
@@ -247,18 +264,10 @@ protected:
     MediaSource::Ptr _pMediaSrc;
 };
 
-
-class Demuxer : public PlayerBase{
+class Demuxer : public PlayerBase, public TrackListener{
 public:
-    class Listener{
-    public:
-        Listener() = default;
-        virtual ~Listener() = default;
-        virtual void onAddTrack(const Track::Ptr &track) = 0;
-    };
-
-    Demuxer(){};
-    virtual ~Demuxer(){};
+    Demuxer() = default;
+    ~Demuxer() override = default;
 
     /**
      * 返回是否完成初始化完毕
@@ -287,15 +296,19 @@ public:
     /**
      * 设置track监听器
      */
-    void setTrackListener(Listener *listener);
+    void setTrackListener(TrackListener *listener);
+
 protected:
-    void onAddTrack(const Track::Ptr &track);
+    void addTrack(const Track::Ptr &track) override;
+    void addTrackCompleted() override;
+    void resetTracks() override;
+
 protected:
-    Listener *_listener = nullptr;
+    float _fDuration = 0;
+    Ticker _ticker;
     AudioTrack::Ptr _audioTrack;
     VideoTrack::Ptr _videoTrack;
-    Ticker _ticker;
-    float _fDuration = 0;
+    TrackListener *_listener = nullptr;
 };
 
 } /* namespace mediakit */

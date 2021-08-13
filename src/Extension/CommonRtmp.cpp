@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -22,11 +22,8 @@ CodecId CommonRtmpDecoder::getCodecId() const {
 }
 
 void CommonRtmpDecoder::obtainFrame() {
-    //从缓存池重新申请对象，防止覆盖已经写入环形缓存的对象
-    _frame = ResourcePoolHelper<FrameImp>::obtainObj();
-    _frame->_buffer.clear();
+    _frame = FrameImp::create();
     _frame->_codec_id = _codec;
-    _frame->_prefix_size = 0;
 }
 
 void CommonRtmpDecoder::inputRtmp(const RtmpPacket::Ptr &rtmp) {
@@ -49,8 +46,7 @@ void CommonRtmpEncoder::inputFrame(const Frame::Ptr &frame) {
     if (!_audio_flv_flags) {
         return;
     }
-    RtmpPacket::Ptr rtmp = ResourcePoolHelper<RtmpPacket>::obtainObj();
-    rtmp->buffer.clear();
+    auto rtmp = RtmpPacket::create();
     //header
     rtmp->buffer.push_back(_audio_flv_flags);
     //data

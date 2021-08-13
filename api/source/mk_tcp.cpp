@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -24,7 +24,7 @@ API_EXPORT const char* API_CALL mk_sock_info_peer_ip(const mk_sock_info ctx, cha
 API_EXPORT const char* API_CALL mk_sock_info_local_ip(const mk_sock_info ctx, char *buf){
     assert(ctx);
     SockInfo *sock = (SockInfo *)ctx;
-    strcpy(buf,sock->get_peer_ip().c_str());
+    strcpy(buf,sock->get_local_ip().c_str());
     return buf;
 }
 API_EXPORT uint16_t API_CALL mk_sock_info_peer_port(const mk_sock_info ctx){
@@ -51,7 +51,7 @@ API_EXPORT void API_CALL mk_tcp_session_shutdown(const mk_tcp_session ctx,int er
     session->safeShutdown(SockException((ErrCode)err,err_msg));
 }
 
-API_EXPORT void API_CALL mk_tcp_session_send(const mk_tcp_session ctx,const char *data,int len){
+API_EXPORT void API_CALL mk_tcp_session_send(const mk_tcp_session ctx,const char *data, size_t len){
     assert(ctx && data);
     if(!len){
         len = strlen(data);
@@ -60,7 +60,7 @@ API_EXPORT void API_CALL mk_tcp_session_send(const mk_tcp_session ctx,const char
     session->SockSender::send(data,len);
 }
 
-API_EXPORT void API_CALL mk_tcp_session_send_safe(const mk_tcp_session ctx,const char *data,int len){
+API_EXPORT void API_CALL mk_tcp_session_send_safe(const mk_tcp_session ctx,const char *data,size_t len){
     assert(ctx && data);
     if(!len){
         len = strlen(data);
@@ -254,7 +254,8 @@ API_EXPORT void API_CALL mk_tcp_client_send_safe(mk_tcp_client ctx, const char *
     assert(ctx && data);
     TcpClientForC::Ptr *client = (TcpClientForC::Ptr *)ctx;
     weak_ptr<TcpClient> weakClient = *client;
-    Buffer::Ptr buf = (*client)->obtainBuffer(data,len);
+    auto buf = BufferRaw::create();
+    buf->assign(data,len);
     (*client)->async([weakClient,buf](){
         auto strongClient = weakClient.lock();
         if(strongClient){

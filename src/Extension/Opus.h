@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -31,37 +31,6 @@ private:
     }
     //生成sdp
     Sdp::Ptr getSdp() override ;
-};
-
-/**
- * Opus类型SDP
- */
-class OpusSdp : public Sdp {
-public:
-    /**
-     * 构造opus sdp
-     * @param sample_rate 音频采样率
-     * @param payload_type rtp payload
-     * @param bitrate 比特率
-     */
-    OpusSdp(int sample_rate,
-            int channels,
-            int payload_type = 98,
-            int bitrate = 128) : Sdp(sample_rate,payload_type){
-        _printer << "m=audio 0 RTP/AVP " << payload_type << "\r\n";
-        _printer << "a=rtpmap:" << payload_type << " opus/" << sample_rate  << "/" << channels << "\r\n";
-        _printer << "a=control:trackID=" << (int)TrackAudio << "\r\n";
-    }
-
-    string getSdp() const override {
-        return _printer;
-    }
-
-    CodecId getCodecId() const override {
-        return CodecOpus;
-    }
-private:
-    _StrPrinter _printer;
 };
 
 }//namespace mediakit

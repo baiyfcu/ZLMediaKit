@@ -13,7 +13,7 @@
 ## 项目特点
 
 - 基于C++11开发，避免使用裸指针，代码稳定可靠，性能优越。
-- 支持多种协议(RTSP/RTMP/HLS/HTTP-FLV/Websocket-FLV/GB28181/HTTP-TS/Websocket-TS/HTTP-fMP4/Websocket-fMP4/MP4),支持协议互转。
+- 支持多种协议(RTSP/RTMP/HLS/HTTP-FLV/WebSocket-FLV/GB28181/HTTP-TS/WebSocket-TS/HTTP-fMP4/WebSocket-fMP4/MP4/WebRTC),支持协议互转。
 - 使用多路复用/多线程/异步网络IO模式开发，并发性能优越，支持海量客户端连接。
 - 代码经过长期大量的稳定性、性能测试，已经在线上商用验证已久。
 - 支持linux、macos、ios、android、windows全平台。
@@ -33,7 +33,7 @@
 
 ## 功能清单
 ### 功能一览
-<img width="800" alt="图片" src="https://user-images.githubusercontent.com/11495632/93857284-f15b5f00-fcec-11ea-894d-83eb656dc235.png">
+<img width="800" alt="功能一览" src="https://user-images.githubusercontent.com/11495632/114176523-d50fce80-996d-11eb-81f8-0a2e2715ba7b.png">
 
 - RTSP[S]
   - RTSP[S] 服务器，支持RTMP/MP4/HLS转RTSP[S],支持亚马逊echo show这样的设备
@@ -65,10 +65,12 @@
 - TS
   - 支持http[s]-ts直播
   - 支持ws[s]-ts直播
+  - 支持H264/H265/AAC/G711/OPUS编码
   
 - fMP4
   - 支持http[s]-fmp4直播
   - 支持ws[s]-fmp4直播
+  - 支持H264/H265/AAC/G711/OPUS编码
 
 - HTTP[S]与WebSocket
   - 服务器支持`目录索引生成`,`文件下载`,`表单提交请求`
@@ -83,11 +85,18 @@
   - 支持UDP/TCP国标RTP(PS或TS)推流服务器，可以转换成RTSP/RTMP/HLS等协议
   - 支持RTSP/RTMP/HLS转国标推流客户端，支持TCP/UDP模式，提供相应restful api
   - 支持H264/H265/AAC/G711/OPUS编码
+  - 支持海康ehome推流
 
 - MP4点播与录制
   - 支持录制为FLV/HLS/MP4
   - RTSP/RTMP/HTTP-FLV/WS-FLV支持MP4文件点播，支持seek
   - 支持H264/H265/AAC/G711/OPUS编码
+  
+- WebRTC(体验)
+  - 支持WebRTC推流，支持转其他协议
+  - 支持WebRTC播放，支持其他协议转WebRTC     
+  - 支持simulcast
+  - 支持rtx/nack
   
 - 其他
   - 支持丰富的restful api以及web hook事件 
@@ -102,9 +111,6 @@
   - 支持http api生成并返回实时截图
   - 支持按需解复用、转协议，当有人观看时才开启转协议
   
-## 更新日志
-  - 2020/5/17 新增支持hls播发器，支持hls拉流代理
-
 
 ## 编译以及测试
 **编译前务必仔细参考wiki:[快速开始](https://github.com/xia-chu/ZLMediaKit/wiki/%E5%BF%AB%E9%80%9F%E5%BC%80%E5%A7%8B)操作!!!**
@@ -131,26 +137,30 @@ docker run -id -p 1935:1935 -p 8080:80 -p 8554:554 -p 10000:10000 -p 10000:10000
 bash build_docker_images.sh
 ```
 
-## 参考案例
+## 合作项目
 
- - [IOS摄像头实时录制,生成rtsp/rtmp/hls/http-flv](https://gitee.com/xia-chu/IOSMedia)
- - [IOS rtmp/rtsp播放器，视频推流器](https://gitee.com/xia-chu/IOSPlayer)
- - [支持linux、windows、mac的rtmp/rtsp播放器](https://github.com/xia-chu/ZLMediaPlayer)
- - [基于ZLMediaKit分支的管理WEB网站](https://github.com/chenxiaolei/ZLMediaKit_NVR_UI)
- - [基于ZLMediaKit主线的管理WEB网站](https://gitee.com/kkkkk5G/MediaServerUI)
- - [DotNetCore的RESTful客户端](https://github.com/MingZhuLiu/ZLMediaKit.DotNetCore.Sdk)
- - [C#版本的Http API与Hook](https://github.com/chengxiaosheng/ZLMediaKit.HttpApi)
- - [GB28181-2016网络视频平台](https://github.com/swwheihei/wvp)
- - [node-js版本的GB28181平台](https://gitee.com/hfwudao/GB28181_Node_Http)
- - [基于C SDK实现的推流客户端](https://github.com/hctym1995/ZLM_ApiDemo)
- - [Go实现的海康ehome服务器](https://github.com/tsingeye/FreeEhome)
- 
+ - 可视化管理网站
+    - [一个非常漂亮的可视化后台管理系统](https://github.com/MingZhuLiu/ZLMediaServerManagent)
+    - [基于ZLMediaKit主线的管理WEB网站](https://gitee.com/kkkkk5G/MediaServerUI) 
+    - [基于ZLMediaKit分支的管理WEB网站](https://github.com/chenxiaolei/ZLMediaKit_NVR_UI)
+    
+ - 流媒体管理平台
+   - [功能强大的流媒体控制管理接口平台,支持GB28181](https://github.com/chatop2020/AKStream)
+   - [GB28181-2016网络视频平台](https://github.com/648540858/wvp-GB28181-pro)
+   - [node-js版本的GB28181平台](https://gitee.com/hfwudao/GB28181_Node_Http)
+   - [Go实现的海康ehome服务器](https://github.com/tsingeye/FreeEhome)
+
+ - 客户端
+   - [基于C SDK实现的推流客户端](https://github.com/hctym1995/ZLM_ApiDemo)
+   - [C#版本的Http API与Hook](https://github.com/chengxiaosheng/ZLMediaKit.HttpApi)
+   - [DotNetCore的RESTful客户端](https://github.com/MingZhuLiu/ZLMediaKit.DotNetCore.Sdk)
 
 ## 授权协议
 
 本项目自有代码使用宽松的MIT协议，在保留版权信息的情况下可以自由应用于各自商用、非商业的项目。
 但是本项目也零碎的使用了一些其他的开源代码，在商用的情况下请自行替代或剔除；
-由于使用本项目而产生的商业纠纷或侵权行为一概与本项项目及开发者无关，请自行承担法律风险。
+由于使用本项目而产生的商业纠纷或侵权行为一概与本项目及开发者无关，请自行承担法律风险。
+在使用本项目代码时，也应该在授权协议中同时表明本项目依赖的第三方库的协议。
 
 ## 联系方式
 
@@ -165,6 +175,12 @@ bash build_docker_images.sh
  - 2、如果您的问题还没解决，可以提issue.
  - 3、有些问题，如果不具备参考性的，无需在issue提的，可以在qq群提.
  - 4、QQ私聊一般不接受无偿技术咨询和支持([为什么不提倡QQ私聊](https://github.com/xia-chu/ZLMediaKit/wiki/%E4%B8%BA%E4%BB%80%E4%B9%88%E4%B8%8D%E5%BB%BA%E8%AE%AEQQ%E7%A7%81%E8%81%8A%E5%92%A8%E8%AF%A2%E9%97%AE%E9%A2%98%EF%BC%9F)).
+
+## 特别感谢
+
+本项目采用了[老陈](https://github.com/ireader) 的 [media-server](https://github.com/ireader/media-server) 库，
+本项目的 ts/fmp4/mp4/ps 容器格式的复用解复用都依赖media-server库。在实现本项目诸多功能时，老陈多次给予了无私热情关键的帮助，
+特此对他表示诚挚的感谢！
 
 ## 致谢
 
@@ -192,12 +208,32 @@ bash build_docker_images.sh
 [swwheihei](https://github.com/swwheihei)
 [KKKKK5G](https://gitee.com/kkkkk5G)
 [Zhou Weimin](<zhouweimin@supremind.com>)
+[Jim Jin](https://github.com/jim-king-2000)
+[西瓜丶](<392293307@qq.com>)
+[MingZhuLiu](https://github.com/MingZhuLiu)
+[chengxiaosheng](https://github.com/chengxiaosheng)
+[big panda](<2381267071@qq.com>)
+[tanningzhong](https://github.com/tanningzhong)
+[hctym1995](https://github.com/hctym1995)
+[hewenyuan](https://gitee.com/kingyuanyuan)
+[sunhui](<sunhui200475@163.com>)
+[mirs](fangpengcheng@bilibili.com>)
+[Kevin Cheng](kevin__cheng@outlook.com>)
+[Liu Jiang](root@oopy.org>)
+[along](https://github.com/alongl)
+[qingci](xpy66swsry@gmail.com>)
+[lyg1949](zh.ghlong@qq.com>)
+[zhlong](zh.ghlong@qq.com>)
+[大裤衩](3503207480@qq.com>)
+[droid.chow](droid.chow@gmail.com>)
+[陈晓林](https://github.com/musicwood)
+[CharleyWangHZ](https://github.com/CharleyWangHZ)
+[Johnny](https://github.com/johzzy)
+[DoubleX69](https://github.com/DoubleX69)
+[lawrencehj](https://github.com/lawrencehj)
 
+## 使用案例
 
-## 捐赠
-
-欢迎捐赠以便更好的推动项目的发展，谢谢您的支持!
-
-[支付宝](https://gitee.com/xia-chu/other/raw/master/IMG_3919.JPG)
-
-[微信](https://gitee.com/xia-chu/other/raw/master/IMG_3920.JPG)
+本项目已经得到不少公司和个人开发者的认可，据作者不完全统计，
+使用本项目的公司包括知名的互联网巨头、国内排名前列的云服务公司、多家知名的AI独角兽公司，
+以及一系列中小型公司。使用者可以通过在 [issue](https://github.com/xia-chu/ZLMediaKit/issues/511) 上粘贴公司的大名和相关项目介绍为本项目背书，感谢支持！

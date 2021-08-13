@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -58,63 +58,41 @@ protected:
     RingType::Ptr _rtpRing;
 };
 
-
-class RtpInfo : public  ResourcePoolHelper<RtpPacket>{
+class RtpInfo{
 public:
-    typedef std::shared_ptr<RtpInfo> Ptr;
+    using Ptr = std::shared_ptr<RtpInfo>;
 
-    RtpInfo(uint32_t ui32Ssrc,
-            uint32_t ui32MtuSize,
-            uint32_t ui32SampleRate,
-            uint8_t ui8PayloadType,
-            uint8_t ui8Interleaved) {
-        if(ui32Ssrc == 0){
-            ui32Ssrc = ((uint64_t)this) & 0xFFFFFFFF;
+    RtpInfo(uint32_t ssrc, size_t mtu_size, uint32_t sample_rate, uint8_t pt, uint8_t interleaved) {
+        if (ssrc == 0) {
+            ssrc = ((uint64_t) this) & 0xFFFFFFFF;
         }
-        _ui32Ssrc = ui32Ssrc;
-        _ui32SampleRate = ui32SampleRate;
-        _ui32MtuSize = ui32MtuSize;
-        _ui8PayloadType = ui8PayloadType;
-        _ui8Interleaved = ui8Interleaved;
+        _pt = pt;
+        _ssrc = ssrc;
+        _mtu_size = mtu_size;
+        _sample_rate = sample_rate;
+        _interleaved = interleaved;
     }
 
-    virtual ~RtpInfo(){}
+    virtual ~RtpInfo() {}
 
-    int getInterleaved() const {
-        return _ui8Interleaved;
-    }
-
-    int getPayloadType() const {
-        return _ui8PayloadType;
-    }
-
-    int getSampleRate() const {
-        return _ui32SampleRate;
+    //返回rtp负载最大长度
+    size_t getMaxSize() const {
+        return _mtu_size - RtpPacket::kRtpHeaderSize;
     }
 
     uint32_t getSsrc() const {
-        return _ui32Ssrc;
+        return _ssrc;
     }
 
-    uint16_t getSeqence() const {
-        return _ui16Sequence;
-    }
-    uint32_t getTimestamp() const {
-        return _ui32TimeStamp;
-    }
-    uint32_t getMtuSize() const {
-        return _ui32MtuSize;
-    }
-    RtpPacket::Ptr makeRtp(TrackType type,const void *pData, unsigned int uiLen, bool bMark, uint32_t uiStamp);
+    RtpPacket::Ptr makeRtp(TrackType type,const void *data, size_t len, bool mark, uint32_t stamp);
 
-protected:
-    uint32_t _ui32Ssrc;
-    uint32_t _ui32SampleRate;
-    uint32_t _ui32MtuSize;
-    uint8_t _ui8PayloadType;
-    uint8_t _ui8Interleaved;
-    uint16_t _ui16Sequence = 0;
-    uint32_t _ui32TimeStamp = 0;
+private:
+    uint8_t _pt;
+    uint8_t _interleaved;
+    uint16_t _seq = 0;
+    uint32_t _ssrc;
+    uint32_t _sample_rate;
+    size_t _mtu_size;
 };
 
 class RtpCodec : public RtpRing, public FrameDispatcher , public CodecInfo{

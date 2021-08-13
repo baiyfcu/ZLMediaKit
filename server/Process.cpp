@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -25,7 +25,7 @@
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Util/uv_errno.h"
-#include "Thread/WorkThreadPool.h"
+#include "Poller/EventPoller.h"
 #include "Process.h"
 using namespace toolkit;
 
@@ -47,7 +47,7 @@ void Process::run(const string &cmd, const string &log_file_tmp) {
     if (!fp) {
         fprintf(stderr, "open log file %s failed:%d(%s)\r\n", log_file.data(), get_uv_error(), get_uv_errmsg());
     } else {
-        auto log_fd = (HANDLE)(_get_osfhandle(fileno(fp)));
+        auto log_fd = (HANDLE)(_get_osfhandle(_fileno(fp)));
         // dup to stdout and stderr.
         si.wShowWindow = SW_HIDE;
         // STARTF_USESHOWWINDOW:The wShowWindow member contains additional information.   
@@ -108,10 +108,17 @@ void Process::run(const string &cmd, const string &log_file_tmp) {
         }
         fprintf(stderr, "\r\n\r\n#### pid=%d,cmd=%s #####\r\n\r\n", getpid(), cmd.data());
 
+#ifndef ANDROID
+        //关闭父进程继承的fd
+        for (int i = 3; i < getdtablesize(); i++) {
+            ::close(i);
+        }
+#else
         //关闭父进程继承的fd
         for (int i = 3; i < 1024; i++) {
             ::close(i);
         }
+#endif
 
         auto params = split(cmd, " ");
         // memory leak in child process, it's ok.
@@ -261,7 +268,7 @@ static void s_kill(pid_t pid, void *handle, int max_delay, bool force) {
     }
 
     //发送SIGTERM信号后，2秒后检查子进程是否已经退出
-    WorkThreadPool::Instance().getPoller()->doDelayTask(max_delay, [pid, handle]() {
+    EventPollerPool::Instance().getPoller()->doDelayTask(max_delay, [pid, handle]() {
         if (!s_wait(pid, handle, nullptr, false)) {
             //进程已经退出了
             return 0;

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -108,10 +108,28 @@ private:
     uint32_t _last_dts = 0;
     uint32_t _last_pts = 0;
     uint32_t _last_max_pts = 0;
-    int _frames_since_last_max_pts = 0;
-    int _sorter_max_size = 0;
-    int _count_sorter_max_size = 0;
+    size_t _frames_since_last_max_pts = 0;
+    size_t _sorter_max_size = 0;
+    size_t _count_sorter_max_size = 0;
     set<uint32_t> _pts_sorter;
+};
+
+class NtpStamp {
+public:
+    NtpStamp() = default;
+    ~NtpStamp() = default;
+
+    void setNtpStamp(uint32_t rtp_stamp, uint32_t sample_rate, uint64_t ntp_stamp_ms);
+    uint64_t getNtpStamp(uint32_t rtp_stamp, uint32_t sample_rate);
+
+private:
+    void update(uint32_t rtp_stamp_ms, uint64_t ntp_stamp_ms);
+    uint64_t getNtpStamp_l(uint32_t rtp_stamp, uint32_t sample_rate);
+
+private:
+    uint32_t _last_rtp_stamp = 0;
+    uint64_t _last_rtp_stamp_ms = 0;
+    uint64_t _last_ntp_stamp_ms = 0;
 };
 
 }//namespace mediakit

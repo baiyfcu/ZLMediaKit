@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -10,9 +10,7 @@
 
 #include "RtmpProtocol.h"
 #include "Rtmp/utils.h"
-#include "Util/util.h"
-#include "Util/onceToken.h"
-#include "Thread/ThreadPool.h"
+#include "RtmpMediaSource.h"
 using namespace toolkit;
 
 #define C1_DIGEST_SIZE 32
@@ -29,7 +27,7 @@ using namespace toolkit;
 #include <openssl/hmac.h>
 #include <openssl/opensslv.h>
 
-static string openssl_HMACsha256(const void *key, unsigned int key_len, const void *data,unsigned int data_len){
+static string openssl_HMACsha256(const void *key, size_t key_len, const void *data, size_t data_len){
     std::shared_ptr<char> out(new char[32], [](char *ptr) { delete[] ptr; });
     unsigned int out_len;
 
@@ -37,7 +35,7 @@ static string openssl_HMACsha256(const void *key, unsigned int key_len, const vo
     //openssl 1.1.0新增api，老版本api作废
     HMAC_CTX *ctx = HMAC_CTX_new();
     HMAC_CTX_reset(ctx);
-    HMAC_Init_ex(ctx, key, key_len, EVP_sha256(), NULL);
+    HMAC_Init_ex(ctx, key, (int)key_len, EVP_sha256(), NULL);
     HMAC_Update(ctx, (unsigned char*)data, data_len);
     HMAC_Final(ctx, (unsigned char *)out.get(), &out_len);
     HMAC_CTX_reset(ctx);
@@ -57,8 +55,8 @@ static string openssl_HMACsha256(const void *key, unsigned int key_len, const vo
 namespace mediakit {
 
 RtmpProtocol::RtmpProtocol() {
-    _next_step_func = [this]() {
-        handle_C0C1();
+    _next_step_func = [this](const char *data, size_t len) {
+        return handle_C0C1(data, len);
     };
 }
 
@@ -84,10 +82,10 @@ void RtmpProtocol::reset() {
     //////////Invoke Request//////////
     _send_req_id = 0;
     //////////Rtmp parser//////////
-    _recv_data_buf.clear();
+    HttpRequestSplitter::reset();
     _stream_index = STREAM_CONTROL;
-    _next_step_func = [this]() {
-        handle_C0C1();
+    _next_step_func = [this](const char *data, size_t len) {
+        return handle_C0C1(data, len);
     };
 }
 
@@ -172,7 +170,7 @@ void RtmpProtocol::sendRequest(int cmd, const string& str) {
 
 class BufferPartial : public Buffer {
 public:
-    BufferPartial(const Buffer::Ptr &buffer, uint32_t offset, uint32_t size){
+    BufferPartial(const Buffer::Ptr &buffer, size_t offset, size_t size){
         _buffer = buffer;
         _data = buffer->data() + offset;
         _size = size;
@@ -184,13 +182,13 @@ public:
         return _data;
     }
 
-    uint32_t size() const override{
+    size_t size() const override{
         return _size;
     }
 
 private:
     char *_data;
-    uint32_t _size;
+    size_t _size;
     Buffer::Ptr _buffer;
 };
 
@@ -212,13 +210,14 @@ void RtmpProtocol::sendRtmp(uint8_t type, uint32_t stream_index, const Buffer::P
     buffer_header->setSize(sizeof(RtmpHeader));
     //对rtmp头赋值，如果使用整形赋值，在arm android上可能由于数据对齐导致总线错误的问题
     RtmpHeader *header = (RtmpHeader *) buffer_header->data();
-    header->flags = (chunk_id & 0x3f) | (0 << 6);
+    header->fmt = 0;
+    header->chunk_id = chunk_id;
     header->type_id = type;
     set_be24(header->time_stamp, ext_stamp ? 0xFFFFFF : stamp);
-    set_be24(header->body_size, buf->size());
+    set_be24(header->body_size, (uint32_t)buf->size());
     set_le32(header->stream_index, stream_index);
     //发送rtmp头
-    onSendRawData(buffer_header);
+    onSendRawData(std::move(buffer_header));
 
     //扩展时间戳字段
     BufferRaw::Ptr buffer_ext_stamp;
@@ -234,10 +233,12 @@ void RtmpProtocol::sendRtmp(uint8_t type, uint32_t stream_index, const Buffer::P
     BufferRaw::Ptr buffer_flags = obtainBuffer();
     buffer_flags->setCapacity(1);
     buffer_flags->setSize(1);
-    buffer_flags->data()[0] = (chunk_id & 0x3f) | (3 << 6);
+    header = (RtmpHeader *) buffer_flags->data();
+    header->fmt = 3;
+    header->chunk_id = chunk_id;
 
     size_t offset = 0;
-    uint32_t totalSize = sizeof(RtmpHeader);
+    size_t totalSize = sizeof(RtmpHeader);
     while (offset < buf->size()) {
         if (offset) {
             onSendRawData(buffer_flags);
@@ -253,24 +254,27 @@ void RtmpProtocol::sendRtmp(uint8_t type, uint32_t stream_index, const Buffer::P
         totalSize += chunk;
         offset += chunk;
     }
-    _bytes_sent += totalSize;
+    _bytes_sent += (uint32_t)totalSize;
     if (_windows_size > 0 && _bytes_sent - _bytes_sent_last >= _windows_size) {
         _bytes_sent_last = _bytes_sent;
         sendAcknowledgement(_bytes_sent);
     }
 }
 
-void RtmpProtocol::onParseRtmp(const char *data, int size) {
-    _recv_data_buf.append(data, size);
-    //移动拷贝提高性能
-    function<void()> next_step_func(std::move(_next_step_func));
-    //执行下一步
-    next_step_func();
+void RtmpProtocol::onParseRtmp(const char *data, size_t size) {
+    input(data, size);
+}
 
+const char *RtmpProtocol::onSearchPacketTail(const char *data,size_t len){
+    //移动拷贝提高性能
+    auto next_step_func(std::move(_next_step_func));
+    //执行下一步
+    auto ret = next_step_func(data, len);
     if (!_next_step_func) {
         //为设置下一步，恢复之
         next_step_func.swap(_next_step_func);
     }
+    return ret;
 }
 
 ////for client////
@@ -280,57 +284,57 @@ void RtmpProtocol::startClientSession(const function<void()> &func) {
     onSendRawData(obtainBuffer(&handshake_head, 1));
     RtmpHandshake c1(0);
     onSendRawData(obtainBuffer((char *) (&c1), sizeof(c1)));
-    _next_step_func = [this, func]() {
+    _next_step_func = [this, func](const char *data, size_t len) {
         //等待 S0+S1+S2
-        handle_S0S1S2(func);
+        return handle_S0S1S2(data, len, func);
     };
 }
 
-void RtmpProtocol::handle_S0S1S2(const function<void()> &func) {
-    if (_recv_data_buf.size() < 1 + 2 * C1_HANDSHARK_SIZE) {
+const char* RtmpProtocol::handle_S0S1S2(const char *data, size_t len, const function<void()> &func) {
+    if (len < 1 + 2 * C1_HANDSHARK_SIZE) {
         //数据不够
-        return;
+        return nullptr;
     }
-    if (_recv_data_buf[0] != HANDSHAKE_PLAINTEXT) {
+    if (data[0] != HANDSHAKE_PLAINTEXT) {
         throw std::runtime_error("only plaintext[0x03] handshake supported");
     }
     //发送 C2
-    const char *pcC2 = _recv_data_buf.data() + 1;
+    const char *pcC2 = data + 1;
     onSendRawData(obtainBuffer(pcC2, C1_HANDSHARK_SIZE));
-    _recv_data_buf.erase(0, 1 + 2 * C1_HANDSHARK_SIZE);
     //握手结束
-    _next_step_func = [this]() {
+    _next_step_func = [this](const char *data, size_t len) {
         //握手结束并且开始进入解析命令模式
-        handle_rtmp();
+        return handle_rtmp(data, len);
     };
     func();
+    return data + 1 + 2 * C1_HANDSHARK_SIZE;
 }
 
 ////for server ////
-void RtmpProtocol::handle_C0C1() {
-    if (_recv_data_buf.size() < 1 + C1_HANDSHARK_SIZE) {
+const char * RtmpProtocol::handle_C0C1(const char *data, size_t len) {
+    if (len < 1 + C1_HANDSHARK_SIZE) {
         //need more data!
-        return;
+        return nullptr;
     }
-    if (_recv_data_buf[0] != HANDSHAKE_PLAINTEXT) {
+    if (data[0] != HANDSHAKE_PLAINTEXT) {
         throw std::runtime_error("only plaintext[0x03] handshake supported");
     }
-    if (memcmp(_recv_data_buf.data() + 5, "\x00\x00\x00\x00", 4) == 0) {
+    if (memcmp(data + 5, "\x00\x00\x00\x00", 4) == 0) {
         //simple handsharke
-        handle_C1_simple();
+        handle_C1_simple(data);
     } else {
 #ifdef ENABLE_OPENSSL
         //complex handsharke
-        handle_C1_complex();
+        handle_C1_complex(data);
 #else
         WarnL << "未打开ENABLE_OPENSSL宏，复杂握手采用简单方式处理，flash播放器可能无法播放！";
-        handle_C1_simple();
+        handle_C1_simple(data);
 #endif//ENABLE_OPENSSL
     }
-    _recv_data_buf.erase(0, 1 + C1_HANDSHARK_SIZE);
+    return data + 1 + C1_HANDSHARK_SIZE;
 }
 
-void RtmpProtocol::handle_C1_simple(){
+void RtmpProtocol::handle_C1_simple(const char *data){
     //发送S0
     char handshake_head = HANDSHAKE_PLAINTEXT;
     onSendRawData(obtainBuffer(&handshake_head, 1));
@@ -338,18 +342,19 @@ void RtmpProtocol::handle_C1_simple(){
     RtmpHandshake s1(0);
     onSendRawData(obtainBuffer((char *) &s1, C1_HANDSHARK_SIZE));
     //发送S2
-    onSendRawData(obtainBuffer(_recv_data_buf.data() + 1, C1_HANDSHARK_SIZE));
+    onSendRawData(obtainBuffer(data + 1, C1_HANDSHARK_SIZE));
     //等待C2
-    _next_step_func = [this]() {
-        handle_C2();
+    _next_step_func = [this](const char *data, size_t len) {
+        //握手结束并且开始进入解析命令模式
+        return handle_C2(data, len);
     };
 }
 
 #ifdef ENABLE_OPENSSL
-void RtmpProtocol::handle_C1_complex(){
+void RtmpProtocol::handle_C1_complex(const char *data){
     //参考自:http://blog.csdn.net/win_lin/article/details/13006803
     //skip c0,time,version
-    const char *c1_start = _recv_data_buf.data() + 1;
+    const char *c1_start = data + 1;
     const char *schema_start = c1_start + 8;
     char *digest_start;
     try {
@@ -366,7 +371,7 @@ void RtmpProtocol::handle_C1_complex(){
 
         send_complex_S0S1S2(0, digest);
 //		InfoL << "schema0";
-    } catch (std::exception &ex) {
+    } catch (std::exception &) {
         //貌似flash从来都不用schema1
 //		WarnL << "try rtmp complex schema0 failed:" <<  ex.what();
         try {
@@ -383,9 +388,9 @@ void RtmpProtocol::handle_C1_complex(){
 
             send_complex_S0S1S2(1, digest);
 //			InfoL << "schema1";
-        } catch (std::exception &ex) {
+        } catch (std::exception &) {
 //			WarnL << "try rtmp complex schema1 failed:" <<  ex.what();
-            handle_C1_simple();
+            handle_C1_simple(data);
         }
     }
 }
@@ -502,44 +507,43 @@ void RtmpProtocol::send_complex_S0S1S2(int schemeType,const string &digest){
     memcpy((char *) &s2 + C1_HANDSHARK_SIZE - C1_DIGEST_SIZE, s2_digest.data(), C1_DIGEST_SIZE);
     onSendRawData(obtainBuffer((char *) &s2, sizeof(s2)));
     //等待C2
-    _next_step_func = [this]() {
-        handle_C2();
+    _next_step_func = [this](const char *data, size_t len) {
+        return handle_C2(data, len);
     };
 }
 #endif //ENABLE_OPENSSL
 
-void RtmpProtocol::handle_C2() {
-    if (_recv_data_buf.size() < C1_HANDSHARK_SIZE) {
+const char* RtmpProtocol::handle_C2(const char *data, size_t len) {
+    if (len < C1_HANDSHARK_SIZE) {
         //need more data!
-        return;
+        return nullptr;
     }
-    _recv_data_buf.erase(0, C1_HANDSHARK_SIZE);
-    //握手结束，进入命令模式
-    if (!_recv_data_buf.empty()) {
-        handle_rtmp();
-    }
-    _next_step_func = [this]() {
-        handle_rtmp();
+    _next_step_func = [this](const char *data, size_t len) {
+        return handle_rtmp(data, len);
     };
+
+    //握手结束，进入命令模式
+    return handle_rtmp(data + C1_HANDSHARK_SIZE, len - C1_HANDSHARK_SIZE);
 }
 
-static const size_t HEADER_LENGTH[] = {12, 8, 4, 1};
+static constexpr size_t HEADER_LENGTH[] = {12, 8, 4, 1};
 
-void RtmpProtocol::handle_rtmp() {
-    while (!_recv_data_buf.empty()) {
-        int offset = 0;
-        uint8_t flags = _recv_data_buf[0];
-        size_t header_len = HEADER_LENGTH[flags >> 6];
-        _now_chunk_id = flags & 0x3f;
+const char* RtmpProtocol::handle_rtmp(const char *data, size_t len) {
+    auto ptr = data;
+    while (len) {
+        size_t offset = 0;
+        auto header = (RtmpHeader *) ptr;
+        auto header_len = HEADER_LENGTH[header->fmt];
+        _now_chunk_id = header->chunk_id;
         switch (_now_chunk_id) {
             case 0: {
                 //0 值表示二字节形式，并且 ID 范围 64 - 319
                 //(第二个字节 + 64)。
-                if (_recv_data_buf.size() < 2) {
+                if (len < 2) {
                     //need more data
-                    return;
+                    return ptr;
                 }
-                _now_chunk_id = 64 + (uint8_t) (_recv_data_buf[1]);
+                _now_chunk_id = 64 + (uint8_t) (ptr[1]);
                 offset = 1;
                 break;
             }
@@ -547,11 +551,11 @@ void RtmpProtocol::handle_rtmp() {
             case 1: {
                 //1 值表示三字节形式，并且 ID 范围为 64 - 65599
                 //((第三个字节) * 256 + 第二个字节 + 64)。
-                if (_recv_data_buf.size() < 3) {
+                if (len < 3) {
                     //need more data
-                    return;
+                    return ptr;
                 }
-                _now_chunk_id = 64 + ((uint8_t) (_recv_data_buf[2]) << 8) + (uint8_t) (_recv_data_buf[1]);
+                _now_chunk_id = 64 + ((uint8_t) (ptr[2]) << 8) + (uint8_t) (ptr[1]);
                 offset = 2;
                 break;
             }
@@ -560,32 +564,43 @@ void RtmpProtocol::handle_rtmp() {
             default : break;
         }
 
-        if (_recv_data_buf.size() < header_len + offset) {
+        if (len < header_len + offset) {
             //need more data
-            return;
+            return ptr;
         }
-
-        RtmpHeader &header = *((RtmpHeader *) (_recv_data_buf.data() + offset));
-        auto &chunk_data = _map_chunk_data[_now_chunk_id];
+        header = (RtmpHeader *) (ptr + offset);
+        auto &pr = _map_chunk_data[_now_chunk_id];
+        auto &now_packet = pr.first;
+        auto &last_packet = pr.second;
+        if (!now_packet) {
+            now_packet = RtmpPacket::create();
+            if (last_packet) {
+                //恢复chunk上下文
+                *now_packet = *last_packet;
+            }
+            //绝对时间戳标记复位
+            now_packet->is_abs_stamp = false;
+        }
+        auto &chunk_data = *now_packet;
         chunk_data.chunk_id = _now_chunk_id;
         switch (header_len) {
             case 12:
                 chunk_data.is_abs_stamp = true;
-                chunk_data.stream_index = load_le32(header.stream_index);
+                chunk_data.stream_index = load_le32(header->stream_index);
             case 8:
-                chunk_data.body_size = load_be24(header.body_size);
-                chunk_data.type_id = header.type_id;
+                chunk_data.body_size = load_be24(header->body_size);
+                chunk_data.type_id = header->type_id;
             case 4:
-                chunk_data.ts_field = load_be24(header.time_stamp);
+                chunk_data.ts_field = load_be24(header->time_stamp);
         }
 
         auto time_stamp = chunk_data.ts_field;
         if (chunk_data.ts_field == 0xFFFFFF) {
-            if (_recv_data_buf.size() < header_len + offset + 4) {
+            if (len < header_len + offset + 4) {
                 //need more data
-                return;
+                return ptr;
             }
-            time_stamp = load_be32(_recv_data_buf.data() + offset + header_len);
+            time_stamp = load_be32(ptr + offset + header_len);
             offset += 4;
         }
 
@@ -593,27 +608,34 @@ void RtmpProtocol::handle_rtmp() {
             throw std::runtime_error("非法的bodySize");
         }
 
-        auto iMore = min(_chunk_size_in, chunk_data.body_size - chunk_data.buffer.size());
-        if (_recv_data_buf.size() < header_len + offset + iMore) {
+        auto more = min(_chunk_size_in, (size_t) (chunk_data.body_size - chunk_data.buffer.size()));
+        if (len < header_len + offset + more) {
             //need more data
-            return;
+            return ptr;
         }
-        chunk_data.buffer.append(_recv_data_buf, header_len + offset, iMore);
-        _recv_data_buf.erase(0, header_len + offset + iMore);
+        if (more) {
+            chunk_data.buffer.append(ptr + header_len + offset, more);
+        }
+        ptr += header_len + offset + more;
+        len -= header_len + offset + more;
         if (chunk_data.buffer.size() == chunk_data.body_size) {
             //frame is ready
             _now_stream_index = chunk_data.stream_index;
             chunk_data.time_stamp = time_stamp + (chunk_data.is_abs_stamp ? 0 : chunk_data.time_stamp);
+            //保存chunk上下文
+            last_packet = now_packet;
             if (chunk_data.body_size) {
-                handle_rtmpChunk(chunk_data);
+                handle_chunk(std::move(now_packet));
+            } else {
+                now_packet = nullptr;
             }
-            chunk_data.buffer.clear();
-            chunk_data.is_abs_stamp = false;
         }
     }
+    return ptr;
 }
 
-void RtmpProtocol::handle_rtmpChunk(RtmpPacket& chunk_data) {
+void RtmpProtocol::handle_chunk(RtmpPacket::Ptr packet) {
+    auto &chunk_data = *packet;
     switch (chunk_data.type_id) {
         case MSG_ACK: {
             if (chunk_data.buffer.size() < 4) {
@@ -713,7 +735,7 @@ void RtmpProtocol::handle_rtmpChunk(RtmpPacket& chunk_data) {
 
         case MSG_AGGREGATE: {
             auto ptr = (uint8_t *) chunk_data.buffer.data();
-            auto ptr_tail = ptr + chunk_data.buffer.length();
+            auto ptr_tail = ptr + chunk_data.buffer.size();
             while (ptr + 8 + 3 < ptr_tail) {
                 auto type = *ptr;
                 ptr += 1;
@@ -729,31 +751,29 @@ void RtmpProtocol::handle_rtmpChunk(RtmpPacket& chunk_data) {
                 if (ptr + size > ptr_tail) {
                     break;
                 }
-                RtmpPacket sub_packet;
-                sub_packet.buffer.resize(size);
-                memcpy((char *) sub_packet.buffer.data(), ptr, size);
+                auto sub_packet_ptr = RtmpPacket::create();
+                auto &sub_packet = *sub_packet_ptr;
+                sub_packet.buffer.assign((char *)ptr, size);
                 sub_packet.type_id = type;
                 sub_packet.body_size = size;
                 sub_packet.time_stamp = ts;
                 sub_packet.stream_index = chunk_data.stream_index;
                 sub_packet.chunk_id = chunk_data.chunk_id;
-                handle_rtmpChunk(sub_packet);
+                handle_chunk(std::move(sub_packet_ptr));
                 ptr += size;
             }
             break;
         }
 
-        default: onRtmpChunk(chunk_data); break;
+        default: onRtmpChunk(std::move(packet)); break;
     }
 }
 
-BufferRaw::Ptr RtmpProtocol::obtainBuffer() {
-    return std::make_shared<BufferRaw>() ;//_bufferPool.obtain();
-}
-
-BufferRaw::Ptr RtmpProtocol::obtainBuffer(const void *data, int len) {
-    auto buffer = obtainBuffer();
-    buffer->assign((const char *) data, len);
+BufferRaw::Ptr RtmpProtocol::obtainBuffer(const void *data, size_t len) {
+    auto buffer = BufferRaw::create();
+    if (data && len) {
+        buffer->assign((const char *) data, len);
+    }
     return buffer;
 }
 

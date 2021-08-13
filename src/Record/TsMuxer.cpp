@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -94,40 +94,18 @@ void TsMuxer::inputFrame(const Frame::Ptr &frame) {
     int64_t dts_out, pts_out;
     _is_idr_fast_packet = !_have_video;
     switch (frame->getCodecId()){
-        case CodecH264: {
-            int type = H264_TYPE(*((uint8_t *) frame->data() + frame->prefixSize()));
-            if (type == H264Frame::NAL_SEI) {
-                break;
-            }
-        }
-
+        case CodecH264:
         case CodecH265: {
             //这里的代码逻辑是让SPS、PPS、IDR这些时间戳相同的帧打包到一起当做一个帧处理，
-            if (!_frameCached.empty() && _frameCached.back()->dts() != frame->dts()) {
-                Frame::Ptr back = _frameCached.back();
-                Buffer::Ptr merged_frame = back;
-                if (_frameCached.size() != 1) {
-                    string merged;
-                    _frameCached.for_each([&](const Frame::Ptr &frame) {
-                        if (frame->prefixSize()) {
-                            merged.append(frame->data(), frame->size());
-                        } else {
-                            merged.append("\x00\x00\x00\x01", 4);
-                            merged.append(frame->data(), frame->size());
-                        }
-                        if (frame->keyFrame()) {
-                            _is_idr_fast_packet = true;
-                        }
-                    });
-                    merged_frame = std::make_shared<BufferString>(std::move(merged));
-                }
-                track_info.stamp.revise(back->dts(), back->pts(), dts_out, pts_out);
+            _frame_merger.inputFrame(frame, [&](uint32_t dts, uint32_t pts, const Buffer::Ptr &buffer, bool have_idr){
+                track_info.stamp.revise(dts, pts, dts_out, pts_out);
                 //取视频时间戳为TS的时间戳
-                _timestamp = dts_out;
-                mpeg_ts_write(_context, track_info.track_id, back->keyFrame() ? 0x0001 : 0, pts_out * 90LL,dts_out * 90LL, merged_frame->data(), merged_frame->size());
-                _frameCached.clear();
-            }
-            _frameCached.emplace_back(Frame::getCacheAbleFrame(frame));
+                _timestamp = (uint32_t) dts_out;
+                _is_idr_fast_packet = have_idr;
+                mpeg_ts_write(_context, track_info.track_id, have_idr ? 0x0001 : 0,
+                              pts_out * 90LL, dts_out * 90LL, buffer->data(), buffer->size());
+                flushCache();
+            });
             break;
         }
 
@@ -140,11 +118,13 @@ void TsMuxer::inputFrame(const Frame::Ptr &frame) {
 
         default: {
             track_info.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
-            if(!_have_video){
+            if (!_have_video) {
                 //没有视频时，才以音频时间戳为TS的时间戳
-                _timestamp = dts_out;
+                _timestamp = (uint32_t) dts_out;
             }
-            mpeg_ts_write(_context, track_info.track_id, frame->keyFrame() ? 0x0001 : 0, pts_out * 90LL, dts_out * 90LL, frame->data(), frame->size());
+            mpeg_ts_write(_context, track_info.track_id, frame->keyFrame() ? 0x0001 : 0,
+                          pts_out * 90LL, dts_out * 90LL, frame->data(), frame->size());
+            flushCache();
             break;
         }
     }
@@ -153,7 +133,7 @@ void TsMuxer::inputFrame(const Frame::Ptr &frame) {
 void TsMuxer::resetTracks() {
     _have_video = false;
     //通知片段中断
-    onTs(nullptr, 0, _timestamp, 0);
+    onTs(nullptr, _timestamp, 0);
     uninit();
     init();
 }
@@ -162,7 +142,7 @@ void TsMuxer::init() {
     static mpeg_ts_func_t s_func = {
             [](void *param, size_t bytes) {
                 TsMuxer *muxer = (TsMuxer *) param;
-                assert(sizeof(TsMuxer::_tsbuf) >= bytes);
+                assert(sizeof(muxer->_tsbuf) >= bytes);
                 return (void *) muxer->_tsbuf;
             },
             [](void *param, void *packet) {
@@ -170,13 +150,25 @@ void TsMuxer::init() {
             },
             [](void *param, const void *packet, size_t bytes) {
                 TsMuxer *muxer = (TsMuxer *) param;
-                muxer->onTs(packet, bytes, muxer->_timestamp, muxer->_is_idr_fast_packet);
-                muxer->_is_idr_fast_packet = false;
+                muxer->onTs_l(packet, bytes);
+                return 0;
             }
     };
     if (_context == nullptr) {
         _context = mpeg_ts_create(&s_func, this);
     }
+}
+
+void TsMuxer::onTs_l(const void *packet, size_t bytes) {
+    if (!_cache) {
+        _cache = std::make_shared<BufferLikeString>();
+    }
+    _cache->append((char *) packet, bytes);
+}
+
+void TsMuxer::flushCache() {
+    onTs(std::move(_cache), _timestamp, _is_idr_fast_packet);
+    _is_idr_fast_packet = false;
 }
 
 void TsMuxer::uninit() {
@@ -185,6 +177,7 @@ void TsMuxer::uninit() {
         _context = nullptr;
     }
     _codec_to_trackid.clear();
+    _frame_merger.clear();
 }
 
 }//namespace mediakit

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -11,10 +11,11 @@
 #if defined(ENABLE_RTPPROXY)
 #include "PSEncoder.h"
 #include "Extension/H264.h"
+#include "Rtsp/RtspMuxer.h"
 namespace mediakit{
 
 PSEncoder::PSEncoder() {
-    _buffer = std::make_shared<BufferRaw>();
+    _buffer = BufferRaw::create();
     init();
 }
 
@@ -38,6 +39,7 @@ void PSEncoder::init() {
             [](void *param, int stream, void *packet, size_t bytes) {
                 PSEncoder *thiz = (PSEncoder *) param;
                 thiz->onPS(thiz->_timestamp, packet, bytes);
+                return 0;
             }
     };
 
@@ -116,38 +118,18 @@ void PSEncoder::inputFrame(const Frame::Ptr &frame) {
     auto &track_info = it->second;
     int64_t dts_out, pts_out;
     switch (frame->getCodecId()) {
-        case CodecH264: {
-            int type = H264_TYPE(*((uint8_t *) frame->data() + frame->prefixSize()));
-            if (type == H264Frame::NAL_SEI) {
-                break;
-            }
-        }
+        case CodecH264:
         case CodecH265: {
             //这里的代码逻辑是让SPS、PPS、IDR这些时间戳相同的帧打包到一起当做一个帧处理，
-            if (!_frameCached.empty() && _frameCached.back()->dts() != frame->dts()) {
-                Frame::Ptr back = _frameCached.back();
-                Buffer::Ptr merged_frame = back;
-                if (_frameCached.size() != 1) {
-                    string merged;
-                    _frameCached.for_each([&](const Frame::Ptr &frame) {
-                        if (frame->prefixSize()) {
-                            merged.append(frame->data(), frame->size());
-                        } else {
-                            merged.append("\x00\x00\x00\x01", 4);
-                            merged.append(frame->data(), frame->size());
-                        }
-                    });
-                    merged_frame = std::make_shared<BufferString>(std::move(merged));
-                }
-                track_info.stamp.revise(back->dts(), back->pts(), dts_out, pts_out);
-                _timestamp = dts_out;
-                ps_muxer_input(_muxer.get(), track_info.track_id, back->keyFrame() ? 0x0001 : 0, pts_out * 90LL,
-                               dts_out * 90LL, merged_frame->data(), merged_frame->size());
-                _frameCached.clear();
-            }
-            _frameCached.emplace_back(Frame::getCacheAbleFrame(frame));
-        }
+            _frame_merger.inputFrame(frame, [&](uint32_t dts, uint32_t pts, const Buffer::Ptr &buffer, bool have_idr) {
+                track_info.stamp.revise(dts, pts, dts_out, pts_out);
+                //取视频时间戳为TS的时间戳
+                _timestamp = (uint32_t) pts_out;
+                ps_muxer_input(_muxer.get(), track_info.track_id, have_idr ? 0x0001 : 0,
+                               pts_out * 90LL, dts_out * 90LL, buffer->data(), buffer->size());
+            });
             break;
+        }
 
         case CodecAAC: {
             if (frame->prefixSize() == 0) {
@@ -158,12 +140,32 @@ void PSEncoder::inputFrame(const Frame::Ptr &frame) {
 
         default: {
             track_info.stamp.revise(frame->dts(), frame->pts(), dts_out, pts_out);
-            _timestamp = dts_out;
+            _timestamp = (uint32_t) dts_out;
             ps_muxer_input(_muxer.get(), track_info.track_id, frame->keyFrame() ? 0x0001 : 0, pts_out * 90LL,
                            dts_out * 90LL, frame->data(), frame->size());
-        }
             break;
+        }
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+PSEncoderImp::PSEncoderImp(uint32_t ssrc, uint8_t payload_type) {
+    GET_CONFIG(uint32_t,video_mtu,Rtp::kVideoMtuSize);
+    _rtp_encoder = std::make_shared<CommonRtpEncoder>(CodecInvalid, ssrc, video_mtu, 90000, payload_type, 0);
+    _rtp_encoder->setRtpRing(std::make_shared<RtpRing::RingType>());
+    _rtp_encoder->getRtpRing()->setDelegate(std::make_shared<RingDelegateHelper>([this](RtpPacket::Ptr rtp, bool is_key){
+        onRTP(std::move(rtp));
+    }));
+    InfoL << this << " " << printSSRC(_rtp_encoder->getSsrc());
+}
+
+PSEncoderImp::~PSEncoderImp() {
+    InfoL << this << " " << printSSRC(_rtp_encoder->getSsrc());
+}
+
+void PSEncoderImp::onPS(uint32_t stamp, void *packet, size_t bytes) {
+    _rtp_encoder->inputFrame(std::make_shared<FrameFromPtr>((char *) packet, bytes, stamp, stamp));
 }
 
 }//namespace mediakit

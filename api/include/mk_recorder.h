@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -63,9 +63,10 @@ API_EXPORT int API_CALL mk_recorder_is_recording(int type, const char *vhost, co
  * @param app 应用名
  * @param stream 流id
  * @param customized_path 录像文件保存自定义目录，默认为空或null则自动生成
+ * @param max_second mp4录制最大切片时间，单位秒，置0则采用配置文件配置
  * @return 1代表成功，0代表失败
  */
-API_EXPORT int API_CALL mk_recorder_start(int type, const char *vhost, const char *app, const char *stream, const char *customized_path);
+API_EXPORT int API_CALL mk_recorder_start(int type, const char *vhost, const char *app, const char *stream, const char *customized_path, size_t max_second);
 
 /**
  * 停止录制

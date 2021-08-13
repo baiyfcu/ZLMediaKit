@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -41,8 +41,8 @@ void AACRtmpDecoder::inputRtmp(const RtmpPacket::Ptr &pkt) {
     }
 }
 
-void AACRtmpDecoder::onGetAAC(const char* data, int len, uint32_t stamp) {
-    auto frame = ResourcePoolHelper<FrameImp>::obtainObj();
+void AACRtmpDecoder::onGetAAC(const char* data, size_t len, uint32_t stamp) {
+    auto frame = FrameImp::create();
     frame->_codec_id = CodecAAC;
 
     //生成adts头
@@ -95,9 +95,7 @@ void AACRtmpEncoder::inputFrame(const Frame::Ptr &frame) {
     }
 
     if(!_aac_cfg.empty()){
-        RtmpPacket::Ptr rtmpPkt = ResourcePoolHelper<RtmpPacket>::obtainObj();
-        rtmpPkt->buffer.clear();
-
+        auto rtmpPkt = RtmpPacket::create();
         //header
         uint8_t is_config = false;
         rtmpPkt->buffer.push_back(_audio_flv_flags);
@@ -117,8 +115,7 @@ void AACRtmpEncoder::inputFrame(const Frame::Ptr &frame) {
 
 void AACRtmpEncoder::makeAudioConfigPkt() {
     _audio_flv_flags = getAudioRtmpFlags(std::make_shared<AACTrack>(_aac_cfg));
-    RtmpPacket::Ptr rtmpPkt = ResourcePoolHelper<RtmpPacket>::obtainObj();
-    rtmpPkt->buffer.clear();
+    auto rtmpPkt = RtmpPacket::create();
 
     //header
     uint8_t is_config = true;

@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -18,7 +18,7 @@
 using namespace toolkit;
 
 namespace mediakit {
-class RtspMediaSourceImp : public RtspMediaSource, public Demuxer::Listener , public MultiMediaSourceMuxer::Listener  {
+class RtspMediaSourceImp : public RtspMediaSource, public TrackListener, public MultiMediaSourceMuxer::Listener  {
 public:
     typedef std::shared_ptr<RtspMediaSourceImp> Ptr;
 
@@ -47,7 +47,7 @@ public:
     /**
      * 输入rtp并解析
      */
-    void onWrite(const RtpPacket::Ptr &rtp, bool key_pos) override {
+    void onWrite(RtpPacket::Ptr rtp, bool key_pos) override {
         if (_all_track_ready && !_muxer->isEnabled()) {
             //获取到所有Track后，并且未开启转协议，那么不需要解复用rtp
             //在关闭rtp解复用后，无法知道是否为关键帧，这样会导致无法秒开，或者开播花屏
@@ -56,7 +56,11 @@ public:
             //需要解复用rtp
             key_pos = _demuxer->inputRtp(rtp);
         }
-        RtspMediaSource::onWrite(rtp, key_pos);
+        GET_CONFIG(bool, directProxy, Rtsp::kDirectProxy);
+        if (directProxy) {
+            //直接代理模式才直接使用原始rtp
+            RtspMediaSource::onWrite(std::move(rtp), key_pos);
+        }
     }
 
     /**
@@ -72,12 +76,14 @@ public:
      * @param enableMP4  是否mp4录制
      */
     void setProtocolTranslation(bool enableHls,bool enableMP4){
-        //不重复生成rtsp
-        _muxer = std::make_shared<MultiMediaSourceMuxer>(getVhost(), getApp(), getId(), _demuxer->getDuration(), false, true, enableHls, enableMP4);
+        GET_CONFIG(bool, directProxy, Rtsp::kDirectProxy);
+        //开启直接代理模式时，rtsp直接代理，不重复产生；但是有些rtsp推流端，由于sdp中已有sps pps，rtp中就不再包括sps pps,
+        //导致rtc无法播放，所以在rtsp推流rtc播放时，建议关闭直接代理模式
+        _muxer = std::make_shared<MultiMediaSourceMuxer>(getVhost(), getApp(), getId(), _demuxer->getDuration(), !directProxy, true, enableHls, enableMP4);
         _muxer->setMediaListener(getListener());
         _muxer->setTrackListener(static_pointer_cast<RtspMediaSourceImp>(shared_from_this()));
         //让_muxer对象拦截一部分事件(比如说录像相关事件)
-        setListener(_muxer);
+        MediaSource::setListener(_muxer);
 
         for(auto &track : _demuxer->getTracks(false)){
             _muxer->addTrack(track);
@@ -88,10 +94,25 @@ public:
     /**
      * _demuxer触发的添加Track事件
      */
-    void onAddTrack(const Track::Ptr &track) override {
+    void addTrack(const Track::Ptr &track) override {
         if(_muxer){
             _muxer->addTrack(track);
             track->addDelegate(_muxer);
+        }
+    }
+
+    /**
+     * _demuxer触发的Track添加完毕事件
+     */
+    void addTrackCompleted() override {
+        if (_muxer) {
+            _muxer->addTrackCompleted();
+        }
+    }
+
+    void resetTracks() override {
+        if (_muxer) {
+            _muxer->resetTracks();
         }
     }
 
@@ -100,6 +121,20 @@ public:
      */
     void onAllTrackReady() override{
         _all_track_ready = true;
+    }
+
+    /**
+     * 设置事件监听器
+     * @param listener 监听器
+     */
+    void setListener(const std::weak_ptr<MediaSourceEvent> &listener) override{
+        if (_muxer) {
+            //_muxer对象不能处理的事件再给listener处理
+            _muxer->setMediaListener(listener);
+        } else {
+            //未创建_muxer对象，事件全部给listener处理
+            MediaSource::setListener(listener);
+        }
     }
 
 private:

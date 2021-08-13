@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -15,6 +15,7 @@
 #include <memory>
 #include "Network/Socket.h"
 #include "Network/TcpServer.h"
+#include "Network/UdpServer.h"
 #include "RtpSession.h"
 
 using namespace std;
@@ -48,17 +49,13 @@ public:
     uint16_t getPort();
 
     /**
-     * 获取绑定的线程
-     */
-    EventPoller::Ptr getPoller();
-
-    /**
      * 设置RtpProcess onDetach事件回调
      */
     void setOnDetach(const function<void()> &cb);
 
 protected:
-    Socket::Ptr _udp_server;
+    Socket::Ptr _rtp_socket;
+    UdpServer::Ptr _udp_server;
     TcpServer::Ptr _tcp_server;
     RtpProcess::Ptr _rtp_process;
     function<void()> _on_clearup;

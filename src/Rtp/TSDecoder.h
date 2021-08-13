@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -24,16 +24,18 @@ namespace mediakit {
 //TS包分割器，用于split一个一个的ts包
 class TSSegment : public HttpRequestSplitter {
 public:
-    typedef std::function<void(const char *data,uint64_t len)> onSegment;
-    TSSegment(int size = TS_PACKET_SIZE) : _size(size){}
+    typedef std::function<void(const char *data,size_t len)> onSegment;
+    TSSegment(size_t size = TS_PACKET_SIZE) : _size(size){}
     ~TSSegment(){}
     void setOnSegment(const onSegment &cb);
-    static bool isTSPacket(const char *data, int len);
+    static bool isTSPacket(const char *data, size_t len);
+
 protected:
-    int64_t onRecvHeader(const char *data, uint64_t len) override ;
-    const char *onSearchPacketTail(const char *data, int len) override ;
+    ssize_t onRecvHeader(const char *data, size_t len) override ;
+    const char *onSearchPacketTail(const char *data, size_t len) override ;
+
 private:
-    int _size;
+    size_t _size;
     onSegment _onSegment;
 };
 
@@ -43,12 +45,15 @@ class TSDecoder : public Decoder {
 public:
     TSDecoder();
     ~TSDecoder();
-    int input(const uint8_t* data, int bytes) override ;
-    void setOnDecode(const onDecode &decode) override;
+    ssize_t input(const uint8_t* data, size_t bytes) override ;
+    void setOnDecode(onDecode cb) override;
+    void setOnStream(onStream cb) override;
+
 private:
     TSSegment _ts_segment;
     struct ts_demuxer_t* _demuxer_ctx = nullptr;
     onDecode _on_decode;
+    onStream _on_stream;
 };
 #endif//defined(ENABLE_HLS)
 

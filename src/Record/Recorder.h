@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -45,7 +45,7 @@ public:
      * @param vhost 虚拟主机
      * @param app 应用名
      * @param stream_id 流id
-     * @param customized_path 录像文件保存自定义目录，默认为空则自动生成
+     * @param customized_path 录像文件保存自定义根目录，为空则采用配置文件设置
      * @return  录制文件绝对路径
      */
     static string getRecordPath(type type, const string &vhost, const string &app, const string &stream_id,const string &customized_path = "");
@@ -56,10 +56,11 @@ public:
      * @param vhost 虚拟主机
      * @param app 应用名
      * @param stream_id 流id
-     * @param customized_path 录像文件保存自定义目录，默认为空则自动生成
+     * @param customized_path 录像文件保存自定义根目录，为空则采用配置文件设置
+     * @param max_second mp4录制最大切片时间，单位秒，置0则采用配置文件配置
      * @return 对象指针，可能为nullptr
      */
-    static std::shared_ptr<MediaSinkInterface> createRecorder(type type, const string &vhost, const string &app, const string &stream_id, const string &customized_path = "");
+    static std::shared_ptr<MediaSinkInterface> createRecorder(type type, const string &vhost, const string &app, const string &stream_id, const string &customized_path = "", size_t max_second = 0);
 
     /**
      * 获取录制状态
@@ -77,10 +78,10 @@ public:
      * @param vhost 虚拟主机
      * @param app 应用名
      * @param stream_id 流id
-     * @param customized_path 录像文件保存自定义目录，默认为空则自动生成
+     * @param customized_path 录像文件保存自定义根目录，为空则采用配置文件设置
      * @return 成功与否
      */
-    static bool startRecord(type type, const string &vhost, const string &app, const string &stream_id,const string &customized_path);
+    static bool startRecord(type type, const string &vhost, const string &app, const string &stream_id,const string &customized_path, size_t max_second);
 
     /**
      * 停止录制

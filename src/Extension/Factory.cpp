@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -20,22 +20,23 @@
 #include "CommonRtp.h"
 #include "Opus.h"
 #include "G711.h"
+#include "L16.h"
 #include "Common/Parser.h"
 
 namespace mediakit{
 
 Track::Ptr Factory::getTrackBySdp(const SdpTrack::Ptr &track) {
     if (strcasecmp(track->_codec.data(), "mpeg4-generic") == 0) {
-        string aac_cfg_str = FindField(track->_fmtp.data(), "config=", nullptr);
+        string aac_cfg_str = FindField(track->_fmtp.data(), "config=", ";");
         if (aac_cfg_str.empty()) {
-            aac_cfg_str = FindField(track->_fmtp.data(), "config=", ";");
+            aac_cfg_str = FindField(track->_fmtp.data(), "config=", nullptr);
         }
         if (aac_cfg_str.empty()) {
             //如果sdp中获取不到aac config信息，那么在rtp也无法获取，那么忽略该Track
             return nullptr;
         }
         string aac_cfg;
-        for(int i = 0 ; i < aac_cfg_str.size() / 2 ; ++i ){
+        for(size_t i = 0 ; i < aac_cfg_str.size() / 2 ; ++i ){
             unsigned int cfg;
             sscanf(aac_cfg_str.substr(i * 2, 2).data(), "%02X", &cfg);
             cfg &= 0x00FF;
@@ -54,6 +55,10 @@ Track::Ptr Factory::getTrackBySdp(const SdpTrack::Ptr &track) {
 
     if (strcasecmp(track->_codec.data(), "PCMU") == 0) {
         return std::make_shared<G711Track>(CodecG711U,  track->_samplerate, track->_channel, 16);
+    }
+
+    if (strcasecmp(track->_codec.data(), "L16") == 0) {
+        return std::make_shared<L16Track>(track->_samplerate, track->_channel);
     }
 
     if (strcasecmp(track->_codec.data(), "h264") == 0) {
@@ -123,6 +128,7 @@ RtpCodec::Ptr Factory::getRtpEncoderBySdp(const Sdp::Ptr &sdp) {
         case CodecH264 : return std::make_shared<H264RtpEncoder>(ssrc, mtu, sample_rate, pt, interleaved);
         case CodecH265 : return std::make_shared<H265RtpEncoder>(ssrc, mtu, sample_rate, pt, interleaved);
         case CodecAAC : return std::make_shared<AACRtpEncoder>(ssrc, mtu, sample_rate, pt, interleaved);
+        case CodecL16 :
         case CodecOpus :
         case CodecG711A :
         case CodecG711U : return std::make_shared<CommonRtpEncoder>(codec_id, ssrc, mtu, sample_rate, pt, interleaved);
@@ -135,6 +141,7 @@ RtpCodec::Ptr Factory::getRtpDecoderByTrack(const Track::Ptr &track) {
         case CodecH264 : return std::make_shared<H264RtpDecoder>();
         case CodecH265 : return std::make_shared<H265RtpDecoder>();
         case CodecAAC : return std::make_shared<AACRtpDecoder>(track->clone());
+        case CodecL16 :
         case CodecOpus :
         case CodecG711A :
         case CodecG711U : return std::make_shared<CommonRtpDecoder>(track->getCodecId());

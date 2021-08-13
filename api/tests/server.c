@@ -1,7 +1,7 @@
 ﻿/*
  * Copyright (c) 2016 The ZLMediaKit project authors. All Rights Reserved.
  *
- * This file is part of ZLMediaKit(https://github.com/xiongziliang/ZLMediaKit).
+ * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
  *
  * Use of this source code is governed by MIT license that can be found in the
  * LICENSE file in the root of the source tree. All contributing project authors
@@ -179,7 +179,7 @@ void API_CALL on_mk_http_request(const mk_parser parser,
                     "</body>"
                     "</html>";
     mk_http_body body = mk_http_body_from_string(content,0);
-    mk_http_response_invoker_do(invoker, "200 OK", response_header, body);
+    mk_http_response_invoker_do(invoker, 200, response_header, body);
     mk_http_body_release(body);
 }
 
@@ -371,8 +371,8 @@ void API_CALL on_mk_shell_login(const char *user_name,
  * @param peer_port 客户端端口号
  */
 void API_CALL on_mk_flow_report(const mk_media_info url_info,
-                                uint64_t total_bytes,
-                                uint64_t total_seconds,
+                                size_t total_bytes,
+                                size_t total_seconds,
                                 int is_player,
                                 const mk_sock_info sender) {
     char ip[64];
