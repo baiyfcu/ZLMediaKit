@@ -236,7 +236,7 @@ static inline void addHttpListener(){
                 auto &content = parser.Content();
                 log << "# content:\r\n" << (content.size() > 4 * 1024 ? content.substr(0, 4 * 1024) : content) << "\r\n";
 
-                if (size && size < 4 * 1024) {
+                if (size > 0 && size < 4 * 1024) {
                     auto response = body->readData(size);
                     log << "# response:\r\n" << response->data() << "\r\n";
                     invoker(code, headerOut, response);
@@ -346,6 +346,36 @@ Value makeMediaSourceJson(MediaSource &media){
         item["tracks"].append(obj);
     }
     return item;
+}
+
+Value getStatisticJson() {
+    Value val(objectValue);
+    val["MediaSource"] = (Json::UInt64)(ObjectStatistic<MediaSource>::count());
+    val["MultiMediaSourceMuxer"] = (Json::UInt64)(ObjectStatistic<MultiMediaSourceMuxer>::count());
+
+    val["TcpServer"] = (Json::UInt64)(ObjectStatistic<TcpServer>::count());
+    val["TcpSession"] = (Json::UInt64)(ObjectStatistic<TcpSession>::count());
+    val["UdpServer"] = (Json::UInt64)(ObjectStatistic<UdpServer>::count());
+    val["UdpSession"] = (Json::UInt64)(ObjectStatistic<UdpSession>::count());
+    val["TcpClient"] = (Json::UInt64)(ObjectStatistic<TcpClient>::count());
+    val["Socket"] = (Json::UInt64)(ObjectStatistic<Socket>::count());
+
+    val["FrameImp"] = (Json::UInt64)(ObjectStatistic<FrameImp>::count());
+    val["Frame"] = (Json::UInt64)(ObjectStatistic<Frame>::count());
+
+    val["Buffer"] = (Json::UInt64)(ObjectStatistic<Buffer>::count());
+    val["BufferRaw"] = (Json::UInt64)(ObjectStatistic<BufferRaw>::count());
+    val["BufferLikeString"] = (Json::UInt64)(ObjectStatistic<BufferLikeString>::count());
+    val["BufferList"] = (Json::UInt64)(ObjectStatistic<BufferList>::count());
+
+    val["RtpPacket"] = (Json::UInt64)(ObjectStatistic<RtpPacket>::count());
+    val["RtmpPacket"] = (Json::UInt64)(ObjectStatistic<RtmpPacket>::count());
+#ifdef ENABLE_MEM_DEBUG
+    auto bytes = getTotalMemUsage();
+    val["totalMemUsage"] = (Json::UInt64)bytes;
+    val["totalMemUsageMB"] = (int)(bytes / 1024 / 1024);
+#endif
+    return val;
 }
 
 /**
@@ -1185,31 +1215,7 @@ void installWebApi() {
 
     api_regist("/index/api/getStatistic",[](API_ARGS_MAP){
         CHECK_SECRET();
-        val["data"]["MediaSource"] = (Json::UInt64)(ObjectStatistic<MediaSource>::count());
-        val["data"]["MultiMediaSourceMuxer"] = (Json::UInt64)(ObjectStatistic<MultiMediaSourceMuxer>::count());
-
-        val["data"]["TcpServer"] = (Json::UInt64)(ObjectStatistic<TcpServer>::count());
-        val["data"]["TcpSession"] = (Json::UInt64)(ObjectStatistic<TcpSession>::count());
-        val["data"]["UdpServer"] = (Json::UInt64)(ObjectStatistic<UdpServer>::count());
-        val["data"]["UdpSession"] = (Json::UInt64)(ObjectStatistic<UdpSession>::count());
-        val["data"]["TcpClient"] = (Json::UInt64)(ObjectStatistic<TcpClient>::count());
-        val["data"]["Socket"] = (Json::UInt64)(ObjectStatistic<Socket>::count());
-
-        val["data"]["FrameImp"] = (Json::UInt64)(ObjectStatistic<FrameImp>::count());
-        val["data"]["Frame"] = (Json::UInt64)(ObjectStatistic<Frame>::count());
-
-        val["data"]["Buffer"] = (Json::UInt64)(ObjectStatistic<Buffer>::count());
-        val["data"]["BufferRaw"] = (Json::UInt64)(ObjectStatistic<BufferRaw>::count());
-        val["data"]["BufferLikeString"] = (Json::UInt64)(ObjectStatistic<BufferLikeString>::count());
-        val["data"]["BufferList"] = (Json::UInt64)(ObjectStatistic<BufferList>::count());
-
-        val["data"]["RtpPacket"] = (Json::UInt64)(ObjectStatistic<RtpPacket>::count());
-        val["data"]["RtmpPacket"] = (Json::UInt64)(ObjectStatistic<RtmpPacket>::count());
-#ifdef ENABLE_MEM_DEBUG
-        auto bytes = getTotalMemUsage();
-        val["data"]["totalMemUsage"] = (Json::UInt64)bytes;
-        val["data"]["totalMemUsageMB"] = (int)(bytes / 1024 / 1024);
-#endif
+        val["data"] = getStatisticJson();
     });
 
 #ifdef ENABLE_WEBRTC
