@@ -124,6 +124,7 @@ int MultiMediaSourceMuxer::totalReaderCount() const {
                (_ts ? _ts->readerCount() : 0) +
                #if defined(ENABLE_MP4)
                (_fmp4 ? _fmp4->readerCount() : 0) +
+               (_mp4 ? 1 : 0) +
                #endif
                (hls ? hls->readerCount() : 0);
 
@@ -176,6 +177,10 @@ bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type
             } else if (!start && _mp4) {
                 //停止录制
                 _mp4 = nullptr;
+                if (totalReaderCount() == 0) {
+                    //直播时触发无人观看事件，让开发者自行选择是否关闭
+                    NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastStreamNoneReader, sender);
+                }
             }
             return true;
         }

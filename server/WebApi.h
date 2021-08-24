@@ -235,5 +235,7 @@ bool checkArgs(Args &args, const First &first, const KeyTypes &...keys) {
 void installWebApi();
 void unInstallWebApi();
 Value makeMediaSourceJson(MediaSource &media);
+uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp);
+bool closeRtpServer(const string& stream_id);
 Value getStatisticJson();
 #endif //ZLMEDIAKIT_WEBAPI_H
