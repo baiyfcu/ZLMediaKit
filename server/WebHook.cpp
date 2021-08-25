@@ -43,6 +43,7 @@ const string kOnStreamNoneReader = HOOK_FIELD"on_stream_none_reader";
 const string kOnHttpAccess = HOOK_FIELD"on_http_access";
 const string kOnServerStarted = HOOK_FIELD"on_server_started";
 const string kOnServerKeepalive = HOOK_FIELD"on_server_keepalive";
+const string kOnRecordHls = HOOK_FIELD"on_record_hls";
 const string kAdminParams = HOOK_FIELD"admin_params";
 const string kAliveInterval = HOOK_FIELD"alive_interval";
 
@@ -64,6 +65,7 @@ onceToken token([](){
     mINI::Instance()[kOnHttpAccess] = "";
     mINI::Instance()[kOnServerStarted] = "";
     mINI::Instance()[kOnServerKeepalive] = "";
+    mINI::Instance()[kOnRecordHls] = "";
     mINI::Instance()[kAdminParams] = "secret=035c73f7-bb6b-4889-a715-d9eb2d1925cc";
     mINI::Instance()[kAliveInterval] = 30.0;
 },nullptr);
@@ -213,6 +215,23 @@ void installWebHook(){
     GET_CONFIG(bool,hook_enable,Hook::kEnable);
     GET_CONFIG(string,hook_adminparams,Hook::kAdminParams);
 
+    //录制hls文件成功后广播
+    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastRecordHls,[](BroadcastRecordHlsArgs){
+        GET_CONFIG(string,hook_record_hls,Hook::kOnRecordHls);
+        if(!hook_enable || hook_record_hls.empty()){
+            return;
+        }
+        ArgsType body;
+        body["file_path"] = info.strFilePath;
+        body["app"] = info.strAppName;
+        body["stream"] = info.strStreamId;
+        body["start_time"] = (Json::UInt64)info.ui64StartedTime;
+        body["time_len"] = (Json::UInt64)info.ui64TimeLen;
+
+        InfoL << "do_hook_record_hls, file_path: " << info.strFilePath;
+        //执行hook
+        do_http_hook(hook_record_hls,body, nullptr);
+    });
     NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastMediaPublish,[](BroadcastMediaPublishArgs){
         GET_CONFIG(string,hook_publish,Hook::kOnPublish);
         GET_CONFIG(bool,toHls,General::kPublishToHls);

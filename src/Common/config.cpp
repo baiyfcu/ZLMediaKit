@@ -53,6 +53,7 @@ const string kBroadcastShellLogin = "kBroadcastShellLogin";
 const string kBroadcastNotFoundStream = "kBroadcastNotFoundStream";
 const string kBroadcastStreamNoneReader = "kBroadcastStreamNoneReader";
 const string kBroadcastHttpBeforeAccess = "kBroadcastHttpBeforeAccess";
+const string kBroadcastRecordHls = "kBroadcastRecordHls";
 } //namespace Broadcast
 
 //通用配置项目
@@ -112,6 +113,8 @@ const string kKeepAliveSecond = HTTP_FIELD"keepAliveSecond";
 const string kCharSet = HTTP_FIELD"charSet";
 //http 服务器根目录
 const string kRootPath = HTTP_FIELD"rootPath";
+//http 服务器虚拟目录
+const string kVirtualPath = HTTP_FIELD "virtualPath";
 //http 404错误提示内容
 const string kNotFound = HTTP_FIELD"notFound";
 //是否显示文件夹菜单

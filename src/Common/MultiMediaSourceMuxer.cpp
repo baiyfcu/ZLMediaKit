@@ -119,6 +119,7 @@ void MultiMediaSourceMuxer::setTrackListener(const std::weak_ptr<Listener> &list
 
 int MultiMediaSourceMuxer::totalReaderCount() const {
     auto hls = _hls;
+    auto hls_record = _hls_record;
     auto ret = (_rtsp ? _rtsp->readerCount() : 0) +
                (_rtmp ? _rtmp->readerCount() : 0) +
                (_ts ? _ts->readerCount() : 0) +
@@ -126,7 +127,8 @@ int MultiMediaSourceMuxer::totalReaderCount() const {
                (_fmp4 ? _fmp4->readerCount() : 0) +
                (_mp4 ? 1 : 0) +
                #endif
-               (hls ? hls->readerCount() : 0);
+               (hls ? hls->readerCount() : 0) +
+               (hls_record ? 1 : 0);
 
 #if defined(ENABLE_RTPPROXY)
     return ret + (int)_rtp_sender.size();
@@ -154,6 +156,7 @@ int MultiMediaSourceMuxer::totalReaderCount(MediaSource &sender) {
 
 //此函数可能跨线程调用
 bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type, bool start, const string &custom_path, size_t max_second) {
+    bool ret = false;
     switch (type) {
         case Recorder::type_hls : {
             if (start && !_hls) {
@@ -168,7 +171,8 @@ bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type
                 //停止录制
                 _hls = nullptr;
             }
-            return true;
+            ret = true;
+            goto ret;
         }
         case Recorder::type_mp4 : {
             if (start && !_mp4) {
@@ -177,15 +181,37 @@ bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type
             } else if (!start && _mp4) {
                 //停止录制
                 _mp4 = nullptr;
-                if (totalReaderCount() == 0) {
-                    //直播时触发无人观看事件，让开发者自行选择是否关闭
-                    NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastStreamNoneReader, sender);
-                }
             }
-            return true;
+            ret = true;
+            goto ret;
         }
-        default : return false;
+        case Recorder::type_hls_record : {
+            if (start && !_hls_record) {
+                //开始录制
+                auto hls_record = dynamic_pointer_cast<HlsRecorder>(makeRecorder(sender, getTracks(true), type, custom_path, max_second));
+                if (hls_record) {
+                    //设置HlsMediaSource的事件监听器
+                    hls_record->setListener(shared_from_this());
+                }
+                _hls_record = hls_record;
+            } else if (!start && _hls_record) {
+                //停止录制
+                InfoL << "stop record hls";
+                _hls_record = nullptr;
+            }
+
+            ret = true;
+            goto ret;
+        }
+        default : {
+            ret = false;
+            goto ret;
+        }
     }
+
+ret:
+    MediaSourceEventInterceptor::onReaderChanged(sender, totalReaderCount());
+    return ret;
 }
 
 //此函数可能跨线程调用
@@ -195,6 +221,8 @@ bool MultiMediaSourceMuxer::isRecording(MediaSource &sender, Recorder::type type
             return _hls ? true : false;
         case Recorder::type_mp4 :
             return _mp4 ? true : false;
+        case Recorder::type_hls_record :
+            return _hls_record ? true : false;
         default:
             return false;
     }
@@ -278,6 +306,10 @@ void MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     auto mp4 = _mp4;
     if (mp4) {
         mp4->addTrack(track);
+    }
+    auto rhls = _hls_record;
+    if (rhls) {
+        rhls->addTrack(track);
     }
 }
 
@@ -418,6 +450,12 @@ void MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
     auto mp4 = _mp4;
     if (mp4) {
         mp4->inputFrame(frame);
+    }
+
+    //hls落盘录制
+    auto rhls = _hls_record;
+    if (rhls) {
+        rhls->inputFrame(frame);
     }
 
 #if defined(ENABLE_MP4)

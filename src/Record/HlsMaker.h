@@ -28,7 +28,7 @@ public:
      * @param seg_duration 切片文件长度
      * @param seg_number 切片个数
      */
-    HlsMaker(float seg_duration = 5, uint32_t seg_number = 3);
+    HlsMaker(float seg_duration = 5, uint32_t seg_number = 3,  uint32_t record_type = 0);
     virtual ~HlsMaker();
 
     /**
@@ -84,6 +84,9 @@ protected:
      */
     virtual void onFlushLastSegment(uint32_t duration_ms) {};
 
+
+    virtual void onWriteRecordM3u8(const char *header, size_t hlen, const char *body, size_t blen) = 0;
+
     /**
      * 关闭上个ts切片并且写入m3u8索引
      * @param eof HLS直播是否已结束
@@ -116,6 +119,7 @@ private:
     uint64_t _file_index = 0;
     string _last_file_name;
     std::deque<tuple<int,string> > _seg_dur_list;
+    uint32_t _hls_record_type;
 };
 
 }//namespace mediakit

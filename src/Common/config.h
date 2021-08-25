@@ -44,6 +44,9 @@ extern const string kBroadcastRecordMP4;
 // 录制 ts 文件后广播
 extern const string kBroadcastRecordTs;
 #define BroadcastRecordTsArgs const RecordInfo &info
+//录制hls文件成功后广播
+extern const string kBroadcastRecordHls;
+#define BroadcastRecordHlsArgs const HlsInfo &info
 
 //收到http api请求广播
 extern const string kBroadcastHttpRequest;
@@ -183,6 +186,8 @@ extern const string kKeepAliveSecond;
 extern const string kCharSet;
 //http 服务器根目录
 extern const string kRootPath;
+//http 服务器虚拟目录 虚拟目录名和磁盘物理路径使用“,”隔开，多个配置路径间用 "|"隔开，例如  path1,d:/record|path2,e:/record  
+extern const string kVirtualPath;
 //http 404错误提示内容
 extern const string kNotFound;
 //是否显示文件夹菜单
