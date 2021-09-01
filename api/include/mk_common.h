@@ -38,12 +38,21 @@
 extern "C" {
 #endif
 
+//输出日志到shell
+#define LOG_CONSOLE     (1 << 0)
+//输出日志到文件
+#define LOG_FILE        (1 << 1)
+//输出日志到回调函数(mk_events::on_mk_log)
+#define LOG_CALLBACK    (1 << 2)
+
 typedef struct {
     // 线程数
     int thread_num;
 
     // 日志级别,支持0~4
     int log_level;
+    //控制日志输出的掩模，请查看LOG_CONSOLE、LOG_FILE、LOG_CALLBACK等宏
+    int log_mask;
     //文件日志保存路径,路径可以不存在(内部可以创建文件夹)，设置为NULL关闭日志输出至文件
     const char *log_file_path;
     //文件日志保存天数,设置为0关闭日志文件
@@ -77,6 +86,7 @@ API_EXPORT void API_CALL mk_stop_all_server();
  * 基础类型参数版本的mk_env_init，为了方便其他语言调用
  * @param thread_num 线程数
  * @param log_level 日志级别,支持0~4
+ * @param log_mask 日志输出方式掩模，请查看LOG_CONSOLE、LOG_FILE、LOG_CALLBACK等宏
  * @param log_file_path 文件日志保存路径,路径可以不存在(内部可以创建文件夹)，设置为NULL关闭日志输出至文件
  * @param log_file_days 文件日志保存天数,设置为0关闭日志文件
  * @param ini_is_path 配置文件是内容还是路径
@@ -87,6 +97,7 @@ API_EXPORT void API_CALL mk_stop_all_server();
  */
 API_EXPORT void API_CALL mk_env_init1(int thread_num,
                                       int log_level,
+                                      int log_mask,
                                       const char *log_file_path,
                                       int log_file_days,
                                       int ini_is_path,
