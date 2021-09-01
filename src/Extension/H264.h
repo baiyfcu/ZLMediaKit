@@ -63,7 +63,7 @@ public:
     bool dropAble() const override {
         auto nal_ptr = (uint8_t *) this->data() + this->prefixSize();
         switch (H264_TYPE(*nal_ptr)) {
-            case NAL_SEI:
+            case NAL_SEI: return false;
             case NAL_AUD: return true;
             default: return false;
         }

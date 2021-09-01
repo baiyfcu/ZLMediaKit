@@ -268,9 +268,11 @@ void H264RtpEncoder::packRtpStapA(const char *ptr, size_t len, uint32_t pts, boo
 void H264RtpEncoder::inputFrame(const Frame::Ptr &frame) {
     auto ptr = frame->data() + frame->prefixSize();
     switch (H264_TYPE(ptr[0])) {
-        case H264Frame::NAL_AUD:
-        case H264Frame::NAL_SEI : {
+        case H264Frame::NAL_AUD:  {
             return;
+        }
+        case H264Frame::NAL_SEI : {
+            break;
         }
         case H264Frame::NAL_SPS: {
             _sps = Frame::getCacheAbleFrame(frame);

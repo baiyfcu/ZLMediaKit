@@ -142,15 +142,6 @@ static bool makeFolderMenu(const string &httpPath, const string &strFullPath, st
             file_map.emplace(pr.first, std::make_pair(string("虚拟目录:") + pr.first, File::absolutePath("", pr.second)));
         }
     }
-    //如果是root目录，添加虚拟目录
-    if (httpPath == "/") {
-        GET_CONFIG(string, virtualPath, Http::kVirtualPath);
-        mediakit::Parser pathParser;
-        StrCaseMap args = pathParser.parseArgs(virtualPath, "|", ",");
-        for (auto arg : args) {
-            setFile.emplace(arg.first);
-        }
-    }
     int i = 0;
     for (auto &pr :file_map) {
         auto &strAbsolutePath = pr.second.second;

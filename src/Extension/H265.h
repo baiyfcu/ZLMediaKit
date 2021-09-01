@@ -88,9 +88,9 @@ public:
     bool dropAble() const override {
         auto nal_ptr = (uint8_t *) this->data() + this->prefixSize();
         switch (H265_TYPE(*nal_ptr)) {
-            case NAL_AUD:
+            case NAL_AUD: return true;
             case NAL_SEI_SUFFIX:
-            case NAL_SEI_PREFIX: return true;
+            case NAL_SEI_PREFIX: return false;
             default: return false;
         }
     }
