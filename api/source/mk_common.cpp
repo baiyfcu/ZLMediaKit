@@ -35,10 +35,12 @@ static std::shared_ptr<RtpServer> rtpServer;
 #endif
 
 //////////////////////////environment init///////////////////////////
+
 API_EXPORT void API_CALL mk_env_init(const mk_config *cfg) {
     assert(cfg);
     mk_env_init1(cfg->thread_num,
                  cfg->log_level,
+                 cfg->log_mask,
                  cfg->log_file_path,
                  cfg->log_file_days,
                  cfg->ini_is_path,
@@ -62,6 +64,7 @@ API_EXPORT void API_CALL mk_stop_all_server(){
 
 API_EXPORT void API_CALL mk_env_init1(int thread_num,
                                       int log_level,
+                                      int log_mask,
                                       const char *log_file_path,
                                       int log_file_days,
                                       int ini_is_path,
@@ -71,11 +74,22 @@ API_EXPORT void API_CALL mk_env_init1(int thread_num,
                                       const char *ssl_pwd) {
     //确保只初始化一次
     static onceToken token([&]() {
-        //控制台日志
-        Logger::Instance().add(std::make_shared<ConsoleChannel>("console", (LogLevel) log_level));
-        if(log_file_path && log_file_days){
+        if (log_mask & LOG_CONSOLE) {
+            //控制台日志
+            Logger::Instance().add(std::make_shared<ConsoleChannel>("ConsoleChannel", (LogLevel) log_level));
+        }
+
+        if (log_mask & LOG_CALLBACK) {
+            //广播日志
+            Logger::Instance().add(std::make_shared<EventChannel>("EventChannel", (LogLevel) log_level));
+        }
+
+        if (log_mask & LOG_FILE) {
             //日志文件
-            auto channel = std::make_shared<FileChannel>("FileChannel", File::absolutePath(log_file_path, ""), (LogLevel) log_level);
+            auto channel = std::make_shared<FileChannel>("FileChannel",
+                                                         log_file_path ? File::absolutePath(log_file_path, "") :
+                                                         exeDir() + "log/", (LogLevel) log_level);
+            channel->setMaxDay(log_file_days ? log_file_days : 1);
             Logger::Instance().add(channel);
         }
 

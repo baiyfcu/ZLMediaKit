@@ -112,6 +112,8 @@ const string kKeepAliveSecond = HTTP_FIELD"keepAliveSecond";
 const string kCharSet = HTTP_FIELD"charSet";
 //http 服务器根目录
 const string kRootPath = HTTP_FIELD"rootPath";
+//http 服务器虚拟目录
+const string kVirtualPath = HTTP_FIELD "virtualPath";
 //http 404错误提示内容
 const string kNotFound = HTTP_FIELD"notFound";
 //是否显示文件夹菜单
@@ -122,6 +124,7 @@ onceToken token([](){
     mINI::Instance()[kMaxReqSize] = 4 * 10240;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirMenu] = true;
+    mINI::Instance()[kVirtualPath] = "";
 
 #if defined(_WIN32)
     mINI::Instance()[kCharSet] = "gb2312";
