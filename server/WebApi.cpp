@@ -946,7 +946,7 @@ void installWebApi() {
 
         auto stream_id = allArgs["stream_id"];
 
-        auto port = openRtpServer(allArgs["port"], allArgs["enable_tcp"], stream_id.c_str());
+        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"]);
         if(port == 0) {
             //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
             throw InvalidArgsException("该stream_id已存在");
