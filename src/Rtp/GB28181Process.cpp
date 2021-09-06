@@ -16,6 +16,8 @@
 #include "Extension/H264Rtp.h"
 #include "Extension/Factory.h"
 #include "Extension/Opus.h"
+#include "Extension/G711.h"
+#include "Extension/H265.h"
 
 namespace mediakit{
 
@@ -33,7 +35,7 @@ public:
         setOnSorted(std::move(cb));
         setBeforeSorted(std::move(cb_before));
         //GB28181推流不支持ntp时间戳
-        setNtpStamp(0, 0, 0);
+        setNtpStamp(0, 0);
     }
 
     ~RtpReceiverImp() override = default;

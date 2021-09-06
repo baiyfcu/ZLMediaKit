@@ -139,12 +139,19 @@ StrCaseMap Parser::parseArgs(const string &str, const char *pair_delim, const ch
     StrCaseMap ret;
     auto arg_vec = split(str, pair_delim);
     for (string &key_val : arg_vec) {
+        if (key_val.empty()) {
+            //忽略
+            continue;
+        }
         auto key = trim(FindField(key_val.data(), NULL, key_delim));
         if (!key.empty()) {
             auto val = trim(FindField(key_val.data(), key_delim, NULL));
             ret.emplace_force(key, val);
         } else {
-            ret.emplace_force(key_val, "");
+            trim(key_val);
+            if (!key_val.empty()) {
+                ret.emplace_force(key_val, "");
+            }
         }
     }
     return ret;

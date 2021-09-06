@@ -267,7 +267,7 @@ void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tup
 void WebRtcTransport::sendRtpPacket(const char *buf, int len, bool flush, void *ctx) {
     if (_srtp_session_send) {
         //预留rtx加入的两个字节
-        CHECK(len + SRTP_MAX_TRAILER_LEN + 2 <= sizeof(_srtp_buf));
+        CHECK((size_t)len + SRTP_MAX_TRAILER_LEN + 2 <= sizeof(_srtp_buf));
         memcpy(_srtp_buf, buf, len);
         onBeforeEncryptRtp((char *) _srtp_buf, len, ctx);
         if (_srtp_session_send->EncryptRtp(_srtp_buf, &len)) {
@@ -278,7 +278,7 @@ void WebRtcTransport::sendRtpPacket(const char *buf, int len, bool flush, void *
 
 void WebRtcTransport::sendRtcpPacket(const char *buf, int len, bool flush, void *ctx){
     if (_srtp_session_send) {
-        CHECK(len + SRTP_MAX_TRAILER_LEN <= sizeof(_srtp_buf));
+        CHECK((size_t)len + SRTP_MAX_TRAILER_LEN <= sizeof(_srtp_buf));
         memcpy(_srtp_buf, buf, len);
         onBeforeEncryptRtcp((char *) _srtp_buf, len, ctx);
         if (_srtp_session_send->EncryptRtcp(_srtp_buf, &len)) {
@@ -436,13 +436,13 @@ void WebRtcTransportImp::onStartWebRTC() {
         if (m_offer->type != TrackApplication) {
             //记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id
             track->rtp_ext_ctx = std::make_shared<RtpExtContext>(*m_offer);
-            track->rtp_ext_ctx->setOnGetRtp([this, track](uint8_t pt, uint32_t ssrc, const string &rid) {
+            track->rtp_ext_ctx->setOnGetRtp([this, &track](uint8_t pt, uint32_t ssrc, const string &rid) {
                 //ssrc --> MediaTrack
                 _ssrc_to_track[ssrc] = track;
                 InfoL << "get rtp, pt:" << (int) pt << ", ssrc:" << ssrc << ", rid:" << rid;
             });
 
-            int index = 0;
+            size_t index = 0;
             for (auto &ssrc : m_offer->rtp_ssrc_sim) {
                 //记录ssrc对应的MediaTrack
                 _ssrc_to_track[ssrc.ssrc] = track;
@@ -674,7 +674,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                     } else {
                         //InfoL << "接收丢包率,ssrc:" << sr->ssrc << ",loss rate(%):" << rtp_chn->getLossRate();
                         //设置rtp时间戳与ntp时间戳的对应关系
-                        rtp_chn->setNtpStamp(sr->rtpts, track->plan_rtp->sample_rate, sr->getNtpUnixStampMS());
+                        rtp_chn->setNtpStamp(sr->rtpts, sr->getNtpUnixStampMS());
                         auto rr = rtp_chn->createRtcpRR(sr, track->answer_ssrc_rtp);
                         sendRtcpPacket(rr->data(), rr->size(), true);
                     }
