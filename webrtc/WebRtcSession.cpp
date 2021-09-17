@@ -50,26 +50,24 @@ EventPoller::Ptr WebRtcSession::getPoller(const Buffer::Ptr &buffer) {
 }
 
 void WebRtcSession::onRecv(const Buffer::Ptr &buffer) {
-    auto buf = buffer->data();
-    auto len = buffer->size();
+    try {
+        onRecv_l(buffer);
+    } catch (std::exception &ex) {
+        shutdown(SockException(Err_shutdown, ex.what()));
+    }
+}
 
-    if (!_transport) {
-        auto user_name = getUserName(buffer);
-        if (user_name.empty()) {
-            //逻辑分支不太可能走到这里
-            WarnL << user_name;
-            return;
-        }
-        _transport = WebRtcTransportImp::getRtcTransport(user_name, true);
-        if (!_transport) {
-            //逻辑分支不太可能走到这里
-            WarnL << user_name;
-            return;
-        }
+void WebRtcSession::onRecv_l(const Buffer::Ptr &buffer) {
+    if (_find_transport) {
+        //只允许寻找一次transport
+        _find_transport = false;
+        _transport = WebRtcTransportImp::getRtcTransport(getUserName(buffer), true);
+        CHECK(_transport && _transport->getPoller()->isCurrentThread());
         _transport->setSession(shared_from_this());
     }
     _ticker.resetTime();
-    _transport->inputSockData(buf, len, &_peer_addr);
+    CHECK(_transport);
+    _transport->inputSockData(buffer->data(), buffer->size(), &_peer_addr);
 }
 
 void WebRtcSession::onError(const SockException &err) {
@@ -77,7 +75,14 @@ void WebRtcSession::onError(const SockException &err) {
     //在udp链接迁移时，新的WebRtcSession对象将接管WebRtcTransport对象的生命周期
     //本WebRtcSession对象将在超时后自动销毁
     WarnP(this) << err.what();
-    _transport = nullptr;
+
+    if (!_transport) {
+        return;
+    }
+    auto transport = std::move(_transport);
+    this->Session::getPoller()->async([transport] {
+        //延时减引用，防止使用transport对象时，销毁对象
+    }, false);
 }
 
 void WebRtcSession::onManager() {
