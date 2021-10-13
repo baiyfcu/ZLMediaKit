@@ -63,13 +63,13 @@ public:
     /**
      * 添加ready状态的track
      */
-    void addTrack(const Track::Ptr & track) override;
+    bool addTrack(const Track::Ptr & track) override;
 
     /**
      * 写入帧数据
      * @param frame 帧
      */
-    void inputFrame(const Frame::Ptr &frame) override;
+    bool inputFrame(const Frame::Ptr &frame) override;
 
     /**
      * 重置所有track
@@ -81,6 +81,7 @@ private:
     void trySyncTrack();
 
 private:
+    bool _live = true;
     uint32_t _rtp_stamp[TrackMax]{0};
     uint64_t _ntp_stamp[TrackMax]{0};
     uint64_t _ntp_stamp_start;

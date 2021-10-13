@@ -98,6 +98,7 @@
   - 支持simulcast
   - 支持rtx/nack
   - **支持单端口、多线程、客户端网络连接迁移(开源界唯一)**。
+  - 支持TWCC rtcp动态调整码率
   
 - 其他
   - 支持丰富的restful api以及web hook事件 
@@ -235,6 +236,7 @@ bash build_docker_images.sh
 [lawrencehj](https://github.com/lawrencehj)
 [yangkun](xyyangkun@163.com)
 [Xinghua Zhao](holychaossword@hotmail.com)
+[hejilin](https://github.com/brokensword2018)
 
 ## 使用案例
 

@@ -573,6 +573,7 @@ public:
 class RtcSSRC{
 public:
     uint32_t ssrc {0};
+    uint32_t rtx_ssrc {0};
     string cname;
     string msid;
     string mslabel;
@@ -647,6 +648,7 @@ public:
     const RtcCodecPlan *getRelatedRtxPlan(uint8_t pt) const;
     uint32_t getRtpSSRC() const;
     uint32_t getRtxSSRC() const;
+    bool supportSimulcast() const;
 };
 
 class RtcSession{
@@ -666,6 +668,7 @@ public:
 
     void loadFrom(const string &sdp, bool check = true);
     void checkValid() const;
+    void checkSdp() const;
     //offer sdp,如果指定了发送rtp,那么应该指定ssrc
     void checkValidSSRC() const;
     string toString() const;

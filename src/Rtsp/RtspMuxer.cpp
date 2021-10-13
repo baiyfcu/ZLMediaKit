@@ -14,18 +14,23 @@
 namespace mediakit {
 
 void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
-    if (_rtp_stamp[in->type] != in->getHeader()->stamp) {
-        //rtp时间戳变化才计算ntp，节省cpu资源
-        int64_t stamp_ms = in->getStamp() * uint64_t(1000) / in->sample_rate;
-        int64_t stamp_ms_inc;
-        //求rtp时间戳增量
-        _stamp[in->type].revise(stamp_ms, stamp_ms, stamp_ms_inc, stamp_ms_inc);
-        _rtp_stamp[in->type] = in->getHeader()->stamp;
-        _ntp_stamp[in->type] = stamp_ms_inc + _ntp_stamp_start;
-    }
+    if (_live) {
+        if (_rtp_stamp[in->type] != in->getHeader()->stamp) {
+            //rtp时间戳变化才计算ntp，节省cpu资源
+            int64_t stamp_ms = in->getStamp() * uint64_t(1000) / in->sample_rate;
+            int64_t stamp_ms_inc;
+            //求rtp时间戳增量
+            _stamp[in->type].revise(stamp_ms, stamp_ms, stamp_ms_inc, stamp_ms_inc);
+            _rtp_stamp[in->type] = in->getHeader()->stamp;
+            _ntp_stamp[in->type] = stamp_ms_inc + _ntp_stamp_start;
+        }
 
-    //rtp拦截入口，此处统一赋值ntp
-    in->ntp_stamp = _ntp_stamp[in->type];
+        //rtp拦截入口，此处统一赋值ntp
+        in->ntp_stamp = _ntp_stamp[in->type];
+    } else {
+        //点播情况下设置ntp时间戳为rtp时间戳加基准ntp时间戳
+        in->ntp_stamp = _ntp_stamp_start + (in->getStamp() * uint64_t(1000) / in->sample_rate);
+    }
     _rtpRing->write(std::move(in), is_key);
 }
 
@@ -33,6 +38,7 @@ RtspMuxer::RtspMuxer(const TitleSdp::Ptr &title) {
     if (!title) {
         _sdp = std::make_shared<TitleSdp>()->getSdp();
     } else {
+        _live = title->getDuration() == 0;
         _sdp = title->getSdp();
     }
     _rtpRing = std::make_shared<RtpRing::RingType>();
@@ -43,17 +49,17 @@ RtspMuxer::RtspMuxer(const TitleSdp::Ptr &title) {
     _ntp_stamp_start = getCurrentMillisecond(true);
 }
 
-void RtspMuxer::addTrack(const Track::Ptr &track) {
+bool RtspMuxer::addTrack(const Track::Ptr &track) {
     //根据track生成sdp
     Sdp::Ptr sdp = track->getSdp();
     if (!sdp) {
-        return;
+        return false;
     }
 
     auto &encoder = _encoder[track->getTrackType()];
     encoder = Factory::getRtpEncoderBySdp(sdp);
     if (!encoder) {
-        return;
+        return false;
     }
 
     //设置rtp输出环形缓存
@@ -62,6 +68,7 @@ void RtspMuxer::addTrack(const Track::Ptr &track) {
     //添加其sdp
     _sdp.append(sdp->getSdp());
     trySyncTrack();
+    return true;
 }
 
 void RtspMuxer::trySyncTrack() {
@@ -71,11 +78,9 @@ void RtspMuxer::trySyncTrack() {
     }
 }
 
-void RtspMuxer::inputFrame(const Frame::Ptr &frame) {
+bool RtspMuxer::inputFrame(const Frame::Ptr &frame) {
     auto &encoder = _encoder[frame->getTrackType()];
-    if (encoder) {
-        encoder->inputFrame(frame);
-    }
+    return encoder ? encoder->inputFrame(frame) : false;
 }
 
 string RtspMuxer::getSdp() {

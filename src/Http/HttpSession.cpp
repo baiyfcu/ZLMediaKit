@@ -35,7 +35,7 @@ void HttpSession::Handle_Req_HEAD(ssize_t &content_len){
     //暂时全部返回200 OK，因为HTTP GET存在按需生成流的操作，所以不能按照HTTP GET的流程返回
     //如果直接返回404，那么又会导致按需生成流的逻辑失效，所以HTTP HEAD在静态文件或者已存在资源时才有效
     //对于按需生成流的直播场景并不适用
-    sendResponse(200, true);
+    sendResponse(200, false);
 }
 
 void HttpSession::Handle_Req_OPTIONS(ssize_t &content_len) {
@@ -269,6 +269,7 @@ bool HttpSession::checkLiveStreamFMP4(const function<void()> &cb){
         setSocketFlags();
         onWrite(std::make_shared<BufferString>(fmp4_src->getInitSegment()), true);
         weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
+        fmp4_src->pause(false);
         _fmp4_reader = fmp4_src->getRing()->attach(getPoller());
         _fmp4_reader->setDetachCB([weak_self]() {
             auto strong_self = weak_self.lock();
@@ -309,6 +310,7 @@ bool HttpSession::checkLiveStreamTS(const function<void()> &cb){
         //直播牺牲延时提升发送性能
         setSocketFlags();
         weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
+        ts_src->pause(false);
         _ts_reader = ts_src->getRing()->attach(getPoller());
         _ts_reader->setDetachCB([weak_self](){
             auto strong_self = weak_self.lock();

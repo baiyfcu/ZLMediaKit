@@ -137,14 +137,6 @@ void WebRtcTransport::onSendSockData(const char *buf, size_t len, bool flush){
     onSendSockData(buf, len, (struct sockaddr_in *) tuple, flush);
 }
 
-const RtcSession& WebRtcTransport::getSdp(SdpType type) const{
-    switch (type) {
-        case SdpType::offer: return *_offer_sdp;
-        case SdpType::answer: return *_answer_sdp;
-        default: throw std::invalid_argument("不识别的sdp类型");
-    }
-}
-
 RTC::TransportTuple* WebRtcTransport::getSelectedTuple() const{
     return  _ice_server->GetSelectedTuple();
 }
@@ -180,20 +172,6 @@ void WebRtcTransport::setRemoteDtlsFingerprint(const RtcSession &remote){
     remote_fingerprint.algorithm = RTC::DtlsTransport::GetFingerprintAlgorithm(_offer_sdp->media[0].fingerprint.algorithm);
     remote_fingerprint.value = _offer_sdp->media[0].fingerprint.hash;
     _dtls_transport->SetRemoteFingerprint(remote_fingerprint);
-}
-
-void WebRtcTransport::onCheckSdp(SdpType type, RtcSession &sdp){
-    for (auto &m : sdp.media) {
-        if (m.type != TrackApplication && !m.rtcp_mux) {
-            throw std::invalid_argument("只支持rtcp-mux模式");
-        }
-    }
-    if (sdp.group.mids.empty()) {
-        throw std::invalid_argument("只支持group BUNDLE模式");
-    }
-    if (type == SdpType::offer) {
-        sdp.checkValidSSRC();
-    }
 }
 
 void WebRtcTransport::onRtcConfigure(RtcConfigure &configure) const {
@@ -243,6 +221,10 @@ bool is_rtcp(char *buf) {
     return ((header->pt >= 64) && (header->pt < 96));
 }
 
+static string getPeerAddress(RTC::TransportTuple *tuple){
+    return SockUtil::inet_ntoa(((struct sockaddr_in *)tuple)->sin_addr) + ":" + to_string(ntohs(((struct sockaddr_in *)tuple)->sin_port));
+}
+
 void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tuple) {
     if (RTC::StunPacket::IsStun((const uint8_t *) buf, len)) {
         std::unique_ptr<RTC::StunPacket> packet(RTC::StunPacket::Parse((const uint8_t *) buf, len));
@@ -258,12 +240,20 @@ void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tup
         return;
     }
     if (is_rtp(buf)) {
+        if (!_srtp_session_recv) {
+            WarnL << "received rtp packet when dtls not completed from:" << getPeerAddress(tuple);
+            return;
+        }
         if (_srtp_session_recv->DecryptSrtp((uint8_t *) buf, &len)) {
-            onRtp(buf, len);
+            onRtp(buf, len, _ticker.createdTime());
         }
         return;
     }
     if (is_rtcp(buf)) {
+        if (!_srtp_session_recv) {
+            WarnL << "received rtcp packet when dtls not completed from:" << getPeerAddress(tuple);
+            return;
+        }
         if (_srtp_session_recv->DecryptSrtcp((uint8_t *) buf, &len)) {
             onRtcp(buf, len);
         }
@@ -320,6 +310,10 @@ void WebRtcTransportImp::onCreate(){
         }
         return true;
     }, getPoller());
+
+    _twcc_ctx.setOnSendTwccCB([this](uint32_t ssrc, string fci) {
+        onSendTwcc(ssrc, fci);
+    });
 }
 
 WebRtcTransportImp::WebRtcTransportImp(const EventPoller::Ptr &poller) : WebRtcTransport(poller) {
@@ -382,6 +376,8 @@ void WebRtcTransportImp::onSendSockData(const char *buf, size_t len, struct sock
     }
     auto ptr = BufferRaw::create();
     ptr->assign(buf, len);
+    //一次性发送一帧的rtp数据，提高网络io性能
+    _session->setSendFlushFlag(flush);
     _session->send(std::move(ptr));
 }
 
@@ -391,7 +387,7 @@ bool WebRtcTransportImp::canSendRtp() const{
     if (!_play_src) {
         return false;
     }
-    for (auto &m : getSdp(SdpType::answer).media) {
+    for (auto &m : _answer_sdp->media) {
         if (m.direction == RtpDirection::sendrecv || m.direction == RtpDirection::sendonly) {
             return true;
         }
@@ -403,7 +399,7 @@ bool WebRtcTransportImp::canRecvRtp() const{
     if (!_push_src) {
         return false;
     }
-    for (auto &m : getSdp(SdpType::answer).media) {
+    for (auto &m : _answer_sdp->media) {
         if (m.direction == RtpDirection::sendrecv || m.direction == RtpDirection::recvonly) {
             return true;
         }
@@ -413,8 +409,8 @@ bool WebRtcTransportImp::canRecvRtp() const{
 
 void WebRtcTransportImp::onStartWebRTC() {
     //获取ssrc和pt相关信息,届时收到rtp和rtcp时分别可以根据pt和ssrc找到相关的信息
-    for (auto &m_answer : getSdp(SdpType::answer).media) {
-        auto m_offer = getSdp(SdpType::offer).getMedia(m_answer.type);
+    for (auto &m_answer : _answer_sdp->media) {
+        auto m_offer = _offer_sdp->getMedia(m_answer.type);
         auto track = std::make_shared<MediaTrack>();
 
         track->media = &m_answer;
@@ -466,13 +462,13 @@ void WebRtcTransportImp::onStartWebRTC() {
     }
 
     if (canRecvRtp()) {
-        _push_src->setSdp(getSdp(SdpType::answer).toRtspSdp());
-        _simulcast = getSdp(SdpType::answer).supportSimulcast();
+        _push_src->setSdp(_answer_sdp->toRtspSdp());
+        _simulcast = _answer_sdp->supportSimulcast();
     }
     if (canSendRtp()) {
         RtcSession rtsp_send_sdp;
         rtsp_send_sdp.loadFrom(_play_src->getSdp(), false);
-        for (auto &m : getSdp(SdpType::answer).media) {
+        for (auto &m : _answer_sdp->media) {
             if (m.type == TrackApplication) {
                 continue;
             }
@@ -485,6 +481,7 @@ void WebRtcTransportImp::onStartWebRTC() {
             }
         }
 
+        _play_src->pause(false);
         _reader = _play_src->getRing()->attach(getPoller(), true);
         weak_ptr<WebRtcTransportImp> weak_self = static_pointer_cast<WebRtcTransportImp>(shared_from_this());
         _reader->setReadCB([weak_self](const RtspMediaSource::RingDataType &pkt) {
@@ -509,13 +506,7 @@ void WebRtcTransportImp::onStartWebRTC() {
     _play_src = nullptr;
 }
 
-void WebRtcTransportImp::onCheckSdp(SdpType type, RtcSession &sdp){
-    WebRtcTransport::onCheckSdp(type, sdp);
-    if (type != SdpType::answer) {
-        //我们只修改answer sdp
-        return;
-    }
-
+void WebRtcTransportImp::onCheckAnswer(RtcSession &sdp) {
     //修改answer sdp的ip、端口信息
     GET_CONFIG(string, extern_ip, RTC::kExternIP);
     for (auto &m : sdp.media) {
@@ -548,10 +539,18 @@ void WebRtcTransportImp::onCheckSdp(SdpType type, RtcSession &sdp){
         m.rtp_rtx_ssrc[0].msid = RTP_MSID;
 
         if (m.getRelatedRtxPlan(m.plan[0].pt)) {
-            m.rtp_rtx_ssrc.emplace_back();
-            m.rtp_rtx_ssrc[1] = m.rtp_rtx_ssrc[0];
-            m.rtp_rtx_ssrc[1].ssrc += RTX_SSRC_OFFSET;
+            //rtx ssrc
+            m.rtp_rtx_ssrc[0].rtx_ssrc = m.rtp_rtx_ssrc[0].ssrc + RTX_SSRC_OFFSET;
         }
+    }
+}
+
+void WebRtcTransportImp::onCheckSdp(SdpType type, RtcSession &sdp) {
+    sdp.checkSdp();
+    switch (type) {
+        case SdpType::answer: onCheckAnswer(sdp); break;
+        case SdpType::offer: sdp.checkValidSSRC(); break;
+        default: /*不可达*/ assert(0); break;
     }
 }
 
@@ -776,7 +775,7 @@ void WebRtcTransportImp::createRtpChannel(const string &rid, uint32_t ssrc, Medi
     InfoL << "create rtp receiver of ssrc:" << ssrc << ", rid:" << rid << ", codec:" << track.plan_rtp->codec;
 }
 
-void WebRtcTransportImp::onRtp(const char *buf, size_t len) {
+void WebRtcTransportImp::onRtp(const char *buf, size_t len, uint64_t stamp_ms) {
     _bytes_usage += len;
     _alive_ticker.resetTime();
 
@@ -793,7 +792,10 @@ void WebRtcTransportImp::onRtp(const char *buf, size_t len) {
 
     //修改ext id至统一
     string rid;
-    track->rtp_ext_ctx->changeRtpExtId(rtp, true, &rid);
+    auto twcc_ext = track->rtp_ext_ctx->changeRtpExtId(rtp, true, &rid, RtpExtType::transport_cc);
+    if (twcc_ext && !is_rtx) {
+        _twcc_ctx.onRtp(ssrc, twcc_ext.getTransportCCSeq(), stamp_ms);
+    }
 
     auto &ref = track->rtp_channel[rid];
     if (!ref) {
@@ -847,6 +849,13 @@ void WebRtcTransportImp::onSendNack(MediaTrack &track, const FCI_NACK &nack, uin
     sendRtcpPacket((char *) rtcp.get(), rtcp->getSize(), true);
 }
 
+void WebRtcTransportImp::onSendTwcc(uint32_t ssrc, const string &twcc_fci) {
+    auto rtcp = RtcpFB::create(RTPFBType::RTCP_RTPFB_TWCC, twcc_fci.data(), twcc_fci.size());
+    rtcp->ssrc = htons(0);
+    rtcp->ssrc_media = htonl(ssrc);
+    sendRtcpPacket((char *) rtcp.get(), rtcp->getSize(), true);
+}
+
 ///////////////////////////////////////////////////////////////////
 
 void WebRtcTransportImp::onSortedRtp(MediaTrack &track, const string &rid, RtpPacket::Ptr rtp) {
@@ -857,7 +866,7 @@ void WebRtcTransportImp::onSortedRtp(MediaTrack &track, const string &rid, RtpPa
 
         //开启remb，则发送remb包调节比特率
         GET_CONFIG(size_t, remb_bit_rate, RTC::kRembBitRate);
-        if (remb_bit_rate && getSdp(SdpType::answer).supportRtcpFb(SdpConst::kRembRtcpFb)) {
+        if (remb_bit_rate && _answer_sdp->supportRtcpFb(SdpConst::kRembRtcpFb)) {
             sendRtcpRemb(rtp->getSSRC(), remb_bit_rate);
         }
     }
@@ -1001,13 +1010,40 @@ void WebRtcTransportImp::setSession(Session::Ptr session) {
     _session = std::move(session);
 }
 
-static mutex s_rtc_mtx;
-static unordered_map<string, weak_ptr<WebRtcTransportImp> > s_rtc_map;
+class WebRtcTransportManager {
+    mutable mutex _mtx;
+    unordered_map<string, weak_ptr<WebRtcTransportImp> > _map;
+    WebRtcTransportManager() = default;
+    
+public:
+    static WebRtcTransportManager& instance() {
+        static WebRtcTransportManager s_instance;
+        return s_instance;
+    }
+    void addItem(string key, const WebRtcTransportImp::Ptr &ptr) {
+        lock_guard<mutex> lck(_mtx);
+        _map[key] = ptr;
+    }
+    WebRtcTransportImp::Ptr getItem(const string &key) {
+        if (key.empty()) {
+            return nullptr;
+        }
+        lock_guard<mutex> lck(_mtx);
+        auto it = _map.find(key);
+        if (it == _map.end()) {
+            return nullptr;
+        }
+        return it->second.lock();
+    }
+    void removeItem(string key) {
+        lock_guard<mutex> lck(_mtx);
+        _map.erase(key);
+    }
+};
 
 void WebRtcTransportImp::registerSelf() {
     _self =  static_pointer_cast<WebRtcTransportImp>(shared_from_this());
-    lock_guard<mutex> lck(s_rtc_mtx);
-    s_rtc_map[getKey()] = static_pointer_cast<WebRtcTransportImp>(_self);
+    WebRtcTransportManager::instance().addItem(getKey(), _self);
 }
 
 void WebRtcTransportImp::unrefSelf() {
@@ -1016,21 +1052,16 @@ void WebRtcTransportImp::unrefSelf() {
 
 void WebRtcTransportImp::unregisterSelf() {
     unrefSelf();
-    lock_guard<mutex> lck(s_rtc_mtx);
-    s_rtc_map.erase(getKey());
+    WebRtcTransportManager::instance().removeItem(getKey());
 }
 
-WebRtcTransportImp::Ptr WebRtcTransportImp::getRtcTransport(const string &key, bool unref_self) {
-    if (key.empty()) {
-        return nullptr;
-    }
-    lock_guard<mutex> lck(s_rtc_mtx);
-    auto it = s_rtc_map.find(key);
-    if (it == s_rtc_map.end()) {
-        return nullptr;
-    }
-    auto ret = it->second.lock();
-    if (unref_self) {
+WebRtcTransportImp::Ptr WebRtcTransportImp::get(const string &key) {
+    return WebRtcTransportManager::instance().getItem(key);
+}
+
+WebRtcTransportImp::Ptr WebRtcTransportImp::move(const string &key) {
+    auto ret = WebRtcTransportManager::instance().getItem(key);
+    if (ret) {
         //此对象不再强引用自己，因为自己将被WebRtcSession对象持有
         ret->unrefSelf();
     }
