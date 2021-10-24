@@ -218,11 +218,11 @@ ret:
 bool MultiMediaSourceMuxer::isRecording(MediaSource &sender, Recorder::type type) {
     switch (type){
         case Recorder::type_hls :
-            return _hls ? true : false;
+            return !!_hls;
         case Recorder::type_mp4 :
-            return _mp4 ? true : false;
+            return !!_mp4;
         case Recorder::type_hls_record :
-            return _hls_record ? true : false;
+            return !!_hls_record;
         default:
             return false;
     }
