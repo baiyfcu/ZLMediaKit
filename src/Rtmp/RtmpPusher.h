@@ -27,14 +27,6 @@ public:
     void publish(const string &url) override ;
     void teardown() override;
 
-    void setOnPublished(const Event &cb) override {
-        _on_published = cb;
-    }
-
-    void setOnShutdown(const Event &cb) override{
-        _on_shutdown = cb;
-    }
-
 protected:
     //for Tcpclient override
     void onRecv(const Buffer::Ptr &buf) override;
@@ -48,16 +40,14 @@ protected:
     }
 
 private:
-    void onPublishResult(const SockException &ex, bool handshake_done);
+    void onPublishResult_l(const SockException &ex, bool handshake_done);
 
     template<typename FUN>
     inline void addOnResultCB(const FUN &fun) {
-        lock_guard<recursive_mutex> lck(_mtx_on_result);
         _map_on_result.emplace(_send_req_id, fun);
     }
     template<typename FUN>
     inline void addOnStatusCB(const FUN &fun) {
-        lock_guard<recursive_mutex> lck(_mtx_on_status);
         _deque_on_status.emplace_back(fun);
     }
 
@@ -75,21 +65,16 @@ private:
     string _app;
     string _stream_id;
     string _tc_url;
-
-    recursive_mutex _mtx_on_result;
-    recursive_mutex _mtx_on_status;
     deque<function<void(AMFValue &dec)> > _deque_on_status;
     unordered_map<int, function<void(AMFDecoder &dec)> > _map_on_result;
-
-    //事件监听
-    Event _on_shutdown;
-    Event _on_published;
 
     //推流超时定时器
     std::shared_ptr<Timer> _publish_timer;
     std::weak_ptr<RtmpMediaSource> _publish_src;
     RtmpMediaSource::RingType::RingReader::Ptr _rtmp_reader;
 };
+
+using RtmpPusherImp = PusherImp<RtmpPusher, PusherBase>;
 
 } /* namespace mediakit */
 

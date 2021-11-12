@@ -84,7 +84,7 @@ int main(int argc, char *argv[]) {
                 });
             });
             auto delegate = std::make_shared<FrameWriterInterfaceHelper>([decoder](const Frame::Ptr &frame) {
-                return decoder->inputFrame(frame);
+                return decoder->inputFrame(frame, false);
             });
             videoTrack->addDelegate(delegate);
         }
@@ -106,13 +106,15 @@ int main(int argc, char *argv[]) {
                 audio_player->playPCM((const char *) (pcm->get()->data[0]), len);
             });
             auto audio_delegate = std::make_shared<FrameWriterInterfaceHelper>( [decoder](const Frame::Ptr &frame) {
-                return decoder->inputFrame(frame);
+                return decoder->inputFrame(frame, false);
             });
             audioTrack->addDelegate(audio_delegate);
         }
     });
 
     (*player)[kRtpType] = atoi(argv[2]);
+    //不等待track ready再回调播放成功事件，这样可以加快秒开速度
+    (*player)[Client::kWaitTrackReady] = false;
     player->play(argv[1]);
     SDLDisplayerHelper::Instance().runLoop();
     return 0;

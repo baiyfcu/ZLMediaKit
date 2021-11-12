@@ -29,6 +29,7 @@ PlayerProxy::PlayerProxy(const string &vhost, const string &app, const string &s
     _enable_mp4 = enable_mp4;
     _retry_count = retry_count;
     _on_close = [](const SockException &) {};
+    (*this)[Client::kWaitTrackReady] = false;
 }
 
 void PlayerProxy::setPlayCallbackOnce(const function<void(const SockException &ex)> &cb) {
@@ -160,7 +161,7 @@ bool PlayerProxy::close(MediaSource &sender, bool force) {
 }
 
 int PlayerProxy::totalReaderCount() {
-    return (_muxer ? _muxer->totalReaderCount() : 0) + (_pMediaSrc ? _pMediaSrc->readerCount() : 0);
+    return (_muxer ? _muxer->totalReaderCount() : 0) + (_media_src ? _media_src->readerCount() : 0);
 }
 
 int PlayerProxy::totalReaderCount(MediaSource &sender) {
@@ -181,20 +182,20 @@ std::shared_ptr<SockInfo> PlayerProxy::getOriginSock(MediaSource &sender) const 
 
 void PlayerProxy::onPlaySuccess() {
     GET_CONFIG(bool, resetWhenRePlay, General::kResetWhenRePlay);
-    if (dynamic_pointer_cast<RtspMediaSource>(_pMediaSrc)) {
+    if (dynamic_pointer_cast<RtspMediaSource>(_media_src)) {
         //rtsp拉流代理
         if (resetWhenRePlay || !_muxer) {
-            _muxer.reset(new MultiMediaSourceMuxer(_vhost, _app, _stream_id, getDuration(), false, true, _enable_hls, _enable_mp4));
+            _muxer = std::make_shared<MultiMediaSourceMuxer>(_vhost, _app, _stream_id, getDuration(), false, true, _enable_hls, _enable_mp4);
         }
-    } else if (dynamic_pointer_cast<RtmpMediaSource>(_pMediaSrc)) {
+    } else if (dynamic_pointer_cast<RtmpMediaSource>(_media_src)) {
         //rtmp拉流代理
         if (resetWhenRePlay || !_muxer) {
-            _muxer.reset(new MultiMediaSourceMuxer(_vhost, _app, _stream_id, getDuration(), true, false, _enable_hls, _enable_mp4));
+            _muxer = std::make_shared<MultiMediaSourceMuxer>(_vhost, _app, _stream_id, getDuration(), true, false, _enable_hls, _enable_mp4);
         }
     } else {
         //其他拉流代理
         if (resetWhenRePlay || !_muxer) {
-            _muxer.reset(new MultiMediaSourceMuxer(_vhost, _app, _stream_id, getDuration(), true, true, _enable_hls, _enable_mp4));
+            _muxer = std::make_shared<MultiMediaSourceMuxer>(_vhost, _app, _stream_id, getDuration(), true, true, _enable_hls, _enable_mp4);
         }
     }
     _muxer->setMediaListener(shared_from_this());
@@ -218,9 +219,9 @@ void PlayerProxy::onPlaySuccess() {
     //添加完毕所有track，防止单track情况下最大等待3秒
     _muxer->addTrackCompleted();
 
-    if (_pMediaSrc) {
+    if (_media_src) {
         //让_muxer对象拦截一部分事件(比如说录像相关事件)
-        _pMediaSrc->setListener(_muxer);
+        _media_src->setListener(_muxer);
     }
 }
 

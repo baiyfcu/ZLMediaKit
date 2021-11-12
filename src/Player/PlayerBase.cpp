@@ -13,14 +13,15 @@
 #include "Rtsp/RtspPlayerImp.h"
 #include "Rtmp/RtmpPlayerImp.h"
 #include "Http/HlsPlayer.h"
+
 using namespace toolkit;
 
 namespace mediakit {
 
-PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller,const string &url_in) {
-    static auto releasePlayer = [](PlayerBase *ptr){
-        onceToken token(nullptr,[&](){
-            delete  ptr;
+PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller, const string &url_in) {
+    static auto releasePlayer = [](PlayerBase *ptr) {
+        onceToken token(nullptr, [&]() {
+            delete ptr;
         });
         ptr->teardown();
     };
@@ -32,98 +33,164 @@ PlayerBase::Ptr PlayerBase::createPlayer(const EventPoller::Ptr &poller,const st
         url = url.substr(0, pos);
     }
 
-    if (strcasecmp("rtsps",prefix.data()) == 0) {
-        return PlayerBase::Ptr(new TcpClientWithSSL<RtspPlayerImp>(poller),releasePlayer);
+    if (strcasecmp("rtsps", prefix.data()) == 0) {
+        return PlayerBase::Ptr(new TcpClientWithSSL<RtspPlayerImp>(poller), releasePlayer);
     }
 
-    if (strcasecmp("rtsp",prefix.data()) == 0) {
-        return PlayerBase::Ptr(new RtspPlayerImp(poller),releasePlayer);
+    if (strcasecmp("rtsp", prefix.data()) == 0) {
+        return PlayerBase::Ptr(new RtspPlayerImp(poller), releasePlayer);
     }
 
-    if (strcasecmp("rtmps",prefix.data()) == 0) {
-        return PlayerBase::Ptr(new TcpClientWithSSL<RtmpPlayerImp>(poller),releasePlayer);
+    if (strcasecmp("rtmps", prefix.data()) == 0) {
+        return PlayerBase::Ptr(new TcpClientWithSSL<RtmpPlayerImp>(poller), releasePlayer);
     }
 
-    if (strcasecmp("rtmp",prefix.data()) == 0) {
-        return PlayerBase::Ptr(new RtmpPlayerImp(poller),releasePlayer);
+    if (strcasecmp("rtmp", prefix.data()) == 0) {
+        return PlayerBase::Ptr(new RtmpPlayerImp(poller), releasePlayer);
     }
 
-    if ((strcasecmp("http",prefix.data()) == 0 || strcasecmp("https",prefix.data()) == 0) && end_with(url, ".m3u8")) {
-        return PlayerBase::Ptr(new HlsPlayerImp(poller),releasePlayer);
+    if ((strcasecmp("http", prefix.data()) == 0 || strcasecmp("https", prefix.data()) == 0) && end_with(url, ".m3u8")) {
+        return PlayerBase::Ptr(new HlsPlayerImp(poller), releasePlayer);
     }
 
-    return PlayerBase::Ptr(new RtspPlayerImp(poller),releasePlayer);
+    return PlayerBase::Ptr(new RtspPlayerImp(poller), releasePlayer);
 }
 
 PlayerBase::PlayerBase() {
     this->mINI::operator[](kTimeoutMS) = 10000;
     this->mINI::operator[](kMediaTimeoutMS) = 5000;
     this->mINI::operator[](kBeatIntervalMS) = 5000;
-    this->mINI::operator[](kMaxAnalysisMS) = 5000;
+    this->mINI::operator[](kWaitTrackReady) = true;
 }
 
-///////////////////////////Demuxer//////////////////////////////
-bool Demuxer::isInited(int analysisMs) {
-    if(analysisMs && _ticker.createdTime() > (uint64_t)analysisMs){
-        //analysisMs毫秒后强制初始化完毕
-        return true;
-    }
-    if (_videoTrack && !_videoTrack->ready()) {
-        //视频未准备好
-        return false;
-    }
-    if (_audioTrack && !_audioTrack->ready()) {
-        //音频未准备好
-        return false;
-    }
-    return true;
-}
+///////////////////////////DemuxerSink//////////////////////////////
 
-vector<Track::Ptr> Demuxer::getTracks(bool trackReady) const {
-    vector<Track::Ptr> ret;
-    if(_videoTrack){
-        if(trackReady){
-            if(_videoTrack->ready()){
-                ret.emplace_back(_videoTrack);
-            }
-        }else{
-            ret.emplace_back(_videoTrack);
-        }
-    }
-    if(_audioTrack){
-        if(trackReady){
-            if(_audioTrack->ready()){
-                ret.emplace_back(_audioTrack);
-            }
-        }else{
-            ret.emplace_back(_audioTrack);
-        }
+class DemuxerSink : public MediaSink {
+public:
+    DemuxerSink() = default;
+    ~DemuxerSink() override = default;
+
+    /**
+     * 设置track监听器
+     */
+    void setTrackListener(TrackListener *listener);
+    vector<Track::Ptr> getTracks(bool ready = true) const override;
+
+protected:
+    bool addTrack(const Track::Ptr & track) override;
+    void resetTracks() override;
+    bool onTrackReady(const Track::Ptr & track) override;
+    void onAllTrackReady() override;
+    bool onTrackFrame(const Frame::Ptr &frame) override;
+
+private:
+    Track::Ptr _tracks[TrackMax];
+    TrackListener *_listener = nullptr;
+};
+
+bool DemuxerSink::addTrack(const Track::Ptr &track) {
+    auto ret = MediaSink::addTrack(track);
+    if (ret) {
+        track->addDelegate(std::make_shared<FrameWriterInterfaceHelper>([this](const Frame::Ptr &frame) {
+            return inputFrame(frame);
+        }));
     }
     return ret;
 }
 
-float Demuxer::getDuration() const {
-    return _fDuration;
+void DemuxerSink::setTrackListener(TrackListener *listener) {
+    _listener = listener;
 }
 
-bool Demuxer::addTrack(const Track::Ptr &track){
-    return _listener ? _listener->addTrack(track) : false;
+bool DemuxerSink::onTrackReady(const Track::Ptr &track) {
+    _tracks[track->getTrackType()] = track->clone();
+    return true;
 }
 
-void Demuxer::addTrackCompleted(){
-    if(_listener){
-        _listener->addTrackCompleted();
+void DemuxerSink::onAllTrackReady() {
+    if (!_listener) {
+        return;
     }
+    for (auto &track : _tracks) {
+        if (track) {
+            _listener->addTrack(track);
+        }
+    }
+    _listener->addTrackCompleted();
 }
 
-void Demuxer::resetTracks() {
+bool DemuxerSink::onTrackFrame(const Frame::Ptr &frame) {
+    return _tracks[frame->getTrackType()]->inputFrame(frame);
+}
+
+void DemuxerSink::resetTracks() {
+    MediaSink::resetTracks();
+    for (auto &track : _tracks) {
+        track = nullptr;
+    }
     if (_listener) {
         _listener->resetTracks();
     }
 }
 
-void Demuxer::setTrackListener(TrackListener *listener) {
+vector<Track::Ptr> DemuxerSink::getTracks(bool ready) const {
+    vector<Track::Ptr> ret;
+    for (auto &track : _tracks) {
+        if (!track || (ready && !track->ready())) {
+            continue;
+        }
+        ret.emplace_back(track);
+    }
+    return ret;
+}
+
+///////////////////////////Demuxer//////////////////////////////
+
+void Demuxer::setTrackListener(TrackListener *listener, bool wait_track_ready) {
+    if (wait_track_ready) {
+        auto sink = std::make_shared<DemuxerSink>();
+        sink->setTrackListener(listener);
+        _sink = std::move(sink);
+    }
     _listener = listener;
+}
+
+bool Demuxer::addTrack(const Track::Ptr &track) {
+    if (!_sink) {
+        _origin_track.emplace_back(track);
+    }
+    return _sink ? _sink->addTrack(track) : (_listener ? _listener->addTrack(track) : false);
+}
+
+void Demuxer::addTrackCompleted() {
+    if (_sink) {
+        _sink->addTrackCompleted();
+    } else if (_listener) {
+        _listener->addTrackCompleted();
+    }
+}
+
+void Demuxer::resetTracks() {
+    if (_sink) {
+        _sink->resetTracks();
+    } else if (_listener) {
+        _listener->resetTracks();
+    }
+}
+
+vector<Track::Ptr> Demuxer::getTracks(bool ready) const {
+    if (_sink) {
+        return _sink->getTracks(ready);
+    }
+
+    vector<Track::Ptr> ret;
+    for (auto &track : _origin_track) {
+        if (ready && !track->ready()) {
+            continue;
+        }
+        ret.emplace_back(track);
+    }
+    return ret;
 }
 
 } /* namespace mediakit */

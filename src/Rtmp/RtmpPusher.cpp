@@ -32,21 +32,15 @@ void RtmpPusher::teardown() {
         _app.clear();
         _stream_id.clear();
         _tc_url.clear();
-        {
-            lock_guard<recursive_mutex> lck(_mtx_on_result);
-            _map_on_result.clear();
-        }
-        {
-            lock_guard<recursive_mutex> lck(_mtx_on_status);
-            _deque_on_status.clear();
-        }
+        _map_on_result.clear();
+        _deque_on_status.clear();
         _publish_timer.reset();
         reset();
         shutdown(SockException(Err_shutdown, "teardown"));
     }
 }
 
-void RtmpPusher::onPublishResult(const SockException &ex, bool handshake_done) {
+void RtmpPusher::onPublishResult_l(const SockException &ex, bool handshake_done) {
     DebugL << ex.what();
     if (ex.getErrCode() == Err_shutdown) {
         //主动shutdown的，不触发回调
@@ -55,14 +49,10 @@ void RtmpPusher::onPublishResult(const SockException &ex, bool handshake_done) {
     if (!handshake_done) {
         //播放结果回调
         _publish_timer.reset();
-        if (_on_published) {
-            _on_published(ex);
-        }
+        onPublishResult(ex);
     } else {
         //播放成功后异常断开回调
-        if (_on_shutdown) {
-            _on_shutdown(ex);
-        }
+        onShutdown(ex);
     }
 
     if (ex) {
@@ -78,7 +68,7 @@ void RtmpPusher::publish(const string &url)  {
     _tc_url = string("rtmp://") + host_url + "/" + _app;
 
     if (!_app.size() || !_stream_id.size()) {
-        onPublishResult(SockException(Err_other, "rtmp url非法"), false);
+        onPublishResult_l(SockException(Err_other, "rtmp url非法"), false);
         return;
     }
     DebugL << host_url << " " << _app << " " << _stream_id;
@@ -99,7 +89,7 @@ void RtmpPusher::publish(const string &url)  {
         if (!strongSelf) {
             return false;
         }
-        strongSelf->onPublishResult(SockException(Err_timeout, "publish rtmp timeout"), false);
+        strongSelf->onPublishResult_l(SockException(Err_timeout, "publish rtmp timeout"), false);
         return false;
     }, getPoller()));
 
@@ -112,12 +102,12 @@ void RtmpPusher::publish(const string &url)  {
 
 void RtmpPusher::onErr(const SockException &ex){
     //定时器_pPublishTimer为空后表明握手结束了
-    onPublishResult(ex, !_publish_timer);
+    onPublishResult_l(ex, !_publish_timer);
 }
 
 void RtmpPusher::onConnect(const SockException &err){
     if (err) {
-        onPublishResult(err, false);
+        onPublishResult_l(err, false);
         return;
     }
     weak_ptr<RtmpPusher> weak_self = dynamic_pointer_cast<RtmpPusher>(shared_from_this());
@@ -138,7 +128,7 @@ void RtmpPusher::onRecv(const Buffer::Ptr &buf){
     } catch (exception &e) {
         SockException ex(Err_other, e.what());
         //定时器_pPublishTimer为空后表明握手结束了
-        onPublishResult(ex, !_publish_timer);
+        onPublishResult_l(ex, !_publish_timer);
     }
 }
 
@@ -226,10 +216,10 @@ inline void RtmpPusher::send_metaData(){
     _rtmp_reader->setDetachCB([weak_self]() {
         auto strong_self = weak_self.lock();
         if (strong_self) {
-            strong_self->onPublishResult(SockException(Err_other, "媒体源被释放"), !strong_self->_publish_timer);
+            strong_self->onPublishResult_l(SockException(Err_other, "媒体源被释放"), !strong_self->_publish_timer);
         }
     });
-    onPublishResult(SockException(Err_success, "success"), false);
+    onPublishResult_l(SockException(Err_success, "success"), false);
     //提升发送性能
     setSocketFlags();
 }
@@ -245,7 +235,6 @@ void RtmpPusher::setSocketFlags(){
 
 void RtmpPusher::onCmd_result(AMFDecoder &dec){
     auto req_id = dec.load<int>();
-    lock_guard<recursive_mutex> lck(_mtx_on_result);
     auto it = _map_on_result.find(req_id);
     if (it != _map_on_result.end()) {
         it->second(dec);
@@ -267,7 +256,6 @@ void RtmpPusher::onCmd_onStatus(AMFDecoder &dec) {
         throw std::runtime_error("onStatus:the result object was not found");
     }
 
-    lock_guard<recursive_mutex> lck(_mtx_on_status);
     if (_deque_on_status.size()) {
         _deque_on_status.front()(val);
         _deque_on_status.pop_front();
