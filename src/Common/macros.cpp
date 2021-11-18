@@ -10,7 +10,7 @@
 
 #include "macros.h"
 #include "Util/util.h"
-
+#include "Util/logger.h"
 using namespace toolkit;
 
 #if defined(ENABLE_VERSION)
@@ -26,7 +26,8 @@ void Assert_Throw(int failed, const char *exp, const char *func, const char *fil
             printer << ", " << str;
         }
         printer << "), function " << func << ", file " << file << ", line " << line << ".";
-        throw std::runtime_error(printer);
+        //throw std::runtime_error(printer);
+        ErrorL << printer;
     }
 }
 }

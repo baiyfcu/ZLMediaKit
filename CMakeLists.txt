@@ -184,7 +184,7 @@ if (FAAC_FOUND AND ENABLE_FAAC)
 endif ()
 
 #set(VS_FALGS "/wd4819 /wd4996 /wd4018 /wd4267 /wd4244 /wd4101 /wd4828 /wd4309 /wd4573 /wd4996" )
-set(VS_FALGS "/wd4819")
+set(VS_FALGS "/wd4819 /MP")
 
 #添加mpeg用于支持ts生成
 if (ENABLE_HLS)

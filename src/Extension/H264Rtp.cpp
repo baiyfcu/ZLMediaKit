@@ -269,7 +269,7 @@ bool H264RtpEncoder::inputFrame(const Frame::Ptr &frame) {
     auto ptr = frame->data() + frame->prefixSize();
     switch (H264_TYPE(ptr[0])) {
         case H264Frame::NAL_AUD:  {
-            return;
+            return true;
         }
         case H264Frame::NAL_SEI : {
             break;

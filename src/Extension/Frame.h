@@ -513,6 +513,7 @@ public:
 private:
     bool willFlush(const Frame::Ptr &frame) const;
     void doMerge(BufferLikeString &buffer, const Frame::Ptr &frame) const;
+    void doFlush(const onOutput &cb, BufferLikeString *buffer);
 
 private:
     int _type;

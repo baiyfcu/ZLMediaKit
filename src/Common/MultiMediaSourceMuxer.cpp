@@ -311,8 +311,9 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     }
     auto rhls = _hls_record;
     if (rhls) {
-        rhls->addTrack(track);
+        ret = rhls->addTrack(track);
     }
+    return ret;
 }
 
 void MultiMediaSourceMuxer::onAllTrackReady() {
