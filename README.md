@@ -102,6 +102,7 @@
   - 支持TWCC rtcp动态调整码率
   - 支持remb/pli/sr/rr rtcp
   - 支持rtp扩展解析
+  - 支持GOP缓冲，webrtc播放秒开
   
 - 其他
   - 支持丰富的restful api以及web hook事件 
@@ -125,7 +126,7 @@
  你有三种方法使用ZLMediaKit，分别是：
 
  - 1、使用c api，作为sdk使用，请参考[这里](https://github.com/xia-chu/ZLMediaKit/tree/master/api/include).
- - 2、作为独立的流媒体服务器使用，不想做c/c++开发的，可以参考[restful api](https://github.com/xia-chu/ZLMediaKit/wiki/MediaServer%E6%94%AF%E6%8C%81%E7%9A%84HTTP-API)和[web hook](https://github.com/xia-chu/ZLMediaKit/wiki/MediaServer%E6%94%AF%E6%8C%81%E7%9A%84HTTP-HOOK-API).
+ - 2、作为独立的流媒体服务器使用，不想做c/c++开发的，可以参考 [restful api](https://github.com/xia-chu/ZLMediaKit/wiki/MediaServer支持的HTTP-API) 和 [web hook](https://github.com/xia-chu/ZLMediaKit/wiki/MediaServer支持的HTTP-HOOK-API ).
  - 3、如果想做c/c++开发，添加业务逻辑增加功能，可以参考这里的[测试程序](https://github.com/xia-chu/ZLMediaKit/tree/master/tests).
 
 ## Docker 镜像
@@ -160,6 +161,9 @@ bash build_docker_images.sh
    - [基于C SDK实现的推流客户端](https://github.com/hctym1995/ZLM_ApiDemo)
    - [C#版本的Http API与Hook](https://github.com/chengxiaosheng/ZLMediaKit.HttpApi)
    - [DotNetCore的RESTful客户端](https://github.com/MingZhuLiu/ZLMediaKit.DotNetCore.Sdk)
+   
+ - 播放器
+   - [基于MSE的websocket-fmp4播放器](https://github.com/v354412101/wsPlayer) 
 
 ## 授权协议
 
@@ -171,7 +175,7 @@ bash build_docker_images.sh
 ## 联系方式
 
  - 邮箱：<1213642868@qq.com>(本项目相关或流媒体相关问题请走issue流程，否则恕不邮件答复)
- - QQ群：690854210 (加群前请先把[wiki](https://github.com/ZLMediaKit/ZLMediaKit/wiki)看完，文档有涉及的问题不答复)
+ - QQ群：690854210 (加群前请先把 [wiki](https://github.com/ZLMediaKit/ZLMediaKit/wiki) 看完，文档有涉及的问题不答复)
 
 ## 怎么提问？
 
@@ -240,6 +244,7 @@ bash build_docker_images.sh
 [yangkun](xyyangkun@163.com)
 [Xinghua Zhao](holychaossword@hotmail.com)
 [hejilin](https://github.com/brokensword2018)
+[rqb500](https://github.com/rqb500)
 
 ## 使用案例
 

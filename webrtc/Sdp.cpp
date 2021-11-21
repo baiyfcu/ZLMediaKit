@@ -1022,6 +1022,34 @@ string RtcSession::toRtspSdp() const{
     return sdp->toString();
 }
 
+void addSdpAttrSSRC(const RtcSSRC &rtp_ssrc, vector<SdpItem::Ptr> &items, uint32_t ssrc_num) {
+    assert(ssrc_num);
+    SdpAttrSSRC ssrc;
+    ssrc.ssrc = ssrc_num;
+
+    ssrc.attribute = "cname";
+    ssrc.attribute_value = rtp_ssrc.cname;
+    items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
+
+    if (!rtp_ssrc.msid.empty()) {
+        ssrc.attribute = "msid";
+        ssrc.attribute_value = rtp_ssrc.msid;
+        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
+    }
+
+    if (!rtp_ssrc.mslabel.empty()) {
+        ssrc.attribute = "mslabel";
+        ssrc.attribute_value = rtp_ssrc.mslabel;
+        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
+    }
+
+    if (!rtp_ssrc.label.empty()) {
+        ssrc.attribute = "label";
+        ssrc.attribute_value = rtp_ssrc.label;
+        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
+    }
+}
+
 RtcSessionSdp::Ptr RtcSession::toRtcSessionSdp() const{
     RtcSessionSdp::Ptr ret = std::make_shared<RtcSessionSdp>();
     auto &sdp = *ret;
@@ -1126,51 +1154,15 @@ RtcSessionSdp::Ptr RtcSession::toRtcSessionSdp() const{
                 }
             }
 
-            static auto addSSRCItem = [](const RtcSSRC &rtp_ssrc, vector<SdpItem::Ptr> &items) {
-                CHECK(!rtp_ssrc.empty());
-                auto ssrc_num = rtp_ssrc.ssrc;
-                for (auto i = 0; i < 2; ++i) {
-                    SdpAttrSSRC ssrc;
-                    ssrc.ssrc = ssrc_num;
-
-                    ssrc.attribute = "cname";
-                    ssrc.attribute_value = rtp_ssrc.cname;
-                    items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
-
-                    if (!rtp_ssrc.msid.empty()) {
-                        ssrc.attribute = "msid";
-                        ssrc.attribute_value = rtp_ssrc.msid;
-                        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
-                    }
-
-                    if (!rtp_ssrc.mslabel.empty()) {
-                        ssrc.attribute = "mslabel";
-                        ssrc.attribute_value = rtp_ssrc.mslabel;
-                        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
-                    }
-
-                    if (!rtp_ssrc.label.empty()) {
-                        ssrc.attribute = "label";
-                        ssrc.attribute_value = rtp_ssrc.label;
-                        items.emplace_back(wrapSdpAttr(std::make_shared<SdpAttrSSRC>(ssrc)));
-                    }
-                    if (rtp_ssrc.rtx_ssrc) {
-                        ssrc_num = rtp_ssrc.rtx_ssrc;
-                    } else {
-                        break;
-                    }
-                }
-            };
-
             {
                 for (auto &ssrc : m.rtp_rtx_ssrc) {
                     //添加a=ssrc字段
-                    addSSRCItem(ssrc, sdp_media.items);
-                }
-
-                for (auto &ssrc : m.rtp_rtx_ssrc) {
-                    //生成a=ssrc-group:FID字段
+                    CHECK(!ssrc.empty());
+                    addSdpAttrSSRC(ssrc, sdp_media.items, ssrc.ssrc);
                     if (ssrc.rtx_ssrc) {
+                        addSdpAttrSSRC(ssrc, sdp_media.items, ssrc.rtx_ssrc);
+
+                        //生成a=ssrc-group:FID字段
                         //有rtx ssrc
                         auto group = std::make_shared<SdpAttrSSRCGroup>();
                         group->type = "FID";
@@ -1455,16 +1447,14 @@ void RtcConfigure::RtcTrackConfigure::setDefaultSetting(TrackType type){
     }
 }
 
-void RtcConfigure::setDefaultSetting(string ice_ufrag,
-                                     string ice_pwd,
-                                     RtpDirection direction,
+void RtcConfigure::setDefaultSetting(string ice_ufrag, string ice_pwd, RtpDirection direction,
                                      const SdpAttrFingerprint &fingerprint) {
     video.setDefaultSetting(TrackVideo);
     audio.setDefaultSetting(TrackAudio);
     application.setDefaultSetting(TrackApplication);
 
-    video.ice_ufrag = audio.ice_ufrag = application.ice_ufrag = ice_ufrag;
-    video.ice_pwd = audio.ice_pwd = application.ice_pwd = ice_pwd;
+    video.ice_ufrag = audio.ice_ufrag = application.ice_ufrag = std::move(ice_ufrag);
+    video.ice_pwd = audio.ice_pwd = application.ice_pwd = std::move(ice_pwd);
     video.direction = audio.direction = application.direction = direction;
     video.fingerprint = audio.fingerprint = application.fingerprint = fingerprint;
 }
@@ -1587,7 +1577,7 @@ static RtpDirection matchDirection(RtpDirection offer_direction, RtpDirection su
     }
 }
 
-void RtcConfigure::matchMedia(shared_ptr<RtcSession> &ret, TrackType type, const vector<RtcMedia> &medias, const RtcTrackConfigure &configure){
+void RtcConfigure::matchMedia(const shared_ptr<RtcSession> &ret, TrackType type, const vector<RtcMedia> &medias, const RtcTrackConfigure &configure){
     bool check_profile = true;
     bool check_codec = true;
 
