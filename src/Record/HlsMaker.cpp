@@ -36,15 +36,27 @@ void HlsMaker::makeIndexFile(bool eof) {
     auto sequence =  _hls_record_type == 0 ? ( _seg_number ? (_file_index > _seg_number ? _file_index - _seg_number : 0LL) : 0LL): 0LL;
 
     string m3u8;
-    snprintf(file_content, sizeof(file_content),
-             "#EXTM3U\n"
-             "#EXT-X-VERSION:3\n"
-             "#EXT-X-ALLOW-CACHE:NO\n"
-             "#EXT-X-TARGETDURATION:%u\n"
-             "#EXT-X-MEDIA-SEQUENCE:%llu\n",
-             (maxSegmentDuration + 999) / 1000,
-             sequence);
-
+     if (_seg_number == 0) {
+        // 录像点播支持时移
+        snprintf(file_content, sizeof(file_content),
+                 "#EXTM3U\n"
+                 "#EXT-X-PLAYLIST-TYPE:EVENT\n"
+                 "#EXT-X-VERSION:4\n"
+                 "#EXT-X-TARGETDURATION:%u\n"
+                 "#EXT-X-MEDIA-SEQUENCE:%llu\n",
+                 (maxSegmentDuration + 999) / 1000,
+                 sequence);
+    } else {
+        snprintf(file_content, sizeof(file_content),
+                 "#EXTM3U\n"
+                 "#EXT-X-VERSION:3\n"
+                 "#EXT-X-ALLOW-CACHE:NO\n"
+                 "#EXT-X-TARGETDURATION:%u\n"
+                 "#EXT-X-MEDIA-SEQUENCE:%llu\n",
+                 (maxSegmentDuration + 999) / 1000,
+                 sequence);
+    }
+    
     m3u8.assign(file_content);
     string rm3u8 = m3u8;
     string rcontent;
