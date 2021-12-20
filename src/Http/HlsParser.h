@@ -75,6 +75,11 @@ public:
      */
     bool isM3u8Inner() const;
 
+    /**
+     * 得到总时间
+     */
+    float getTotalDuration() const;
+ 
 protected:
     //解析出ts文件地址回调
     virtual void onParsed(bool is_m3u8_inner,int64_t sequence,const map<int,ts_segment> &ts_list) {};
