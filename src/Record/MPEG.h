@@ -8,24 +8,27 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#ifndef TSMUXER_H
-#define TSMUXER_H
+#ifndef ZLMEDIAKIT_MPEG_H
+#define ZLMEDIAKIT_MPEG_H
 
-#if defined(ENABLE_HLS)
+#if defined(ENABLE_HLS) || defined(ENABLE_RTPPROXY)
+
+#include <cstdio>
+#include <cstdint>
 #include <unordered_map>
 #include "Extension/Frame.h"
 #include "Extension/Track.h"
 #include "Util/File.h"
 #include "Common/MediaSink.h"
 #include "Common/Stamp.h"
-using namespace toolkit;
+
 namespace mediakit {
 
-//该类用于产生MPEG-TS
-class TsMuxer : public MediaSinkInterface {
+//该类用于产生MPEG-TS/MPEG-PS
+class MpegMuxer : public MediaSinkInterface {
 public:
-    TsMuxer();
-    virtual ~TsMuxer();
+    MpegMuxer(bool is_ps);
+    ~MpegMuxer() override;
 
     /**
      * 添加音视频轨道
@@ -44,56 +47,54 @@ public:
 
 protected:
     /**
-     * 输出mpegts数据回调
-     * @param buffer mpegts数据包
+     * 输出ts/ps数据回调
+     * @param buffer ts/ps数据包
      * @param timestamp 时间戳，单位毫秒
-     * @param is_idr_fast_packet 是否为关键帧的第一个TS包，用于确保ts切片第一帧为关键帧
+     * @param key_pos 是否为关键帧的第一个ts/ps包，用于确保ts切片第一帧为关键帧
      */
-    virtual void onTs(std::shared_ptr<Buffer> buffer, uint32_t timestamp,bool is_idr_fast_packet) = 0;
+    virtual void onWrite(std::shared_ptr<Buffer> buffer, uint32_t timestamp, bool key_pos) = 0;
 
 private:
-    void init();
-    void uninit();
-    //音视频时间戳同步用
-    void stampSync();
-    void onTs_l(const void *packet, size_t bytes);
+    void createContext();
+    void releaseContext();
+    void onWrite_l(const void *packet, size_t bytes);
     void flushCache();
 
 private:
+    bool _is_ps = false;
     bool _have_video = false;
-    bool _is_idr_fast_packet = false;
-    void *_context = nullptr;
-    char _tsbuf[188];
+    bool _key_pos = false;
+    uint32_t _max_cache_size = 0;
     uint32_t _timestamp = 0;
-    struct track_info {
-        int track_id = -1;
-        Stamp stamp;
-    };
-    unordered_map<int, track_info> _codec_to_trackid;
+    struct mpeg_muxer_t *_context = nullptr;
+    unordered_map<int, int/*track_id*/> _codec_to_trackid;
     FrameMerger _frame_merger{FrameMerger::h264_prefix};
-    std::shared_ptr<BufferLikeString> _cache;
+    BufferRaw::Ptr _current_buffer;
+    ResourcePool<BufferRaw> _buffer_pool;
 };
 
-}//namespace mediakit
+}//mediakit
 
 #else
 
 #include "Common/MediaSink.h"
 
 namespace mediakit {
-class TsMuxer : public MediaSinkInterface {
+
+class MpegMuxer : public MediaSinkInterface {
 public:
-    TsMuxer() {}
-    ~TsMuxer() override {}
+    MpegMuxer(bool is_ps) {};
+    ~MpegMuxer() override = default;
     bool addTrack(const Track::Ptr &track) override { return false; }
     void resetTracks() override {}
     bool inputFrame(const Frame::Ptr &frame) override { return false; }
 
 protected:
-    virtual void onTs(std::shared_ptr<Buffer> buffer, uint32_t timestamp,bool is_idr_fast_packet) = 0;
+    virtual void onWrite(std::shared_ptr<Buffer> buffer, uint32_t timestamp, bool key_pos) = 0;
 };
+
 }//namespace mediakit
 
-#endif// defined(ENABLE_HLS)
+#endif
 
-#endif //TSMUXER_H
+#endif //ZLMEDIAKIT_MPEG_H

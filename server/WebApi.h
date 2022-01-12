@@ -237,5 +237,5 @@ void unInstallWebApi();
 Value makeMediaSourceJson(MediaSource &media);
 uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp);
 bool closeRtpServer(const string& stream_id);
-Value getStatisticJson();
+void getStatisticJson(const function<void(Value &val)> &cb);
 #endif //ZLMEDIAKIT_WEBAPI_H

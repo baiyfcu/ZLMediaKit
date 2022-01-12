@@ -85,22 +85,23 @@ private:
     void setSocketFlags();
     string getStreamId(const string &str);
     void dumpMetadata(const AMFValue &metadata);
+    void sendStatus(const std::initializer_list<string> &key_value);
 
 private:
     bool _set_meta_data = false;
     double _recv_req_id = 0;
     //消耗的总流量
     uint64_t _total_bytes = 0;
-
     std::string _tc_url;
-    //时间戳修整器
+    //推流时间戳修整器
     Stamp _stamp[2];
     //数据接收超时计时器
     Ticker _ticker;
     MediaInfo _media_info;
-    std::weak_ptr<RtmpMediaSource> _player_src;
-    AMFValue _publisher_metadata;
-    std::shared_ptr<RtmpMediaSourceImp> _publisher_src;
+    std::weak_ptr<RtmpMediaSource> _play_src;
+    AMFValue _push_metadata;
+    RtmpMediaSourceImp::Ptr _push_src;
+    std::shared_ptr<void> _push_src_ownership;
     RtmpMediaSource::RingType::RingReader::Ptr _ring_reader;
 };
 

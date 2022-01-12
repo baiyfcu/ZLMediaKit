@@ -8,12 +8,12 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <stdio.h>
 #include "Common/config.h"
 #include "Util/util.h"
 #include "Util/logger.h"
 #include "Util/onceToken.h"
 #include "Util/NoticeCenter.h"
-#include "Network/sockutil.h"
 
 using namespace toolkit;
 
@@ -79,6 +79,7 @@ const string kEnableAudio = GENERAL_FIELD"enable_audio";
 const string kWaitTrackReadyMS = GENERAL_FIELD"wait_track_ready_ms";
 const string kWaitAddTrackMS = GENERAL_FIELD"wait_add_track_ms";
 const string kUnreadyFrameCache = GENERAL_FIELD"unready_frame_cache";
+const string kContinuePushMS = GENERAL_FIELD"continue_push_ms";
 
 onceToken token([](){
     mINI::Instance()[kFlowThreshold] = 1024;
@@ -101,6 +102,7 @@ onceToken token([](){
     mINI::Instance()[kWaitTrackReadyMS] = 10000;
     mINI::Instance()[kWaitAddTrackMS] = 3000;
     mINI::Instance()[kUnreadyFrameCache] = 100;
+    mINI::Instance()[kContinuePushMS] = 15 * 1000;
 },nullptr);
 
 }//namespace General
@@ -319,31 +321,205 @@ const string kWaitTrackReady = "wait_track_ready";
 
 #ifdef ENABLE_MEM_DEBUG
 
-static atomic<uint64_t> mem_usage(0);
-
-uint64_t getTotalMemUsage() {
-    return mem_usage.load();
+extern "C" {
+    extern void *__real_malloc(size_t);
+    extern void __real_free(void *);
+    extern void *__real_realloc(void *ptr, size_t c);
+    void *__wrap_malloc(size_t c);
+    void __wrap_free(void *ptr);
+    void *__wrap_calloc(size_t __nmemb, size_t __size);
+    void *__wrap_realloc(void *ptr, size_t c);
 }
 
-extern "C" {
+#define BLOCK_TYPES 16
+#define MIN_BLOCK_SIZE 128
 
-#include <stdio.h>
-#define MAGIC_BYTES 0xFEFDFCFB
-#define MAGIC_BYTES_SIZE 4
-#define MEM_PREFIX_SIZE 8
+static int get_mem_block_type(size_t c) {
+    int ret = 0;
+    while (c > MIN_BLOCK_SIZE && ret + 1 < BLOCK_TYPES) {
+        c >>= 1;
+        ++ret;
+    }
+    return ret;
+}
 
-extern void *__real_malloc(size_t);
-extern void __real_free(void *);
-extern void *__real_realloc(void *ptr, size_t c);
+std::vector<size_t> getBlockTypeSize() {
+    std::vector<size_t> ret;
+    ret.resize(BLOCK_TYPES);
+    size_t block_size = MIN_BLOCK_SIZE;
+    for (auto i = 0; i < BLOCK_TYPES; ++i) {
+        ret[i] = block_size;
+        block_size <<= 1;
+    }
+    return ret;
+}
+
+class MemThreadInfo {
+public:
+    using Ptr = std::shared_ptr<MemThreadInfo>;
+    atomic<uint64_t> mem_usage{0};
+    atomic<uint64_t> mem_block{0};
+    atomic<uint64_t> mem_block_map[BLOCK_TYPES];
+
+    static MemThreadInfo *Instance(bool is_thread_local) {
+        if (!is_thread_local) {
+            static auto instance = new MemThreadInfo(is_thread_local);
+            return instance;
+        }
+        static auto thread_local instance = new MemThreadInfo(is_thread_local);
+        return instance;
+    }
+
+    ~MemThreadInfo() {
+        //printf("%s %d\r\n", __FUNCTION__, (int) _is_thread_local);
+    }
+
+    MemThreadInfo(bool is_thread_local) {
+        _is_thread_local = is_thread_local;
+        if (_is_thread_local) {
+            //确保所有线程退出后才能释放全局内存统计器
+            total_mem = Instance(false);
+        }
+        //printf("%s %d\r\n", __FUNCTION__, (int) _is_thread_local);
+    }
+
+    void *operator new(size_t sz) {
+        return __real_malloc(sz);
+    }
+
+    void operator delete(void *ptr) {
+        __real_free(ptr);
+    }
+
+    void addBlock(size_t c) {
+        if (total_mem) {
+            total_mem->addBlock(c);
+        }
+        mem_usage += c;
+        ++mem_block_map[get_mem_block_type(c)];
+        ++mem_block;
+    }
+
+    void delBlock(size_t c) {
+        if (total_mem) {
+            total_mem->delBlock(c);
+        }
+        mem_usage -= c;
+        --mem_block_map[get_mem_block_type(c)];
+        if (0 == --mem_block) {
+            delete this;
+        }
+    }
+
+private:
+    bool _is_thread_local;
+    MemThreadInfo *total_mem = nullptr;
+};
+
+class MemThreadInfoLocal {
+public:
+    MemThreadInfoLocal() {
+        ptr = MemThreadInfo::Instance(true);
+        ptr->addBlock(1);
+    }
+
+    ~MemThreadInfoLocal() {
+        ptr->delBlock(1);
+    }
+
+    MemThreadInfo *get() const {
+        return ptr;
+    }
+
+private:
+    MemThreadInfo *ptr;
+};
+
+//该变量主要确保线程退出后才能释放MemThreadInfo变量
+static thread_local MemThreadInfoLocal s_thread_mem_info;
+
+uint64_t getTotalMemUsage() {
+    return MemThreadInfo::Instance(false)->mem_usage.load();
+}
+
+uint64_t getTotalMemBlock() {
+    return MemThreadInfo::Instance(false)->mem_block.load();
+}
+
+uint64_t getTotalMemBlockByType(int type) {
+    assert(type < BLOCK_TYPES);
+    return MemThreadInfo::Instance(false)->mem_block_map[type].load();
+}
+
+uint64_t getThisThreadMemUsage() {
+    return MemThreadInfo::Instance(true)->mem_usage.load();
+}
+
+uint64_t getThisThreadMemBlock() {
+    return MemThreadInfo::Instance(true)->mem_block.load();
+}
+
+uint64_t getThisThreadMemBlockByType(int type) {
+    assert(type < BLOCK_TYPES);
+    return MemThreadInfo::Instance(true)->mem_block_map[type].load();
+}
+
+class MemCookie {
+public:
+    static constexpr uint32_t kMagic = 0xFEFDFCFB;
+    uint32_t magic;
+    uint32_t size;
+    MemThreadInfo* alloc_info;
+    char ptr;
+};
+
+#define MEM_OFFSET offsetof(MemCookie, ptr)
+
+#if (defined(__linux__) && !defined(ANDROID)) || defined(__MACH__)
+#define MAX_STACK_FRAMES 128
+#define MEM_WARING
+#include <limits.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <execinfo.h>
+
+static void print_mem_waring(size_t c) {
+    void *array[MAX_STACK_FRAMES];
+    int size = backtrace(array, MAX_STACK_FRAMES);
+    char **strings = backtrace_symbols(array, size);
+    printf("malloc big memory:%d, back trace:\r\n", (int)c);
+    for (int i = 0; i < size; ++i) {
+        printf("[%d]: %s\r\n", i, strings[i]);
+    }
+    __real_free(strings);
+}
+#endif
+
+static void init_cookie(MemCookie *cookie, size_t c) {
+    cookie->magic = MemCookie::kMagic;
+    cookie->size = c;
+    cookie->alloc_info = s_thread_mem_info.get();
+    cookie->alloc_info->addBlock(c);
+
+#if defined(MEM_WARING)
+    static auto env = getenv("MEM_WARN_SIZE");
+    static size_t s_mem_waring_size = atoll(env ? env : "0");
+    if (s_mem_waring_size > 1024 && c >= s_mem_waring_size) {
+        print_mem_waring(c);
+    }
+#endif
+}
+
+static void un_init_cookie(MemCookie *cookie) {
+    cookie->alloc_info->delBlock(cookie->size);
+}
 
 void *__wrap_malloc(size_t c) {
-    c += MEM_PREFIX_SIZE;
-    char *ret = (char *) __real_malloc(c);
-    if (ret) {
-        mem_usage += c;
-        *((uint32_t *) (ret)) = MAGIC_BYTES;
-        *((uint32_t *) (ret + MAGIC_BYTES_SIZE)) = c;
-        return ret + MEM_PREFIX_SIZE;
+    c += MEM_OFFSET;
+    auto cookie = (MemCookie *) __real_malloc(c);
+    if (cookie) {
+        init_cookie(cookie, c);
+        return &cookie->ptr;
     }
     return nullptr;
 }
@@ -352,13 +528,13 @@ void __wrap_free(void *ptr) {
     if (!ptr) {
         return;
     }
-    ptr = (char *) ptr - MEM_PREFIX_SIZE;
-    uint32_t magic = *((uint32_t *) (ptr));
-    if (magic != MAGIC_BYTES) {
-        throw std::invalid_argument("attempt to free invalid memory");
+    auto cookie = (MemCookie *) ((char *) ptr - MEM_OFFSET);
+    if (cookie->magic != MemCookie::kMagic) {
+        __real_free(ptr);
+        return;
     }
-    mem_usage -= *((uint32_t *) ((char *) ptr + MAGIC_BYTES_SIZE));
-    __real_free(ptr);
+    un_init_cookie(cookie);
+    __real_free(cookie);
 }
 
 void *__wrap_calloc(size_t __nmemb, size_t __size) {
@@ -370,30 +546,24 @@ void *__wrap_calloc(size_t __nmemb, size_t __size) {
     return ret;
 }
 
-void *__wrap_realloc(void *ptr, size_t c){
+void *__wrap_realloc(void *ptr, size_t c) {
     if (!ptr) {
         return malloc(c);
     }
-    c += MEM_PREFIX_SIZE;
-    ptr = (char *) ptr - MEM_PREFIX_SIZE;
 
-    uint32_t magic = *((uint32_t *) (ptr));
-    if (magic != MAGIC_BYTES) {
-        throw std::invalid_argument("attempt to realloc invalid memory");
+    auto cookie = (MemCookie *) ((char *) ptr - MEM_OFFSET);
+    if (cookie->magic != MemCookie::kMagic) {
+        return __real_realloc(ptr, c);
     }
-    auto old_size = *((uint32_t *) ((char *) ptr + MAGIC_BYTES_SIZE));
-    char *ret = (char *) __real_realloc(ptr, c);
-    if (ret) {
-        mem_usage += c - old_size;
-        *((uint32_t *) (ret)) = MAGIC_BYTES;
-        *((uint32_t *) (ret + MAGIC_BYTES_SIZE)) = c;
-        return ret + MEM_PREFIX_SIZE;
+
+    un_init_cookie(cookie);
+    c += MEM_OFFSET;
+    cookie = (MemCookie *) __real_realloc(cookie, c);
+    if (cookie) {
+        init_cookie(cookie, c);
+        return &cookie->ptr;
     }
-    free(ptr);
-    mem_usage -= old_size;
     return nullptr;
-}
-
 }
 
 void *operator new(std::size_t size) {
@@ -404,11 +574,11 @@ void *operator new(std::size_t size) {
     throw std::bad_alloc();
 }
 
-void operator delete(void *ptr) {
+void operator delete(void *ptr) noexcept {
     free(ptr);
 }
 
-void operator delete(void *ptr, std::size_t) {
+void operator delete(void *ptr, std::size_t) noexcept {
     free(ptr);
 }
 
@@ -420,11 +590,11 @@ void *operator new[](std::size_t size) {
     throw std::bad_alloc();
 }
 
-void operator delete[](void *ptr) {
+void operator delete[](void *ptr) noexcept {
     free(ptr);
 }
 
-void operator delete[](void *ptr, std::size_t) {
+void operator delete[](void *ptr, std::size_t) noexcept {
     free(ptr);
 }
 #endif

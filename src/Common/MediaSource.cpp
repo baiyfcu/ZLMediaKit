@@ -85,6 +85,20 @@ const string& MediaSource::getId() const {
     return _stream_id;
 }
 
+std::shared_ptr<void> MediaSource::getOwnership() {
+    if (_owned.test_and_set()) {
+        //已经被所有
+        return nullptr;
+    }
+    weak_ptr<MediaSource> weak_self = shared_from_this();
+    return std::shared_ptr<void>(this, [weak_self](void *ptr) {
+        auto strong_self = weak_self.lock();
+        if (strong_self) {
+            strong_self->_owned.clear();
+        }
+    });
+}
+
 int MediaSource::getBytesSpeed(TrackType type){
     if(type == TrackInvalid){
         return _speed[TrackVideo].getSpeed() + _speed[TrackAudio].getSpeed();
@@ -419,7 +433,12 @@ void MediaSource::regist() {
         //减小互斥锁临界区
         lock_guard<recursive_mutex> lock(s_media_source_mtx);
         auto &ref = s_media_source_map[_schema][_vhost][_app][_stream_id];
-        if (ref.lock()) {
+        auto src = ref.lock();
+        if (src) {
+            if (src.get() == this) {
+                return;
+            }
+            //增加判断, 防止当前流已注册时再次注册
             throw std::invalid_argument("media source already existed:" + _schema + "/" + _vhost + "/" + _app + "/" + _stream_id);
         }
         ref = shared_from_this();
@@ -727,14 +746,6 @@ std::shared_ptr<MediaSourceEvent> MediaSourceEventInterceptor::getDelegate() con
 }
 
 /////////////////////////////////////FlushPolicy//////////////////////////////////////
-
-template<>
-bool PacketCache<RtpPacket>::flushImmediatelyWhenCloseMerge() {
-    //因为rtp的包很小，一个RtpPacket包中也不是完整的一帧图像，所以在关闭合并写时，
-    //还是有必要缓冲一帧的rtp(也就是时间戳相同的rtp)再输出，这样虽然会增加一帧的延时
-    //但是却对性能提升很大，这样做还是比较划算的
-    return false;
-}
 
 static bool isFlushAble_default(bool is_video, uint64_t last_stamp, uint64_t new_stamp, size_t cache_size) {
     if (new_stamp + 500 < last_stamp) {

@@ -212,6 +212,12 @@ static ApiArgsType getAllArgs(const Parser &parser) {
 }
 
 extern uint64_t getTotalMemUsage();
+extern uint64_t getTotalMemBlock();
+extern uint64_t getThisThreadMemUsage();
+extern uint64_t getThisThreadMemBlock();
+extern std::vector<size_t> getBlockTypeSize();
+extern uint64_t getTotalMemBlockByType(int type);
+extern uint64_t getThisThreadMemBlockByType(int type) ;
 
 static inline void addHttpListener(){
     GET_CONFIG(bool, api_debug, API::kApiDebug);
@@ -233,7 +239,7 @@ static inline void addHttpListener(){
                     size = body->remainSize();
                 }
 
-                LogContextCapturer log(getLogger(), LDebug, __FILE__, "http api debug", __LINE__);
+                LogContextCapture log(getLogger(), LDebug, __FILE__, "http api debug", __LINE__);
                 log << "\r\n# request:\r\n" << parser.Method() << " " << parser.FullUrl() << "\r\n";
                 log << "# header:\r\n";
 
@@ -388,8 +394,9 @@ bool closeRtpServer(const string& stream_id) {
     return true;
 }
 
-Value getStatisticJson() {
-    Value val(objectValue);
+void getStatisticJson(const function<void(Value &val)> &cb) {
+    auto obj = std::make_shared<Value>(objectValue);
+    auto &val = *obj;
     val["MediaSource"] = (Json::UInt64)(ObjectStatistic<MediaSource>::count());
     val["MultiMediaSourceMuxer"] = (Json::UInt64)(ObjectStatistic<MultiMediaSourceMuxer>::count());
 
@@ -412,10 +419,63 @@ Value getStatisticJson() {
     val["RtmpPacket"] = (Json::UInt64)(ObjectStatistic<RtmpPacket>::count());
 #ifdef ENABLE_MEM_DEBUG
     auto bytes = getTotalMemUsage();
-    val["totalMemUsage"] = (Json::UInt64)bytes;
-    val["totalMemUsageMB"] = (int)(bytes / 1024 / 1024);
+    val["totalMemUsage"] = (Json::UInt64) bytes;
+    val["totalMemUsageMB"] = (int) (bytes / 1024 / 1024);
+    val["totalMemBlock"] = (Json::UInt64) getTotalMemBlock();
+    static auto block_type_size = getBlockTypeSize();
+    {
+        int i = 0;
+        string str;
+        size_t last = 0;
+        for (auto sz : block_type_size) {
+            str.append(to_string(last) + "~" + to_string(sz) + ":" + to_string(getTotalMemBlockByType(i++)) + ";");
+            last = sz;
+        }
+        str.pop_back();
+        val["totalMemBlockTypeCount"] = str;
+    }
+
+    auto thread_size = EventPollerPool::Instance().getExecutorSize() + WorkThreadPool::Instance().getExecutorSize();
+    std::shared_ptr<vector<Value> > thread_mem_info = std::make_shared<vector<Value> >(thread_size);
+
+    shared_ptr<void> finished(nullptr, [thread_mem_info, cb, obj](void *) {
+        for (auto &val : *thread_mem_info) {
+            (*obj)["threadMem"].append(val);
+        }
+        //触发回调
+        cb(*obj);
+    });
+
+    auto pos = 0;
+    auto lam0 = [&](TaskExecutor &executor) {
+        auto &val = (*thread_mem_info)[pos++];
+        executor.async([finished, &val]() {
+            auto bytes = getThisThreadMemUsage();
+            val["threadName"] = getThreadName();
+            val["threadMemUsage"] = (Json::UInt64) bytes;
+            val["threadMemUsageMB"] = (Json::UInt64) (bytes / 1024 / 1024);
+            val["threadMemBlock"] = (Json::UInt64) getThisThreadMemBlock();
+            {
+                int i = 0;
+                string str;
+                size_t last = 0;
+                for (auto sz : block_type_size) {
+                    str.append(to_string(last) + "~" + to_string(sz) + ":" + to_string(getThisThreadMemBlockByType(i++)) + ";");
+                    last = sz;
+                }
+                str.pop_back();
+                val["threadMemBlockTypeCount"] = str;
+            }
+        });
+    };
+    auto lam1 = [lam0](const TaskExecutor::Ptr &executor) {
+        lam0(*executor);
+    };
+    EventPollerPool::Instance().for_each(lam1);
+    WorkThreadPool::Instance().for_each(lam1);
+#else
+    cb(*obj);
 #endif
-    return val;
 }
 
 /**
@@ -1331,9 +1391,12 @@ void installWebApi() {
         });
     });
 
-    api_regist("/index/api/getStatistic",[](API_ARGS_MAP){
+    api_regist("/index/api/getStatistic",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
-        val["data"] = getStatisticJson();
+        getStatisticJson([headerOut, val, invoker](const Value &data) mutable{
+            val["data"] = data;
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
 #ifdef ENABLE_WEBRTC

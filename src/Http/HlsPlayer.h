@@ -96,7 +96,7 @@ private:
 private:
     void playDelay();
     float delaySecond();
-    void playNextTs(bool force = false);
+    void playNextTs();
     void teardown_l(const SockException &ex);
     void play_l();
     void onPacket_l(const char *data, size_t len);

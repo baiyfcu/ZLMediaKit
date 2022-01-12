@@ -152,6 +152,7 @@ if (OPENSSL_FOUND AND ENABLE_OPENSSL)
         list(APPEND LINK_LIB_LIST dl)
     endif ()
 else ()
+    set(ENABLE_OPENSSL off)
     message(WARNING "openssl未找到，rtmp将不支持flash播放器，https/wss/rtsps/rtmps也将失效")
 endif ()
 
@@ -187,10 +188,7 @@ endif ()
 set(VS_FALGS "/wd4819 /MP")
 
 #添加mpeg用于支持ts生成
-if (ENABLE_HLS)
-    message(STATUS "ENABLE_HLS defined")
-    add_definitions(-DENABLE_HLS)
-
+if (ENABLE_RTPPROXY OR ENABLE_HLS)
     include_directories(${MediaServer_Root}/libmpeg/include)
     aux_source_directory(${MediaServer_Root}/libmpeg/include src_mpeg)
     aux_source_directory(${MediaServer_Root}/libmpeg/source src_mpeg)
@@ -228,10 +226,14 @@ if (ENABLE_MP4)
     endif ()
 endif ()
 
-#添加rtp库用于rtp转ps/ts
-if (ENABLE_RTPPROXY AND ENABLE_HLS)
+if (ENABLE_RTPPROXY)
     message(STATUS "ENABLE_RTPPROXY defined")
     add_definitions(-DENABLE_RTPPROXY)
+endif ()
+
+if (ENABLE_HLS)
+    message(STATUS "ENABLE_HLS defined")
+    add_definitions(-DENABLE_HLS)
 endif ()
 
 #收集源代码
@@ -294,7 +296,7 @@ endif ()
 if (ENABLE_WEBRTC)
     #查找srtp是否安装
     find_package(SRTP QUIET)
-    if (SRTP_FOUND)
+    if (SRTP_FOUND AND ENABLE_OPENSSL)
         message(STATUS "found library:${SRTP_LIBRARIES}")
         include_directories(${SRTP_INCLUDE_DIRS})
         list(APPEND LINK_LIB_LIST ${SRTP_LIBRARIES})

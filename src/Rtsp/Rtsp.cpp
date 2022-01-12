@@ -386,6 +386,9 @@ static void makeSockPair_l(std::pair<Socket::Ptr, Socket::Ptr> &pair, const stri
 }
 
 void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip) {
+    //全局互斥锁保护，防止端口重复分配
+    static recursive_mutex s_mtx;
+    lock_guard<recursive_mutex> lck(s_mtx);
     int try_count = 0;
     while (true) {
         try {
@@ -555,7 +558,7 @@ RtpPacket::Ptr RtpPacket::create() {
     static onceToken token([]() {
         packet_pool.setSize(1024);
     });
-    auto ret = packet_pool.obtain();
+    auto ret = packet_pool.obtain2();
     ret->setSize(0);
     return ret;
 #else
