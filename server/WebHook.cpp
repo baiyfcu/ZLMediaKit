@@ -71,9 +71,19 @@ onceToken token([](){
 },nullptr);
 }//namespace Hook
 
+namespace Cluster {
+#define CLUSTER_FIELD "cluster."
+const string kOriginUrl = CLUSTER_FIELD "origin_url";
+const string kTimeoutSec = CLUSTER_FIELD "timeout_sec";
 
-static void parse_http_response(const SockException &ex,
-                                const Parser &res,
+static onceToken token([]() {
+    mINI::Instance()[kOriginUrl] = "";
+    mINI::Instance()[kTimeoutSec] = 15;
+});
+
+}//namespace Cluster
+
+static void parse_http_response(const SockException &ex, const Parser &res,
                                 const function<void(const Value &,const string &)> &fun){
     if (ex) {
         auto errStr = StrPrinter << "[network err]:" << ex.what() << endl;
@@ -212,6 +222,42 @@ static void reportServerKeepalive() {
         });
         return true;
     }, nullptr);
+}
+
+static const string kEdgeServerParam = "edge=1";
+
+static string getPullUrl(const string &origin_fmt, const MediaInfo &info) {
+    char url[1024] = { 0 };
+    if (origin_fmt.size() > snprintf(url, sizeof(url), origin_fmt.data(), info._app.data(), info._streamid.data())) {
+        WarnL << "get origin url failed, origin_fmt:" << origin_fmt;
+        return "";
+    }
+    //告知源站这是来自边沿站的拉流请求，如果未找到流请立即返回拉流失败
+    return string(url) + '?' + kEdgeServerParam + '&' + VHOST_KEY + '=' + info._vhost + '&' + info._param_strs;
+}
+
+static void pullStreamFromOrigin(const vector<string>& urls, int index, int failed_cnt, const MediaInfo &args,
+                                 const function<void()> &closePlayer) {
+
+    GET_CONFIG(float, cluster_timeout_sec, Cluster::kTimeoutSec);
+    auto url = getPullUrl(urls[index % urls.size()], args);
+    auto timeout_sec = cluster_timeout_sec / urls.size();
+    InfoL << "pull stream from origin, failed_cnt: " << failed_cnt << ", timeout_sec: " << timeout_sec << ", url: " << url;
+
+    addStreamProxy(args._vhost, args._app, args._streamid, url, -1, args._schema == HLS_SCHEMA, false,
+                   Rtsp::RTP_TCP, timeout_sec, [=](const SockException &ex, const string &key) mutable {
+        if (!ex) {
+            return;
+        }
+        //拉流失败
+        if (++failed_cnt == urls.size()) {
+            //已经重试所有源站了
+            WarnL << "pull stream from origin final failed: " << url;
+            closePlayer();
+            return;
+        }
+        pullStreamFromOrigin(urls, index + 1, failed_cnt, args, closePlayer);
+    });
 }
 
 void installWebHook(){
@@ -377,12 +423,35 @@ void installWebHook(){
         do_http_hook(hook_stream_chaned,body, nullptr);
     });
 
+    GET_CONFIG_FUNC(vector<string>, origin_urls, Cluster::kOriginUrl, [](const string &str) {
+        vector<string> ret;
+        for (auto &url : split(str, ";")) {
+            trim(url);
+            if (!url.empty()) {
+                ret.emplace_back(url);
+            }
+        }
+        return ret;
+    });
+
     //监听播放失败(未找到特定的流)事件
-    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastNotFoundStream,[](BroadcastNotFoundStreamArgs){
-        GET_CONFIG(string,hook_stream_not_found,Hook::kOnStreamNotFound);
-        if(!hook_enable || hook_stream_not_found.empty()){
-            //如果确定这个流不存在，可以closePlayer()返回播放器流不存在
-            //closePlayer();
+    NoticeCenter::Instance().addListener(nullptr, Broadcast::kBroadcastNotFoundStream, [](BroadcastNotFoundStreamArgs) {
+        if (!origin_urls.empty()) {
+            //设置了源站，那么尝试溯源
+            static atomic<uint8_t> s_index { 0 };
+            pullStreamFromOrigin(origin_urls, s_index.load(), 0, args, closePlayer);
+            ++s_index;
+            return;
+        }
+
+        if (start_with(args._param_strs, kEdgeServerParam)) {
+            //源站收到来自边沿站的溯源请求，流不存在时立即返回拉流失败
+            closePlayer();
+            return;
+        }
+
+        GET_CONFIG(string, hook_stream_not_found, Hook::kOnStreamNotFound);
+        if (!hook_enable || hook_stream_not_found.empty()) {
             return;
         }
         auto body = make_json(args);
@@ -390,7 +459,7 @@ void installWebHook(){
         body["port"] = sender.get_peer_port();
         body["id"] = sender.getIdentifier();
         //执行hook
-        do_http_hook(hook_stream_not_found,body, nullptr);
+        do_http_hook(hook_stream_not_found, body, nullptr);
     });
 
     static auto getRecordInfo = [](const RecordInfo &info) {
@@ -448,7 +517,13 @@ void installWebHook(){
         });
     });
 
-    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastStreamNoneReader,[](BroadcastStreamNoneReaderArgs){
+    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastStreamNoneReader,[](BroadcastStreamNoneReaderArgs) {
+        if (!origin_urls.empty()) {
+            //边沿站无人观看时立即停止溯源
+            sender.close(false);
+            WarnL << "无人观看主动关闭流:" << sender.getOriginUrl();
+            return;
+        }
         GET_CONFIG(string,hook_stream_none_reader,Hook::kOnStreamNoneReader);
         if(!hook_enable || hook_stream_none_reader.empty()){
             return;
@@ -468,11 +543,7 @@ void installWebHook(){
                 return;
             }
             strongSrc->close(false);
-            WarnL << "无人观看主动关闭流:"
-                  << strongSrc->getSchema() << "/"
-                  << strongSrc->getVhost() << "/"
-                  << strongSrc->getApp() << "/"
-                  << strongSrc->getId();
+            WarnL << "无人观看主动关闭流:" << strongSrc->getOriginUrl();
         });
     });
 

@@ -238,4 +238,7 @@ Value makeMediaSourceJson(MediaSource &media);
 uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp);
 bool closeRtpServer(const string& stream_id);
 void getStatisticJson(const function<void(Value &val)> &cb);
+void addStreamProxy(const string &vhost, const string &app, const string &stream, const string &url, int retry_count,
+                    bool enable_hls, bool enable_mp4, int rtp_type, float timeout_sec,
+                    const function<void(const SockException &ex, const string &key)> &cb);
 #endif //ZLMEDIAKIT_WEBAPI_H
