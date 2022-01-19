@@ -430,7 +430,7 @@ void RtspPlayer::sendPause(int type , uint32_t seekMS){
 }
 
 void RtspPlayer::pause(bool bPause) {
-    sendPause(bPause ? type_pause : type_seek, getProgressMilliSecond());
+    sendPause(bPause ? type_pause : type_play, getProgressMilliSecond());
 }
 
 void RtspPlayer::speed(float speed) {

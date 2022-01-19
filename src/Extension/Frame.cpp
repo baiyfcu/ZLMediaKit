@@ -241,10 +241,9 @@ void FrameMerger::doFlush(const onOutput &cb, BufferLikeString *buffer) {
     }
 
 bool FrameMerger::inputFrame(const Frame::Ptr &frame, const onOutput &cb, BufferLikeString *buffer) {
-/*
     if (willFlush(frame)) {
         doFlush(cb, buffer);
-    }*/
+    }
 
     switch (_type) {
         case h264_prefix:
