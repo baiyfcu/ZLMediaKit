@@ -362,7 +362,7 @@ Value makeMediaSourceJson(MediaSource &media){
     return item;
 }
 
-uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp) {
+uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp, bool enable_reuse) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     if (s_rtpServerMap.find(stream_id) != s_rtpServerMap.end()) {
         //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
@@ -370,7 +370,7 @@ uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable
     }
 
     RtpServer::Ptr server = std::make_shared<RtpServer>();
-    server->start(local_port, stream_id, enable_tcp);
+    server->start(local_port, stream_id, enable_tcp, "0.0.0.0", enable_reuse);
     server->setOnDetach([stream_id]() {
         //设置rtp超时移除事件
         lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
@@ -1057,15 +1057,16 @@ void installWebApi() {
     api_regist("/index/api/openRtpServer",[](API_ARGS_MAP){
         CHECK_SECRET();
         CHECK_ARGS("port", "enable_tcp", "stream_id");
-
+        bool enable_reuse = true;
+        if (!allArgs["enable_reuse"].empty()) {
+            enable_reuse = allArgs["enable_reuse"].as<bool>();
+        }
         auto stream_id = allArgs["stream_id"];
-
-        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"]);
+        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"].as<bool>(), enable_reuse);
         if(port == 0) {
             //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
             throw InvalidArgsException("该stream_id已存在");
         }
-
         //回复json
         val["port"] = port;
     });
