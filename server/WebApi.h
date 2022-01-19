@@ -235,7 +235,7 @@ bool checkArgs(Args &args, const First &first, const KeyTypes &...keys) {
 void installWebApi();
 void unInstallWebApi();
 Value makeMediaSourceJson(MediaSource &media);
-uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp);
+uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable_tcp, bool enable_reuse);
 bool closeRtpServer(const string& stream_id);
 void getStatisticJson(const function<void(Value &val)> &cb);
 void addStreamProxy(const string &vhost, const string &app, const string &stream, const string &url, int retry_count,
