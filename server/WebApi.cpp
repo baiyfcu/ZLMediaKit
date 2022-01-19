@@ -1057,12 +1057,8 @@ void installWebApi() {
     api_regist("/index/api/openRtpServer",[](API_ARGS_MAP){
         CHECK_SECRET();
         CHECK_ARGS("port", "enable_tcp", "stream_id");
-        bool enable_reuse = true;
-        if (!allArgs["enable_reuse"].empty()) {
-            enable_reuse = allArgs["enable_reuse"].as<bool>();
-        }
         auto stream_id = allArgs["stream_id"];
-        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"].as<bool>(), enable_reuse);
+        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"].as<bool>(), false);
         if(port == 0) {
             //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
             throw InvalidArgsException("该stream_id已存在");
