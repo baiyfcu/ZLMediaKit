@@ -9,6 +9,9 @@
  */
 
 #include "HlsMaker.h"
+
+using namespace std;
+
 namespace mediakit {
 
 HlsMaker::HlsMaker(float seg_duration, uint32_t seg_number, uint32_t record_type) {
@@ -77,16 +80,21 @@ void HlsMaker::makeIndexFile(bool eof) {
         m3u8.append(file_content);
         rcontent.append(file_content);
     }
-
+    
     if (_hls_record_type == 2) {
-        onWriteRecordM3u8(rm3u8.data(), rm3u8.size(), rcontent.data(), rcontent.size());
+        onWriteRecordM3u8(rm3u8, rcontent.data(), rcontent.size());
     }else{
-    	 onWriteHls(m3u8.data(), m3u8.size());
+    	 onWriteHls(m3u8);
     }
 }
 
 void HlsMaker::inputData(void *data, size_t len, uint32_t timestamp, bool is_idr_fast_packet) {
     if (data && len) {
+        if (timestamp < _last_timestamp) {
+            //时间戳回退了，切片时长重新计时
+            WarnL << "stamp reduce: " << _last_timestamp << " -> " << timestamp;
+            _last_seg_timestamp = _last_timestamp = timestamp;
+        }
         if (is_idr_fast_packet) {
             //尝试切片ts
             addNewSegment(timestamp);
@@ -144,7 +152,6 @@ void HlsMaker::flushLastSegment(bool eof){
         seg_dur = 100;
     }
     _seg_dur_list.push_back(std::make_tuple(seg_dur, std::move(_last_file_name)));
-    _last_file_name.clear();
     delOldSegment();
     //先flush ts切片，否则可能存在ts文件未写入完毕就被访问的情况
     onFlushLastSegment(seg_dur);

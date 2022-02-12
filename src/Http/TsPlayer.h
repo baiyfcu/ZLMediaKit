@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2020 The ZLMediaKit project authors. All Rights Reserved.
  * Created by alex on 2021/4/6.
  * This file is part of ZLMediaKit(https://github.com/xia-chu/ZLMediaKit).
@@ -11,45 +11,34 @@
 #ifndef HTTP_TSPLAYER_H
 #define HTTP_TSPLAYER_H
 
-#include <unordered_set>
-#include "Util/util.h"
-#include "Poller/Timer.h"
-#include "Http/HttpDownloader.h"
-#include "Player/MediaPlayer.h"
-#include "Rtp/Decoder.h"
-#include "Rtp/TSDecoder.h"
 #include "HttpTSPlayer.h"
+#include "Player/PlayerBase.h"
 
-using namespace toolkit;
 namespace mediakit {
 
 class TsPlayer : public HttpTSPlayer, public PlayerBase {
 public:
-    TsPlayer(const EventPoller::Ptr &poller);
+    TsPlayer(const toolkit::EventPoller::Ptr &poller);
     ~TsPlayer() override = default;
 
     /**
      * 开始播放
      */
-    void play(const string &url) override;
+    void play(const std::string &url) override;
 
     /**
      * 停止播放
      */
     void teardown() override;
 
-private:
-    void playTs();
-
 protected:
-    virtual void onResponseCompleted() override;
-    virtual void onDisconnect(const SockException &ex) override;
-    virtual ssize_t onResponseHeader(const string &status, const HttpHeader &header) override;
+    void onResponseBody(const char *buf, size_t size) override;
+    void onResponseCompleted(const toolkit::SockException &ex) override;
 
 private:
-    bool _first = true;
-    string _ts_url;
+    bool _play_result = true;
+    bool _benchmark_mode = false;
 };
 
-}//namespace mediakit
-#endif //HTTP_TSPLAYER_H
+} // namespace mediakit
+#endif // HTTP_TSPLAYER_H

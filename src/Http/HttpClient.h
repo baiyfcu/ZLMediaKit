@@ -25,18 +25,15 @@
 #include "strCoding.h"
 #include "HttpBody.h"
 
-using namespace std;
-using namespace toolkit;
-
 namespace mediakit {
 
-class HttpArgs : public map<string, variant, StrCaseCompare> {
+class HttpArgs : public std::map<std::string, toolkit::variant, StrCaseCompare> {
 public:
     HttpArgs() = default;
     ~HttpArgs() = default;
 
-    string make() const {
-        string ret;
+    std::string make() const {
+        std::string ret;
         for (auto &pr : *this) {
             ret.append(pr.first);
             ret.append("=");
@@ -50,7 +47,7 @@ public:
     }
 };
 
-class HttpClient : public TcpClient, public HttpRequestSplitter {
+class HttpClient : public toolkit::TcpClient, public HttpRequestSplitter {
 public:
     using HttpHeader = StrCaseMap;
     using Ptr = std::shared_ptr<HttpClient>;
@@ -62,7 +59,7 @@ public:
      * 发送http[s]请求
      * @param url 请求url
      */
-    virtual void sendRequest(const string &url);
+    virtual void sendRequest(const std::string &url);
 
     /**
      * 重置对象
@@ -73,7 +70,7 @@ public:
      * 设置http方法
      * @param method GET/POST等
      */
-    void setMethod(string method);
+    void setMethod(std::string method);
 
     /**
      * 覆盖http头
@@ -81,13 +78,13 @@ public:
      */
     void setHeader(HttpHeader header);
 
-    HttpClient &addHeader(string key, string val, bool force = false);
+    HttpClient &addHeader(std::string key, std::string val, bool force = false);
 
     /**
      * 设置http content
      * @param body http content
      */
-    void setBody(string body);
+    void setBody(std::string body);
 
     /**
      * 设置http content
@@ -101,9 +98,19 @@ public:
     const Parser &response() const;
 
     /**
+     * 获取回复header声明的body大小
+     */
+    ssize_t responseBodyTotalSize() const;
+
+    /**
+     * 获取已经下载body的大小
+     */
+    size_t responseBodySize() const;
+
+    /**
      * 获取请求url
      */
-    const string &getUrl() const;
+    const std::string &getUrl() const;
 
     /**
      * 判断是否正在等待响应
@@ -139,37 +146,20 @@ protected:
      * 收到http回复头
      * @param status 状态码，譬如:200 OK
      * @param headers http头
-     * @return 返回后续content的长度；-1:后续数据全是content；>=0:固定长度content
-     *          需要指出的是，在http头中带有Content-Length字段时，该返回值无效
      */
-    virtual ssize_t onResponseHeader(const string &status, const HttpHeader &headers) {
-        //无Content-Length字段时默认后面全是content
-        return -1;
-    }
+    virtual void onResponseHeader(const std::string &status, const HttpHeader &headers) = 0;
 
     /**
      * 收到http conten数据
      * @param buf 数据指针
      * @param size 数据大小
-     * @param recvedSize 已收数据大小(包含本次数据大小),当其等于totalSize时将触发onResponseCompleted回调
-     * @param totalSize 总数据大小
      */
-    virtual void onResponseBody(const char *buf, size_t size, size_t recvedSize, size_t totalSize) {
-        DebugL << size << " " << recvedSize << " " << totalSize;
-    }
+    virtual void onResponseBody(const char *buf, size_t size) = 0;
 
     /**
      * 接收http回复完毕,
      */
-    virtual void onResponseCompleted() {
-        DebugL;
-    }
-
-    /**
-     * http链接断开回调
-     * @param ex 断开原因
-     */
-    virtual void onDisconnect(const SockException &ex) {}
+    virtual void onResponseCompleted(const toolkit::SockException &ex) = 0;
 
     /**
      * 重定向事件
@@ -177,23 +167,23 @@ protected:
      * @param temporary 是否为临时重定向
      * @return 是否继续
      */
-    virtual bool onRedirectUrl(const string &url, bool temporary) { return true; };
+    virtual bool onRedirectUrl(const std::string &url, bool temporary) { return true; };
 
+protected:
     //// HttpRequestSplitter override ////
     ssize_t onRecvHeader(const char *data, size_t len) override;
     void onRecvContent(const char *data, size_t len) override;
 
-protected:
     //// TcpClient override ////
-    void onConnect(const SockException &ex) override;
-    void onRecv(const Buffer::Ptr &pBuf) override;
-    void onErr(const SockException &ex) override;
+    void onConnect(const toolkit::SockException &ex) override;
+    void onRecv(const toolkit::Buffer::Ptr &pBuf) override;
+    void onErr(const toolkit::SockException &ex) override;
     void onFlush() override;
     void onManager() override;
 
 private:
-    void onResponseCompleted_l();
-    void onConnect_l(const SockException &ex);
+    void onResponseCompleted_l(const toolkit::SockException &ex);
+    void onConnect_l(const toolkit::SockException &ex);
     void checkCookie(HttpHeader &headers);
     void clearResponse();
 
@@ -208,23 +198,23 @@ private:
 
     //for request args
     bool _is_https;
-    string _url;
+    std::string _url;
     HttpHeader _user_set_header;
     HttpBody::Ptr _body;
-    string _method;
-    string _last_host;
+    std::string _method;
+    std::string _last_host;
 
     //for this request
-    string _path;
+    std::string _path;
     HttpHeader _header;
 
     //for timeout
     size_t _wait_header_ms = 10 * 1000;
     size_t _wait_body_ms = 10 * 1000;
     size_t _wait_complete_ms = 0;
-    Ticker _wait_header;
-    Ticker _wait_body;
-    Ticker _wait_complete;
+    toolkit::Ticker _wait_header;
+    toolkit::Ticker _wait_body;
+    toolkit::Ticker _wait_complete;
 };
 
 } /* namespace mediakit */

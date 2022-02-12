@@ -10,15 +10,16 @@
 
 #include "Http/HttpClientImp.h"
 
+using namespace toolkit;
+
 namespace mediakit {
 
 void HttpClientImp::onConnect(const SockException &ex) {
-    if(!isHttps()){
+    if (!isHttps()) {
         HttpClient::onConnect(ex);
     } else {
         TcpClientWithSSL<HttpClient>::onConnect(ex);
     }
-
 }
 
 } /* namespace mediakit */

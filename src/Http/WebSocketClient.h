@@ -17,7 +17,6 @@
 #include "Network/TcpClient.h"
 #include "HttpClientImp.h"
 #include "WebSocketSplitter.h"
-using namespace toolkit;
 
 namespace mediakit{
 
@@ -32,8 +31,9 @@ class HttpWsClient;
 template <typename ClientType,WebSocketHeader::Type DataType>
 class ClientTypeImp : public ClientType {
 public:
-    typedef function<ssize_t (const Buffer::Ptr &buf)> onBeforeSendCB;
-    friend class HttpWsClient<ClientType,DataType>;
+    friend class HttpWsClient<ClientType, DataType>;
+
+    using onBeforeSendCB = std::function<ssize_t(const toolkit::Buffer::Ptr &buf)>;
 
     template<typename ...ArgsType>
     ClientTypeImp(ArgsType &&...args): ClientType(std::forward<ArgsType>(args)...){}
@@ -43,7 +43,7 @@ protected:
     /**
      * 发送前拦截并打包为websocket协议
      */
-    ssize_t send(Buffer::Ptr buf) override{
+    ssize_t send(toolkit::Buffer::Ptr buf) override{
         if(_beforeSendCB){
             return _beforeSendCB(buf);
         }
@@ -70,11 +70,12 @@ private:
 template <typename ClientType,WebSocketHeader::Type DataType = WebSocketHeader::TEXT>
 class HttpWsClient : public HttpClientImp , public WebSocketSplitter{
 public:
-    typedef shared_ptr<HttpWsClient> Ptr;
+    typedef std::shared_ptr<HttpWsClient> Ptr;
 
-    HttpWsClient(ClientTypeImp<ClientType,DataType> &delegate) : _delegate(delegate){
-        _Sec_WebSocket_Key = encodeBase64(makeRandStr(16, false));
-        setPoller(delegate.getPoller());
+    HttpWsClient(const std::shared_ptr<ClientTypeImp<ClientType, DataType> > &delegate) : _weak_delegate(delegate),
+                                                                                          _delegate(*delegate) {
+        _Sec_WebSocket_Key = encodeBase64(toolkit::makeRandStr(16, false));
+        setPoller(_delegate.getPoller());
     }
     ~HttpWsClient(){}
 
@@ -83,10 +84,10 @@ public:
      * @param ws_url ws连接url
      * @param fTimeOutSec 超时时间
      */
-    void startWsClient(const string &ws_url, float fTimeOutSec) {
-        string http_url = ws_url;
-        replace(http_url, "ws://", "http://");
-        replace(http_url, "wss://", "https://");
+    void startWsClient(const std::string &ws_url, float fTimeOutSec) {
+        std::string http_url = ws_url;
+        toolkit::replace(http_url, "ws://", "http://");
+        toolkit::replace(http_url, "wss://", "https://");
         setMethod("GET");
         addHeader("Upgrade", "websocket");
         addHeader("Connection", "Upgrade");
@@ -118,37 +119,33 @@ protected:
      * 收到http回复头
      * @param status 状态码，譬如:200 OK
      * @param headers http头
-     * @return 返回后续content的长度；-1:后续数据全是content；>=0:固定长度content
-     *          需要指出的是，在http头中带有Content-Length字段时，该返回值无效
      */
-    ssize_t onResponseHeader(const string &status,const HttpHeader &headers) override {
+    void onResponseHeader(const std::string &status, const HttpHeader &headers) override {
         if(status == "101"){
-            auto Sec_WebSocket_Accept = encodeBase64(SHA1::encode_bin(_Sec_WebSocket_Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
+            auto Sec_WebSocket_Accept = encodeBase64(toolkit::SHA1::encode_bin(_Sec_WebSocket_Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
             if(Sec_WebSocket_Accept == const_cast<HttpHeader &>(headers)["Sec-WebSocket-Accept"]){
                 //success
-                onWebSocketException(SockException());
+                onWebSocketException(toolkit::SockException());
                 //防止ws服务器返回Content-Length
                 const_cast<HttpHeader &>(headers).erase("Content-Length");
-                //后续全是websocket负载数据
-                return -1;
+                return;
             }
-            shutdown(SockException(Err_shutdown,StrPrinter << "Sec-WebSocket-Accept mismatch"));
-            return 0;
+            shutdown(toolkit::SockException(toolkit::Err_shutdown, StrPrinter << "Sec-WebSocket-Accept mismatch"));
+            return;
         }
 
-        shutdown(SockException(Err_shutdown,StrPrinter << "bad http status code:" << status));
-        return 0;
+        shutdown(toolkit::SockException(toolkit::Err_shutdown,StrPrinter << "bad http status code:" << status));
     };
 
     /**
      * 接收http回复完毕,
      */
-    void onResponseCompleted() override {}
+    void onResponseCompleted(const toolkit::SockException &ex) override {}
 
     /**
      * 接收websocket负载数据
      */
-    void onResponseBody(const char *buf,size_t size,size_t recvedSize,size_t totalSize) override{
+    void onResponseBody(const char *buf,size_t size) override{
         if(_onRecv){
             //完成websocket握手后，拦截websocket数据并解析
             _onRecv(buf, size);
@@ -157,14 +154,20 @@ protected:
 
     //TcpClient override
 
+    void onRecv(const toolkit::Buffer::Ptr &buf) override {
+        auto strong_ref = _weak_delegate.lock();;
+        HttpClientImp::onRecv(buf);
+    }
+
     /**
      * 定时触发
      */
     void onManager() override {
-        if(_onRecv){
+        auto strong_ref = _weak_delegate.lock();;
+        if (_onRecv) {
             //websocket连接成功了
             _delegate.onManager();
-        } else{
+        } else {
             //websocket连接中...
             HttpClientImp::onManager();
         }
@@ -173,11 +176,12 @@ protected:
     /**
      * 数据全部发送完毕后回调
      */
-    void onFlush() override{
-        if(_onRecv){
+    void onFlush() override {
+        auto strong_ref = _weak_delegate.lock();;
+        if (_onRecv) {
             //websocket连接成功了
             _delegate.onFlush();
-        } else{
+        } else {
             //websocket连接中...
             HttpClientImp::onFlush();
         }
@@ -186,8 +190,9 @@ protected:
     /**
      * tcp连接结果
      */
-    void onConnect(const SockException &ex) override{
-        if(ex){
+    void onConnect(const toolkit::SockException &ex) override {
+        auto strong_ref = _weak_delegate.lock();;
+        if (ex) {
             //tcp连接失败，直接返回失败
             onWebSocketException(ex);
             return;
@@ -199,7 +204,8 @@ protected:
     /**
      * tcp连接断开
      */
-    void onErr(const SockException &ex) override{
+    void onErr(const toolkit::SockException &ex) override {
+        auto strong_ref = _weak_delegate.lock();;
         //tcp断开或者shutdown导致的断开
         onWebSocketException(ex);
     }
@@ -239,14 +245,14 @@ protected:
             case WebSocketHeader::CLOSE:{
                 //服务器主动关闭
                 WebSocketSplitter::encode(header,nullptr);
-                shutdown(SockException(Err_eof,"websocket server close the connection"));
+                shutdown(toolkit::SockException(toolkit::Err_eof,"websocket server close the connection"));
                 break;
             }
 
             case WebSocketHeader::PING:{
                 //心跳包
                 header._opcode = WebSocketHeader::PONG;
-                WebSocketSplitter::encode(header,std::make_shared<BufferString>(std::move(_payload_section)));
+                WebSocketSplitter::encode(header,std::make_shared<toolkit::BufferString>(std::move(_payload_section)));
                 break;
             }
 
@@ -288,17 +294,17 @@ protected:
      * @param ptr 数据指针
      * @param len 数据指针长度
      */
-    void onWebSocketEncodeData(Buffer::Ptr buffer) override{
+    void onWebSocketEncodeData(toolkit::Buffer::Ptr buffer) override{
         HttpClientImp::send(std::move(buffer));
     }
 
 private:
-    void onWebSocketException(const SockException &ex){
+    void onWebSocketException(const toolkit::SockException &ex){
         if(!ex){
             //websocket握手成功
             //此处截取TcpClient派生类发送的数据并进行websocket协议打包
-            weak_ptr<HttpWsClient> weakSelf = dynamic_pointer_cast<HttpWsClient>(shared_from_this());
-            _delegate.setOnBeforeSendCB([weakSelf](const Buffer::Ptr &buf){
+            std::weak_ptr<HttpWsClient> weakSelf = std::dynamic_pointer_cast<HttpWsClient>(shared_from_this());
+            _delegate.setOnBeforeSendCB([weakSelf](const toolkit::Buffer::Ptr &buf){
                 auto strongSelf = weakSelf.lock();
                 if(strongSelf){
                     WebSocketHeader header;
@@ -337,11 +343,12 @@ private:
     }
 
 private:
-    string _Sec_WebSocket_Key;
-    function<void(const char *data, size_t len)> _onRecv;
-    ClientTypeImp<ClientType,DataType> &_delegate;
-    string _payload_section;
-    string _payload_cache;
+    std::string _Sec_WebSocket_Key;
+    std::function<void(const char *data, size_t len)> _onRecv;
+    std::weak_ptr<ClientTypeImp<ClientType, DataType>> _weak_delegate;
+    ClientTypeImp<ClientType, DataType> &_delegate;
+    std::string _payload_section;
+    std::string _payload_cache;
 };
 
 /**
@@ -358,7 +365,6 @@ public:
 
     template<typename ...ArgsType>
     WebSocketClient(ArgsType &&...args) : ClientTypeImp<ClientType,DataType>(std::forward<ArgsType>(args)...){
-        _wsClient.reset(new HttpWsClient<ClientType,DataType>(*this));
     }
     ~WebSocketClient() override {
         _wsClient->closeWsClient();
@@ -372,8 +378,8 @@ public:
      * @param timeout_sec 超时时间
      * @param local_port 本地监听端口，此处不起作用
      */
-    void startConnect(const string &host, uint16_t port, float timeout_sec = 3, uint16_t local_port = 0) override {
-        string ws_url;
+    void startConnect(const std::string &host, uint16_t port, float timeout_sec = 3, uint16_t local_port = 0) override {
+        std::string ws_url;
         if (useWSS) {
             //加密的ws
             ws_url = StrPrinter << "wss://" + host << ":" << port << "/";
@@ -381,10 +387,14 @@ public:
             //明文ws
             ws_url = StrPrinter << "ws://" + host << ":" << port << "/";
         }
-        _wsClient->startWsClient(ws_url, timeout_sec);
+        startWebSocket(ws_url, timeout_sec);
     }
 
-    void startWebSocket(const string &ws_url,float fTimeOutSec = 3){
+    void startWebSocket(const std::string &ws_url, float fTimeOutSec = 3) {
+        _wsClient = std::make_shared<HttpWsClient<ClientType, DataType> >(std::static_pointer_cast<WebSocketClient>(this->shared_from_this()));
+        _wsClient->setOnCreateSocket([this](const toolkit::EventPoller::Ptr &){
+            return this->createSocket();
+        });
         _wsClient->startWsClient(ws_url,fTimeOutSec);
     }
 

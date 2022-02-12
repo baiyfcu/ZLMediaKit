@@ -21,6 +21,7 @@
 #include <dirent.h>
 #endif // WIN32
 
+using namespace std;
 using namespace toolkit;
 
 #if !defined(_WIN32)
@@ -144,13 +145,13 @@ void HlsMakerImp::onWriteSegment(const char *data, size_t len) {
     }
 }
 
-void HlsMakerImp::onWriteHls(const char *data, size_t len) {
+void HlsMakerImp::onWriteHls(const std::string &data) {
     auto hls = makeFile(_path_hls);
     if (hls) {
-        fwrite(data, len, 1, hls.get());
+        fwrite(data.data(), data.size(), 1, hls.get());
         hls.reset();
         if (_media_src) {
-            _media_src->registHls(true);
+            _media_src->registHls(data);
         }
     } else {
         WarnL << "create hls file failed," << _path_hls << " " << get_uv_errmsg();
@@ -172,7 +173,7 @@ std::shared_ptr<FILE> HlsMakerImp::makeFile(const string &file, bool setbuf) {
     return ret;
 }
 
-void HlsMakerImp::onWriteRecordM3u8(const char *header, size_t hlen, const char *body, size_t blen){
+void HlsMakerImp::onWriteRecordM3u8(const string &data, const char *body, size_t blen) {
     bool exist = true;
     string mode = "rb+";
     if (_access(_path_hls.c_str(), 0) == -1) {
@@ -182,7 +183,7 @@ void HlsMakerImp::onWriteRecordM3u8(const char *header, size_t hlen, const char 
 
 	auto hls = makeRecordM3u8(_path_hls, mode);
     if (hls) {
-        fwrite(header, hlen, 1, hls.get());
+        fwrite(data.data(), data.size(), 1, hls.get());
         if (exist) {
         	fseek(hls.get(), -15L, SEEK_END);
         }
@@ -190,7 +191,7 @@ void HlsMakerImp::onWriteRecordM3u8(const char *header, size_t hlen, const char 
         fwrite(body, blen,1, hls.get());
         hls.reset();
         if(_media_src){
-            _media_src->registHls(true);
+            _media_src->registHls(data);
         }
     } else {
         WarnL << "create hls file failed, " << _path_hls << " " <<  get_uv_errmsg();

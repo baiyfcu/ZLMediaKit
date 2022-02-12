@@ -213,10 +213,11 @@ void FrameMerger::doMerge(BufferLikeString &merged, const Frame::Ptr &frame) con
     }
 }
 
-void FrameMerger::doFlush(const onOutput &cb, BufferLikeString *buffer) {
-    Frame::Ptr back = _frame_cache.back();
-    Buffer::Ptr merged_frame = back;
-    bool have_key_frame = back->keyFrame();
+bool FrameMerger::inputFrame(const Frame::Ptr &frame, const onOutput &cb, BufferLikeString *buffer) {
+    if (willFlush(frame)) {
+        Frame::Ptr back = _frame_cache.back();
+        Buffer::Ptr merged_frame = back;
+        bool have_key_frame = back->keyFrame();
 
         if (_frame_cache.size() != 1 || _type == mp4_nal_size || buffer) {
             //在MP4模式下，一帧数据也需要在前添加nalu_size
@@ -240,11 +241,6 @@ void FrameMerger::doFlush(const onOutput &cb, BufferLikeString *buffer) {
         _have_decode_able_frame = false;
     }
 
-bool FrameMerger::inputFrame(const Frame::Ptr &frame, const onOutput &cb, BufferLikeString *buffer) {
-    if (willFlush(frame)) {
-        doFlush(cb, buffer);
-    }
-
     switch (_type) {
         case h264_prefix:
         case mp4_nal_size: {
@@ -259,10 +255,6 @@ bool FrameMerger::inputFrame(const Frame::Ptr &frame, const onOutput &cb, Buffer
 
     if (frame->decodeAble()) {
         _have_decode_able_frame = true;
-        if (!_frame_cache.empty()) {
-            doFlush(cb, buffer);
-        } else
-            _have_decode_able_frame = false;
     }
     _frame_cache.emplace_back(Frame::getCacheAbleFrame(frame));
     return true;

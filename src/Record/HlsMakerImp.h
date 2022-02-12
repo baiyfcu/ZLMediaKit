@@ -17,23 +17,21 @@
 #include "HlsMaker.h"
 #include "HlsMediaSource.h"
 
-using namespace std;
-
 namespace mediakit {
 
 class HlsInfo {
 public:
-    string strFilePath;//m3u8文件路径
-    string strAppName;//应用名称
-    string strStreamId;//流ID
+    std::string strFilePath;//m3u8文件路径
+    std::string strAppName;//应用名称
+    std::string strStreamId;//流ID
     time_t ui64StartedTime; //GMT标准时间，单位秒
     time_t ui64TimeLen;//录像长度，单位秒
 };
 
 class HlsMakerImp : public HlsMaker{
 public:
-    HlsMakerImp(const string &m3u8_file,
-                const string &params,
+    HlsMakerImp(const std::string &m3u8_file,
+                const std::string &params,
                 uint32_t bufSize  = 64 * 1024,
                 float seg_duration = 5,
                 uint32_t seg_number = 3,
@@ -46,7 +44,7 @@ public:
      * @param app 应用名
      * @param stream_id 流id
      */
-    void setMediaSource(const string &vhost, const string &app, const string &stream_id);
+    void setMediaSource(const std::string &vhost, const std::string &app, const std::string &stream_id);
 
     /**
      * 获取MediaSource
@@ -61,28 +59,28 @@ public:
      void clearCache(bool isFirst = false, bool immediately = true);
 
 protected:
-    string onOpenSegment(uint64_t index) override ;
+    std::string onOpenSegment(uint64_t index) override ;
     void onDelSegment(uint64_t index) override;
     void onWriteSegment(const char *data, size_t len) override;
-    void onWriteHls(const char *data, size_t len) override;
-    void onWriteRecordM3u8(const char *header, size_t hlen, const char *body, size_t blen) override;
+    void onWriteHls(const std::string &data) override;
     void onFlushLastSegment(uint32_t duration_ms) override;
+    void onWriteRecordM3u8(const std::string &data, const char *body, size_t blen) override;
 
 private:
-    std::shared_ptr<FILE> makeFile(const string &file, bool setbuf = false);
-    std::shared_ptr<FILE> makeRecordM3u8(const string &file, const string &mode, bool setbuf = false);
+    std::shared_ptr<FILE> makeFile(const std::string &file,bool setbuf = false);
+    std::shared_ptr<FILE> makeRecordM3u8(const std::string &file, const std::string &mode, bool setbuf = false);
 
 private:
     int _buf_size;
-    string _params;
-    string _path_hls;
-    string _path_prefix;
+    std::string _params;
+    std::string _path_hls;
+    std::string _path_prefix;
     RecordInfo _info;
     std::shared_ptr<FILE> _file;
     std::shared_ptr<char> _file_buf;
     HlsMediaSource::Ptr _media_src;
-    EventPoller::Ptr _poller;
-    map<uint64_t /*index*/,string/*file_path*/> _segment_file_paths;
+    toolkit::EventPoller::Ptr _poller;
+    std::map<uint64_t/*index*/,std::string/*file_path*/> _segment_file_paths;
     time_t _ui64StartedTime;
 };
 

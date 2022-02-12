@@ -12,6 +12,9 @@
 #include "Common/config.h"
 #include "MultiMediaSourceMuxer.h"
 
+using namespace std;
+using namespace toolkit;
+
 namespace toolkit {
     StatisticImp(mediakit::MultiMediaSourceMuxer);
 }
@@ -311,7 +314,7 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     }
     auto rhls = _hls_record;
     if (rhls) {
-        ret = rhls->addTrack(track);
+        ret = rhls->addTrack(track) ? true : ret;
     }
     return ret;
 }
@@ -459,7 +462,7 @@ bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
     //hls落盘录制
     auto rhls = _hls_record;
     if (rhls) {
-        rhls->inputFrame(frame);
+        ret = rhls->inputFrame(frame) ? true : ret;
     }
 
 #if defined(ENABLE_MP4)

@@ -10,6 +10,9 @@
 
 #include "WebRtcPusher.h"
 
+using namespace std;
+using namespace mediakit;
+
 WebRtcPusher::Ptr WebRtcPusher::create(const EventPoller::Ptr &poller,
                                        const RtspMediaSource::Ptr &src,
                                        const std::shared_ptr<void> &ownership,
@@ -44,6 +47,8 @@ bool WebRtcPusher::close(MediaSource &sender, bool force) {
         auto strong_self = weak_self.lock();
         if (strong_self) {
             strong_self->onShutdown(SockException(Err_shutdown, err));
+            //主动关闭推流，那么不延时注销
+            strong_self->_push_src = nullptr;
         }
     });
     return true;
