@@ -19,10 +19,7 @@
 
 namespace mediakit {
 
-class HlsDemuxer
-    : public MediaSinkInterface
-    , public TrackSource
-    , public std::enable_shared_from_this<HlsDemuxer> {
+class HlsDemuxer : public MediaSinkInterface , public TrackSource, public std::enable_shared_from_this<HlsDemuxer> {
 public:
     HlsDemuxer() = default;
     ~HlsDemuxer() override { _timer = nullptr; }
@@ -43,7 +40,6 @@ private:
 private:
     int64_t _ticker_offset = 0;
     toolkit::Ticker _ticker;
-    Stamp _stamp[2];
     toolkit::Timer::Ptr _timer;
     MediaSinkDelegate _delegate;
     std::multimap<int64_t, Frame::Ptr> _frame_cache;
@@ -85,7 +81,6 @@ private:
     void fetchSegment();
     void teardown_l(const toolkit::SockException &ex);
     void fetchIndexFile();
-    void onPacket_l(const char *data, size_t len);
 
 private:
     struct UrlComp {
@@ -106,7 +101,6 @@ private:
     std::list<std::string> _ts_url_sort;
     std::set<std::string, UrlComp> _ts_url_cache;
     HttpTSPlayer::Ptr _http_ts_player;
-    TSSegment _segment;
 };
 
 class HlsPlayerImp : public PlayerImp<HlsPlayer, PlayerBase>, private TrackListener {

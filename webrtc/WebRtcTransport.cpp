@@ -652,7 +652,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                         }
                         auto &track = it->second;
                         auto &fci = fb->getFci<FCI_NACK>();
-                        track->nack_list.for_each_nack(fci, [&](const RtpPacket::Ptr &rtp) {
+                        track->nack_list.forEach(fci, [&](const RtpPacket::Ptr &rtp) {
                             //rtp重传
                             onSendRtp(rtp, true, true);
                         });
@@ -704,6 +704,14 @@ void WebRtcTransportImp::onRtp(const char *buf, size_t len, uint64_t stamp_ms) {
 }
 
 void WrappedRtpTrack::inputRtp(const char *buf, size_t len, uint64_t stamp_ms, RtpHeader *rtp) {
+#if 0
+    auto seq = ntohs(rtp->seq);
+    if (track->media->type == TrackVideo && seq % 100 == 0) {
+        //此处模拟接受丢包
+        return;
+    }
+#endif
+    
     auto ssrc = ntohl(rtp->ssrc);
 
     //修改ext id至统一
@@ -719,14 +727,6 @@ void WrappedRtpTrack::inputRtp(const char *buf, size_t len, uint64_t stamp_ms, R
         _transport.createRtpChannel(rid, ssrc, *track);
     }
 
-    //这是普通的rtp数据
-#if 0
-    auto seq = ntohs(rtp->seq);
-    if (track->media->type == TrackVideo && seq % 100 == 0) {
-        //此处模拟接受丢包
-        return;
-    }
-#endif
     //解析并排序rtp
     ref->inputRtp(track->media->type, track->plan_rtp->sample_rate, (uint8_t *) buf, len, false);
 }
@@ -766,14 +766,14 @@ void WrappedRtxTrack::inputRtp(const char *buf, size_t len, uint64_t stamp_ms, R
 
 void WebRtcTransportImp::onSendNack(MediaTrack &track, const FCI_NACK &nack, uint32_t ssrc) {
     auto rtcp = RtcpFB::create(RTPFBType::RTCP_RTPFB_NACK, &nack, FCI_NACK::kSize);
-    rtcp->ssrc = htons(track.answer_ssrc_rtp);
+    rtcp->ssrc = htonl(track.answer_ssrc_rtp);
     rtcp->ssrc_media = htonl(ssrc);
     sendRtcpPacket((char *) rtcp.get(), rtcp->getSize(), true);
 }
 
 void WebRtcTransportImp::onSendTwcc(uint32_t ssrc, const string &twcc_fci) {
     auto rtcp = RtcpFB::create(RTPFBType::RTCP_RTPFB_TWCC, twcc_fci.data(), twcc_fci.size());
-    rtcp->ssrc = htons(0);
+    rtcp->ssrc = htonl(0);
     rtcp->ssrc_media = htonl(ssrc);
     sendRtcpPacket((char *) rtcp.get(), rtcp->getSize(), true);
 }
@@ -807,7 +807,7 @@ void WebRtcTransportImp::onSendRtp(const RtpPacket::Ptr &rtp, bool flush, bool r
     if (!rtx) {
         //统计rtp发送情况，好做sr汇报
         track->rtcp_context_send->onRtp(rtp->getSeq(), rtp->getStamp(), rtp->ntp_stamp, rtp->sample_rate, rtp->size() - RtpPacket::kRtpTcpHeaderSize);
-        track->nack_list.push_back(rtp);
+        track->nack_list.pushBack(rtp);
 #if 0
         //此处模拟发送丢包
         if (rtp->type == TrackVideo && rtp->getSeq() % 100 == 0) {
@@ -816,7 +816,7 @@ void WebRtcTransportImp::onSendRtp(const RtpPacket::Ptr &rtp, bool flush, bool r
 #endif
     } else {
         //发送rtx重传包
-        TraceL << "send rtx rtp:" << rtp->getSeq();
+        //TraceL << "send rtx rtp:" << rtp->getSeq();
     }
     pair<bool/*rtx*/, MediaTrack *> ctx{rtx, track.get()};
     sendRtpPacket(rtp->data() + RtpPacket::kRtpTcpHeaderSize, rtp->size() - RtpPacket::kRtpTcpHeaderSize, flush, &ctx);
@@ -875,6 +875,10 @@ void WebRtcTransportImp::onShutdown(const SockException &ex){
 
 void WebRtcTransportImp::setSession(Session::Ptr session) {
     _history_sessions.emplace(session.get(), session);
+    if (_selected_session) {
+        InfoL << "rtc network changed: " << _selected_session->get_peer_ip() << ":" << _selected_session->get_peer_port()
+              << " -> " << session->get_peer_ip() << ":" << session->get_peer_port() << ", id:" << getIdentifier();
+    }
     _selected_session = std::move(session);
     unrefSelf();
 }
@@ -1012,7 +1016,7 @@ void push_plugin(Session &sender, const string &offer_sdp, const WebRtcArgs &arg
     };
 
     //rtsp推流需要鉴权
-    auto flag = NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastMediaPublish, info, invoker, static_cast<SockInfo &>(sender));
+    auto flag = NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastMediaPublish, MediaOriginType::rtc_push, info, invoker, static_cast<SockInfo &>(sender));
     if (!flag) {
         //该事件无人监听,默认不鉴权
         GET_CONFIG(bool, to_hls, General::kPublishToHls);

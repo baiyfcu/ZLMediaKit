@@ -1302,15 +1302,23 @@ void installWebApi() {
 
     static auto responseSnap = [](const string &snap_path,
                                   const HttpSession::KeyValue &headerIn,
-                                  const HttpSession::HttpResponseInvoker &invoker) {
+                                  const HttpSession::HttpResponseInvoker &invoker,
+                                  const string &err_msg = "") {
+        static bool s_snap_success_once = false;
         StrCaseMap headerOut;
-        struct stat statbuf = {0};
         GET_CONFIG(string, defaultSnap, API::kDefaultSnap);
-        if (!(stat(snap_path.data(), &statbuf) == 0 && statbuf.st_size != 0) && !defaultSnap.empty()) {
-            //空文件且设置了预设图，则返回预设图片(也就是FFmpeg生成截图中空档期的默认图片)
-            const_cast<string&>(snap_path) = File::absolutePath(defaultSnap, "");
+        if (!File::fileSize(snap_path.data())) {
+            if (!err_msg.empty() && (!s_snap_success_once || defaultSnap.empty())) {
+                //重来没截图成功过或者默认截图图片为空，那么直接返回FFmpeg错误日志
+                headerOut["Content-Type"] = HttpFileManager::getContentType(".txt");
+                invoker.responseFile(headerIn, headerOut, err_msg, false, false);
+                return;
+            }
+            //截图成功过一次，那么认为配置无错误，截图失败时，返回预设默认图片
+            const_cast<string &>(snap_path) = File::absolutePath("", defaultSnap);
             headerOut["Content-Type"] = HttpFileManager::getContentType(snap_path.data());
         } else {
+            s_snap_success_once = true;
             //之前生成的截图文件，我们默认为jpeg格式
             headerOut["Content-Type"] = HttpFileManager::getContentType(".jpeg");
         }
@@ -1369,7 +1377,7 @@ void installWebApi() {
 
         //启动FFmpeg进程，开始截图，生成临时文件，截图成功后替换为正式文件
         auto new_snap_tmp = new_snap + ".tmp";
-        FFmpegSnap::makeSnap(allArgs["url"], new_snap_tmp, allArgs["timeout_sec"], [invoker, allArgs, new_snap, new_snap_tmp](bool success) {
+        FFmpegSnap::makeSnap(allArgs["url"], new_snap_tmp, allArgs["timeout_sec"], [invoker, allArgs, new_snap, new_snap_tmp](bool success, const string &err_msg) {
             if (!success) {
                 //生成截图失败，可能残留空文件
                 File::delete_file(new_snap_tmp.data());
@@ -1378,7 +1386,7 @@ void installWebApi() {
                 File::delete_file(new_snap.data());
                 rename(new_snap_tmp.data(), new_snap.data());
             }
-            responseSnap(new_snap, allArgs.getParser().getHeader(), invoker);
+            responseSnap(new_snap, allArgs.getParser().getHeader(), invoker, err_msg);
         });
     });
 

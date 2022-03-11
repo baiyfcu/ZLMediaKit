@@ -22,7 +22,9 @@
 - 打通了视频监控协议栈与直播协议栈，对RTSP/RTMP支持都很完善。
 - 全面支持H265/H264/AAC/G711/OPUS。
 - 功能完善，支持集群、按需转协议、按需推拉流、先播后推、断连续推等功能。
-- 为什么选择zlmedaikit？独家特性[介绍](https://github.com/ZLMediaKit/ZLMediaKit/wiki/ZLMediakit%E7%8B%AC%E5%AE%B6%E7%89%B9%E6%80%A7%E4%BB%8B%E7%BB%8D)
+- 极致性能，单机10W级别播放器，100Gb/s级别io带宽能力。
+- 极致体验，[独家特性](https://github.com/ZLMediaKit/ZLMediaKit/wiki/ZLMediakit%E7%8B%AC%E5%AE%B6%E7%89%B9%E6%80%A7%E4%BB%8B%E7%BB%8D)
+- [谁在使用zlmediakit?](https://github.com/ZLMediaKit/ZLMediaKit/issues/511)
 
 ## 项目定位
 
@@ -136,6 +138,10 @@
 你可以从Docker Hub下载已经编译好的镜像并启动它：
 
 ```bash
+#此镜像为zlmediakit开发团队提供，推荐
+docker run -id -p 1935:1935 -p 8080:80 -p 8554:554 -p 10000:10000 -p 10000:10000/udp -p 8000:8000/udp zlmediakit/zlmediakit:Release.last
+
+#此镜像委托第三方提供
 docker run -id -p 1935:1935 -p 8080:80 -p 8554:554 -p 10000:10000 -p 10000:10000/udp panjjo/zlmediakit
 ```
 

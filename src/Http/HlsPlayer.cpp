@@ -16,7 +16,6 @@ using namespace toolkit;
 namespace mediakit {
 
 HlsPlayer::HlsPlayer(const EventPoller::Ptr &poller) {
-    _segment.setOnSegment([this](const char *data, size_t len) { onPacket(data, len); });
     setPoller(poller ? poller : EventPollerPool::Instance().getPoller());
 }
 
@@ -68,7 +67,7 @@ void HlsPlayer::fetchSegment() {
     }
     weak_ptr<HlsPlayer> weak_self = dynamic_pointer_cast<HlsPlayer>(shared_from_this());
     if (!_http_ts_player) {
-        _http_ts_player = std::make_shared<HttpTSPlayer>(getPoller(), false);
+        _http_ts_player = std::make_shared<HttpTSPlayer>(getPoller());
         _http_ts_player->setOnCreateSocket([weak_self](const EventPoller::Ptr &poller) {
             auto strong_self = weak_self.lock();
             if (strong_self) {
@@ -84,7 +83,7 @@ void HlsPlayer::fetchSegment() {
                     return;
                 }
                 //收到ts包
-                strong_self->onPacket_l(data, len);
+                strong_self->onPacket(data, len);
             });
         }
 
@@ -238,25 +237,10 @@ void HlsPlayer::playDelay() {
     }, getPoller()));
 }
 
-void HlsPlayer::onPacket_l(const char *data, size_t len) {
-    try {
-        _segment.input(data, len);
-    } catch (...) {
-        //ts解析失败，清空缓存数据
-        _segment.reset();
-        throw;
-    }
-}
-
 //////////////////////////////////////////////////////////////////////////
 
 void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener) {
     _frame_cache.clear();
-    _stamp[TrackAudio].setRelativeStamp(0);
-    _stamp[TrackVideo].setRelativeStamp(0);
-    _stamp[TrackAudio].syncTo(_stamp[TrackVideo]);
-    setPlayPosition(0);
-
     _delegate.setTrackListener(listener);
 
     //每50毫秒执行一次
@@ -278,11 +262,12 @@ bool HlsDemuxer::inputFrame(const Frame::Ptr &frame) {
         return true;
     }
 
-    //计算相对时间戳
-    int64_t dts, pts;
-    _stamp[frame->getTrackType()].revise(frame->dts(), frame->pts(), dts, pts);
+    if (_frame_cache.empty()) {
+        //设置当前播放位置时间戳
+        setPlayPosition(frame->dts());
+    }
     //根据时间戳缓存frame
-    _frame_cache.emplace(dts, Frame::getCacheAbleFrame(frame));
+    _frame_cache.emplace(frame->dts(), Frame::getCacheAbleFrame(frame));
 
     if (getBufferMS() > 30 * 1000) {
         //缓存超过30秒，强制消费至15秒(减少延时或内存占用)

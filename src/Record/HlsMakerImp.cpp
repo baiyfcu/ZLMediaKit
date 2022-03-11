@@ -61,10 +61,14 @@ HlsMakerImp::~HlsMakerImp() {
     clearCache(false, false);
 }
 
-void HlsMakerImp::clearCache(bool isFirst, bool immediately) {
+void HlsMakerImp::clearCache() {
+    clearCache(true, false);
+}
+
+void HlsMakerImp::clearCache(bool immediately, bool eof) {
     InfoL << "isLive: " << isLive();
     //录制完了
-    flushLastSegment(true);
+    flushLastSegment(eof);
     if (!isLive()) {
         if (isFirst) return; //第一次创建清除cache不需要上报
         //hook接口
@@ -151,7 +155,7 @@ void HlsMakerImp::onWriteHls(const std::string &data) {
         fwrite(data.data(), data.size(), 1, hls.get());
         hls.reset();
         if (_media_src) {
-            _media_src->registHls(data);
+            _media_src->setIndexFile(data);
         }
     } else {
         WarnL << "create hls file failed," << _path_hls << " " << get_uv_errmsg();
@@ -205,9 +209,7 @@ void HlsMakerImp::onFlushLastSegment(uint32_t duration_ms) {
     GET_CONFIG(bool, broadcastRecordTs, Hls::kBroadcastRecordTs);
     if (broadcastRecordTs) {
         _info.time_len = duration_ms / 1000.0f;
-        struct stat fileData;
-        stat(_info.file_path.data(), &fileData);
-        _info.file_size = fileData.st_size;
+        _info.file_size = File::fileSize(_info.file_path.data());
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastRecordTs, _info);
     }
 }

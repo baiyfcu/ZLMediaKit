@@ -75,7 +75,7 @@ typedef std::function<void(const std::string &errMessage, bool enableHls, bool e
 
 //收到rtsp/rtmp推流事件广播，通过该事件控制推流鉴权
 extern const std::string kBroadcastMediaPublish;
-#define BroadcastMediaPublishArgs const MediaInfo &args,const Broadcast::PublishAuthInvoker &invoker,SockInfo &sender
+#define BroadcastMediaPublishArgs const MediaOriginType &type, const MediaInfo &args,  const Broadcast::PublishAuthInvoker &invoker,SockInfo &sender
 
 //播放鉴权结果回调对象
 //如果errMessage为空则代表鉴权成功
@@ -217,6 +217,8 @@ extern const std::string kVirtualPath;
 extern const std::string kNotFound;
 //是否显示文件夹菜单
 extern const std::string kDirMenu;
+//禁止缓存文件的后缀
+extern const std::string kForbidCacheSuffix;
 }//namespace Http
 
 ////////////SHELL配置///////////
