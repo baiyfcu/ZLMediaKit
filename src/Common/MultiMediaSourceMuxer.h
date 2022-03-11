@@ -159,7 +159,7 @@ private:
     TSMediaSourceMuxer::Ptr _ts;
     MediaSinkInterface::Ptr _mp4;
     HlsRecorder::Ptr _hls;
-    MediaSinkInterface::Ptr _hls_record;
+    MediaSinkInterface::Ptr _hls_disk;
 
     //对象个数统计
     toolkit::ObjectStatistic<MultiMediaSourceMuxer> _statistic;
