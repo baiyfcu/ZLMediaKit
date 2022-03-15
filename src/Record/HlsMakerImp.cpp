@@ -17,6 +17,17 @@
 using namespace std;
 using namespace toolkit;
 
+
+#if defined(_WIN32)
+#include <direct.h>
+#include <io.h>
+#else
+#include <dirent.h>
+#define _unlink unlink
+#define _rmdir rmdir
+#define _access access
+#endif
+
 namespace mediakit {
 
 HlsMakerImp::HlsMakerImp(const string &m3u8_file,
