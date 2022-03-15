@@ -353,7 +353,7 @@ static string pathCat(const string &a, const string &b){
  */
 static void accessFile(TcpSession &sender, const Parser &parser, const MediaInfo &media_info, const string &file_path, const HttpFileManager::invoker &cb) {
     bool is_hls = end_with(file_path, kHlsSuffix);
-    bool file_exist = File::is_file(file_path.data());
+    bool file_exist = File::fileExist(file_path.data());
     bool is_forbid_cache = false;
     if (!is_hls && !file_exist) {
         //文件不存在且不是hls,那么直接返回404
