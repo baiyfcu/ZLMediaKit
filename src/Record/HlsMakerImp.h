@@ -19,15 +19,6 @@
 
 namespace mediakit {
 
-class HlsInfo {
-public:
-    std::string strFilePath;//m3u8文件路径
-    std::string strAppName;//应用名称
-    std::string strStreamId;//流ID
-    time_t ui64StartedTime; //GMT标准时间，单位秒
-    time_t ui64TimeLen;//录像长度，单位秒
-};
-
 class HlsMakerImp : public HlsMaker{
 public:
     HlsMakerImp(const std::string &m3u8_file,
@@ -35,7 +26,8 @@ public:
                 uint32_t bufSize  = 64 * 1024,
                 float seg_duration = 5,
                 uint32_t seg_number = 3,
-                uint32_t record_type = 0);
+                Recorder::type type = Recorder::type_hls);
+
     ~HlsMakerImp() override;
 
     /**
@@ -55,21 +47,22 @@ public:
      /**
       * 清空缓存
       */
-
-     void clearCache();
+     void clearCache(bool first = false);
 
 protected:
     std::string onOpenSegment(uint64_t index) override ;
     void onDelSegment(uint64_t index) override;
     void onWriteSegment(const char *data, size_t len) override;
     void onWriteHls(const std::string &data) override;
+    // hls 落盘使用
+    void onWriteRecordM3u8(const char *header, size_t hlen, const char *body, size_t blen) override;
     void onFlushLastSegment(uint32_t duration_ms) override;
-    void onWriteRecordM3u8(const std::string &data, const char *body, size_t blen) override;
 
 private:
     std::shared_ptr<FILE> makeFile(const std::string &file,bool setbuf = false);
+    // hls 落盘使用
     std::shared_ptr<FILE> makeRecordM3u8(const std::string &file, const std::string &mode, bool setbuf = false);
-    void clearCache(bool immediately, bool eof);
+    void clearCache(bool immediately, bool eof, bool first = false);
 
 private:
     int _buf_size;
@@ -82,7 +75,9 @@ private:
     HlsMediaSource::Ptr _media_src;
     toolkit::EventPoller::Ptr _poller;
     std::map<uint64_t/*index*/,std::string/*file_path*/> _segment_file_paths;
-    time_t _ui64StartedTime;
+
+    time_t _start_time {0};
+    Recorder::type _type{Recorder::type_hls};
 };
 
 }//namespace mediakit

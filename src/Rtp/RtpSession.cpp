@@ -104,7 +104,7 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
         _process->inputRtp(false, getSock(), data, len, &_addr);
     } catch (RtpTrack::BadRtpException &ex) {
         if (!_is_udp) {
-            WarnL << ex.what() << "，开始搜索ssrc以便恢复上下文";
+            WarnL << "stream: " << _stream_id << ", " << ex.what() << "，开始搜索ssrc以便恢复上下文";
             _search_rtp = true;
         } else {
             throw;
@@ -173,7 +173,7 @@ const char *RtpSession::onSearchPacketTail(const char *data, size_t len) {
     //两个ssrc的间隔正好等于rtp的长度(外加rtp长度字段)，那么说明找到rtp
     auto ssrc_offset = ssrc_ptr1 - ssrc_ptr0;
     if (ssrc_offset == rtp_len + 2 || ssrc_offset == rtp_len + 4) {
-        InfoL << "rtp搜索成功，tcp上下文恢复成功，丢弃的rtp残余数据为：" << rtp_len_ptr - data;
+        InfoL << "stream: " << _stream_id << ", "<< "rtp搜索成功，tcp上下文恢复成功，丢弃的rtp残余数据为：" << rtp_len_ptr - data;
         _search_rtp_finished = true;
         if (rtp_len_ptr == data) {
             //停止搜索rtp，否则会进入死循环

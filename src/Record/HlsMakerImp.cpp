@@ -14,21 +14,8 @@
 #include "Util/util.h"
 #include "Util/uv_errno.h"
 
-#if defined(_WIN32)
-#include <direct.h>
-#include <io.h>
-#else
-#include <dirent.h>
-#endif // WIN32
-
 using namespace std;
 using namespace toolkit;
-
-#if !defined(_WIN32)
-#define _unlink unlink
-#define _rmdir rmdir
-#define _access access
-#endif
 
 namespace mediakit {
 
@@ -37,7 +24,7 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
                          uint32_t bufSize,
                          float seg_duration,
                          uint32_t seg_number,
-                         uint32_t record_type) : HlsMaker(seg_duration, seg_number, record_type) {
+                         Recorder::type type) : HlsMaker(seg_duration, seg_number, type) {
     _poller = EventPollerPool::Instance().getPoller();
     _path_prefix = m3u8_file.substr(0, m3u8_file.rfind('/'));
     _path_hls = m3u8_file;
@@ -47,41 +34,43 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
         delete[] ptr;
     });
 
-    _ui64StartedTime = ::time(nullptr);
     _info.folder = _path_prefix;
 
-    InfoL << "create HlsMakerImp, this: " << (long)this
-        << ", type: " << record_type
-        << ", seg_number: " << seg_number
-        << ", m3u8_file: " << m3u8_file;
+    _start_time = ::time(nullptr);
+    _type = type;
 }
 
 HlsMakerImp::~HlsMakerImp() {
-    InfoL << "destroy HlsMakerImp, this: " << (long)this;
-    clearCache(false, false);
+	InfoL << "destroy HlsMakerImp, this: " << (long)this;
+    clearCache(false, true, false);
 }
 
-void HlsMakerImp::clearCache() {
-    clearCache(true, false);
+void HlsMakerImp::clearCache(bool first) {
+    clearCache(true, false, first);
 }
 
-void HlsMakerImp::clearCache(bool immediately, bool eof) {
-    InfoL << "isLive: " << isLive();
+void HlsMakerImp::clearCache(bool immediately, bool eof, bool first) {
     //录制完了
     flushLastSegment(eof);
     if (!isLive()) {
-        if (isFirst) return; //第一次创建清除cache不需要上报
-        //hook接口
-        HlsInfo info;
+        if (first) return; //第一次创建清除cache不需要上报
+
+        //hook接口，hls落盘录制，触发hook
+        auto info = _info;
         if (_media_src) {
-            info.strAppName = _media_src.get()->getApp();
-            info.strStreamId = _media_src.get()->getId();
-            info.strFilePath = _path_hls;
-            info.ui64StartedTime = _ui64StartedTime;
-            info.ui64TimeLen = ::time(NULL) - info.ui64StartedTime;
+            info.app = _media_src.get()->getApp();
+            info.stream = _media_src.get()->getId();
+            info.vhost = _media_src.get()->getVhost();
+            info.file_path = _path_hls;
+            info.start_time = _start_time;
+            info.time_len = ::time(nullptr)  - _start_time;
+            info.folder = _info.folder;
+            info.file_name = _path_hls;
+            info.url = _path_hls;
+            info.file_size = 0;
         }
 
-        NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastRecordHls, info);
+        NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastRecordHlsDisk, info);
         return;
     }
 
@@ -154,51 +143,12 @@ void HlsMakerImp::onWriteHls(const std::string &data) {
     if (hls) {
         fwrite(data.data(), data.size(), 1, hls.get());
         hls.reset();
-        if (_media_src) {
+        // 只有直播才注册
+        if (_media_src && _type == Recorder::type_hls) {
             _media_src->setIndexFile(data);
         }
     } else {
         WarnL << "create hls file failed," << _path_hls << " " << get_uv_errmsg();
-    }
-}
-
-std::shared_ptr<FILE> HlsMakerImp::makeFile(const string &file, bool setbuf) {
-    auto file_buf = _file_buf;
-    auto ret= shared_ptr<FILE>(File::create_file(file.data(), "wb"), [file_buf](FILE *fp) {
-        if (fp) {
-            fclose(fp);
-        }
-    });
-
-    if (ret && setbuf) {
-        setvbuf(ret.get(), _file_buf.get(), _IOFBF, _buf_size);
-    }
-
-    return ret;
-}
-
-void HlsMakerImp::onWriteRecordM3u8(const string &data, const char *body, size_t blen) {
-    bool exist = true;
-    string mode = "rb+";
-    if (_access(_path_hls.c_str(), 0) == -1) {
-    	exist = false;
-    	 mode = "wb+";
-    }
-
-	auto hls = makeRecordM3u8(_path_hls, mode);
-    if (hls) {
-        fwrite(data.data(), data.size(), 1, hls.get());
-        if (exist) {
-        	fseek(hls.get(), -15L, SEEK_END);
-        }
-
-        fwrite(body, blen,1, hls.get());
-        hls.reset();
-        if(_media_src){
-            _media_src->registHls(data);
-        }
-    } else {
-        WarnL << "create hls file failed, " << _path_hls << " " <<  get_uv_errmsg();
     }
 }
 
@@ -214,9 +164,9 @@ void HlsMakerImp::onFlushLastSegment(uint32_t duration_ms) {
     }
 }
 
-std::shared_ptr<FILE> HlsMakerImp::makeRecordM3u8(const string &file, const string &mode, bool setbuf) {
+std::shared_ptr<FILE> HlsMakerImp::makeFile(const string &file, bool setbuf) {
     auto file_buf = _file_buf;
-    auto ret= shared_ptr<FILE>(File::create_file(file.data(), mode.data()), [file_buf](FILE *fp) {
+    auto ret = shared_ptr<FILE>(File::create_file(file.data(), "wb"), [file_buf](FILE *fp) {
         if (fp) {
             fclose(fp);
         }
@@ -236,6 +186,44 @@ void HlsMakerImp::setMediaSource(const string &vhost, const string &app, const s
 
 HlsMediaSource::Ptr HlsMakerImp::getMediaSource() const {
     return _media_src;
+}
+
+void HlsMakerImp::onWriteRecordM3u8(const char *header, size_t hlen, const char *body, size_t blen) {
+    bool exist = true;
+    string mode = "rb+";
+    if (access(_path_hls.c_str(), 0) == -1) {
+        exist = false;
+        mode = "wb+";
+    }
+
+    auto hls_file = makeRecordM3u8(_path_hls, mode);
+    if (hls_file) {
+        fwrite(header, hlen, 1, hls_file.get());
+        if (exist) {
+            fseek(hls_file.get(), -15L, SEEK_END);
+        }
+
+        fwrite(body, blen,1, hls_file.get());
+        hls_file.reset();
+        //if(_media_src && _type == Recorder::type_hls){
+        //    _media_src->registHls(true);
+        //}
+    } else {
+        WarnL << "create hls_file file failed, " << _path_hls << " " <<  get_uv_errmsg();
+    }
+}
+
+std::shared_ptr<FILE> HlsMakerImp::makeRecordM3u8(const string &file, const string &mode, bool setbuf) {
+    auto file_buf = _file_buf;
+    auto ret= shared_ptr<FILE>(File::create_file(file.data(), mode.data()), [file_buf](FILE *fp) {
+        if (fp) {
+            fclose(fp);
+        }
+    });
+    if (ret && setbuf) {
+        setvbuf(ret.get(), _file_buf.get(), _IOFBF, _buf_size);
+    }
+    return ret;
 }
 
 }//namespace mediakit

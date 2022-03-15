@@ -41,9 +41,10 @@ extern const std::string kBroadcastRecordMP4;
 // 录制 ts 文件后广播
 extern const std::string kBroadcastRecordTs;
 #define BroadcastRecordTsArgs const RecordInfo &info
+
 //录制hls文件成功后广播
-extern const std::string kBroadcastRecordHls;
-#define BroadcastRecordHlsArgs const HlsInfo &info
+extern const std::string kBroadcastRecordHlsDisk;
+#define BroadcastRecordHlsDiskArgs const RecordInfo &info
 
 //收到http api请求广播
 extern const std::string kBroadcastHttpRequest;
