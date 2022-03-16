@@ -246,8 +246,12 @@ static void pullStreamFromOrigin(const vector<string>& urls, size_t index, size_
     auto timeout_sec = cluster_timeout_sec / urls.size();
     InfoL << "pull stream from origin, failed_cnt: " << failed_cnt << ", timeout_sec: " << timeout_sec << ", url: " << url;
 
-    addStreamProxy(args._vhost, args._app, args._streamid, url, -1, args._schema == HLS_SCHEMA, false,
-                   Rtsp::RTP_TCP, timeout_sec, [=](const SockException &ex, const string &key) mutable {
+    ProtocolOption option;
+    option.enable_hls =  args._schema == HLS_SCHEMA;
+    option.enable_mp4 = false;
+
+    addStreamProxy(args._vhost, args._app, args._streamid, url, -1, option, Rtsp::RTP_TCP, timeout_sec,
+                  [=](const SockException &ex, const string &key) mutable {
         if (!ex) {
             return;
         }
@@ -266,12 +270,10 @@ void installWebHook(){
     GET_CONFIG(bool,hook_enable,Hook::kEnable);
     GET_CONFIG(string,hook_adminparams,Hook::kAdminParams);
 
-    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastMediaPublish,[](BroadcastMediaPublishArgs){
+    NoticeCenter::Instance().addListener(nullptr, Broadcast::kBroadcastMediaPublish, [](BroadcastMediaPublishArgs) {
         GET_CONFIG(string,hook_publish,Hook::kOnPublish);
-        GET_CONFIG(bool,toHls,General::kPublishToHls);
-        GET_CONFIG(bool,toMP4,General::kPublishToMP4);
-        if(!hook_enable || args._param_strs == hook_adminparams || hook_publish.empty() || sender.get_peer_ip() == "127.0.0.1"){
-            invoker("", toHls, toMP4);
+        if (!hook_enable || args._param_strs == hook_adminparams || hook_publish.empty() || sender.get_peer_ip() == "127.0.0.1") {
+            invoker("", ProtocolOption());
             return;
         }
         //异步执行该hook api，防止阻塞NoticeCenter
@@ -282,25 +284,48 @@ void installWebHook(){
         body["originType"] = (int) type;
         body["originTypeStr"] = getOriginTypeString(type);
         //执行hook
-        do_http_hook(hook_publish,body,[invoker](const Value &obj,const string &err){
-            if(err.empty()){
+        do_http_hook(hook_publish, body, [invoker](const Value &obj, const string &err) mutable {
+            ProtocolOption option;
+            if (err.empty()) {
                 //推流鉴权成功
-                bool enableHls = toHls;
-                bool enableMP4 = toMP4;
-
-                //兼容用户不传递enableHls、enableMP4参数
-                if (obj.isMember("enableHls")) {
-                    enableHls = obj["enableHls"].asBool();
+                if (obj.isMember("enable_hls")) {
+                    option.enable_hls = obj["enable_hls"].asBool();
                 }
-                if (obj.isMember("enableMP4")) {
-                    enableMP4 = obj["enableMP4"].asBool();
+                if (obj.isMember("enable_mp4")) {
+                    option.enable_mp4 = obj["enable_mp4"].asBool();
                 }
-                invoker(err, enableHls, enableMP4);
+                if (obj.isMember("enable_audio")) {
+                    option.enable_audio = obj["enable_audio"].asBool();
+                }
+                if (obj.isMember("add_mute_audio")) {
+                    option.add_mute_audio = obj["add_mute_audio"].asBool();
+                }
+                if (obj.isMember("mp4_save_path")) {
+                    option.mp4_save_path = obj["mp4_save_path"].asString();
+                }
+                if (obj.isMember("mp4_max_second")) {
+                    option.mp4_max_second = obj["mp4_max_second"].asUInt();
+                }
+                if (obj.isMember("hls_save_path")) {
+                    option.hls_save_path = obj["hls_save_path"].asString();
+                }
+                if (obj.isMember("enable_rtsp")) {
+                    option.enable_rtsp = obj["enable_rtsp"].asBool();
+                }
+                if (obj.isMember("enable_rtmp")) {
+                    option.enable_rtmp = obj["enable_rtmp"].asBool();
+                }
+                if (obj.isMember("enable_ts")) {
+                    option.enable_ts = obj["enable_ts"].asBool();
+                }
+                if (obj.isMember("enable_fmp4")) {
+                    option.enable_fmp4 = obj["enable_fmp4"].asBool();
+                }
+                invoker(err, option);
             } else {
                 //推流鉴权失败
-                invoker(err, false, false);
+                invoker(err, option);
             }
-
         });
     });
 

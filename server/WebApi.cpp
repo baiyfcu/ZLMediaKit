@@ -480,7 +480,7 @@ void getStatisticJson(const function<void(Value &val)> &cb) {
 }
 
 void addStreamProxy(const string &vhost, const string &app, const string &stream, const string &url, int retry_count,
-                    bool enable_hls, bool enable_mp4, int rtp_type, float timeout_sec,
+                    const ProtocolOption &option, int rtp_type, float timeout_sec,
                     const function<void(const SockException &ex, const string &key)> &cb) {
     auto key = getProxyKey(vhost, app, stream);
     lock_guard<recursive_mutex> lck(s_proxyMapMtx);
@@ -490,7 +490,7 @@ void addStreamProxy(const string &vhost, const string &app, const string &stream
         return;
     }
     //添加拉流代理
-    auto player = std::make_shared<PlayerProxy>(vhost, app, stream, enable_hls, enable_mp4, retry_count ? retry_count : -1);
+    auto player = std::make_shared<PlayerProxy>(vhost, app, stream, option, retry_count ? retry_count : -1);
     s_proxyMap[key] = player;
 
     //指定RTP over TCP(播放rtsp时有效)
@@ -517,6 +517,14 @@ void addStreamProxy(const string &vhost, const string &app, const string &stream
     });
     player->play(url);
 };
+
+template <typename Type>
+static void getArgsValue(const HttpAllArgs<ApiArgsType> &allArgs, const string &key, Type &value) {
+    auto val = allArgs[key];
+    if (!val.empty()) {
+        value = (Type)val;
+    }
+}
 
 /**
  * 安装api接口
@@ -938,13 +946,26 @@ void installWebApi() {
     api_regist("/index/api/addStreamProxy",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("vhost","app","stream","url");
+
+        ProtocolOption option;
+        getArgsValue(allArgs, "enable_hls", option.enable_hls);
+        getArgsValue(allArgs, "enable_mp4", option.enable_mp4);
+        getArgsValue(allArgs, "enable_rtsp", option.enable_rtsp);
+        getArgsValue(allArgs, "enable_rtmp", option.enable_rtmp);
+        getArgsValue(allArgs, "enable_ts", option.enable_ts);
+        getArgsValue(allArgs, "enable_fmp4", option.enable_fmp4);
+        getArgsValue(allArgs, "enable_audio", option.enable_audio);
+        getArgsValue(allArgs, "add_mute_audio", option.add_mute_audio);
+        getArgsValue(allArgs, "mp4_save_path", option.mp4_save_path);
+        getArgsValue(allArgs, "mp4_max_second", option.mp4_max_second);
+        getArgsValue(allArgs, "hls_save_path", option.hls_save_path);
+
         addStreamProxy(allArgs["vhost"],
                        allArgs["app"],
                        allArgs["stream"],
                        allArgs["url"],
                        allArgs["retry_count"],
-                       allArgs["enable_hls"],/* 是否hls转发 */
-                       allArgs["enable_mp4"],/* 是否MP4录制 */
+                       option,
                        allArgs["rtp_type"],
                        allArgs["timeout_sec"],
                        [invoker,val,headerOut](const SockException &ex,const string &key) mutable{
@@ -1524,7 +1545,12 @@ void installWebApi() {
     api_regist("/index/hook/on_stream_not_found",[](API_ARGS_MAP_ASYNC){
         //媒体未找到事件,我们都及时拉流hks作为替代品，目的是为了测试按需拉流
         CHECK_SECRET();
-        CHECK_ARGS("vhost","app","stream");
+        CHECK_ARGS("vhost","app","stream", "schema");
+
+        ProtocolOption option;
+        option.enable_hls = allArgs["schema"] == HLS_SCHEMA;
+        option.enable_mp4 = false;
+
         //通过内置支持的rtsp/rtmp按需拉流
         addStreamProxy(allArgs["vhost"],
                        allArgs["app"],
@@ -1532,8 +1558,7 @@ void installWebApi() {
                        /** 支持rtsp和rtmp方式拉流 ，rtsp支持h265/h264/aac,rtmp仅支持h264/aac **/
                        "rtsp://184.72.239.149/vod/mp4:BigBuckBunny_115k.mov",
                        -1,/*无限重试*/
-                       true,/* 开启hls转发 */
-                       false,/* 禁用MP4录制 */
+                       option,
                        0,//rtp over tcp方式拉流
                        10,//10秒超时
                        [invoker,val,headerOut](const SockException &ex,const string &key) mutable{

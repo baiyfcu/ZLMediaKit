@@ -20,6 +20,8 @@
 
 namespace mediakit {
 
+class ProtocolOption;
+
 //加载配置文件，如果配置文件不存在，那么会导出默认配置并生成配置文件
 //加载配置文件成功后会触发kBroadcastUpdateConfig广播
 //如果指定的文件名(ini_path)为空，那么会加载默认配置文件
@@ -69,18 +71,16 @@ extern const std::string kBroadcastOnRtspAuth;
 #define BroadcastOnRtspAuthArgs const MediaInfo &args,const std::string &realm,const std::string &user_name,const bool &must_no_encrypt,const RtspSession::onAuth &invoker,SockInfo &sender
 
 //推流鉴权结果回调对象
-//如果errMessage为空则代表鉴权成功
-//enableHls: 是否允许转换hls
-//enableMP4: 是否运行MP4录制
-typedef std::function<void(const std::string &errMessage, bool enableHls, bool enableMP4)> PublishAuthInvoker;
+//如果err为空则代表鉴权成功
+using PublishAuthInvoker = std::function<void(const std::string &err, const ProtocolOption &option)>;
 
 //收到rtsp/rtmp推流事件广播，通过该事件控制推流鉴权
 extern const std::string kBroadcastMediaPublish;
-#define BroadcastMediaPublishArgs const MediaOriginType &type, const MediaInfo &args,  const Broadcast::PublishAuthInvoker &invoker,SockInfo &sender
+#define BroadcastMediaPublishArgs const MediaOriginType &type, const MediaInfo &args, const Broadcast::PublishAuthInvoker &invoker,SockInfo &sender
 
 //播放鉴权结果回调对象
-//如果errMessage为空则代表鉴权成功
-typedef std::function<void(const std::string &errMessage)> AuthInvoker;
+//如果err为空则代表鉴权成功
+using AuthInvoker = std::function<void(const std::string &err)>;
 
 //播放rtsp/rtmp/http-flv事件广播，通过该事件控制播放鉴权
 extern const std::string kBroadcastMediaPlayed;
@@ -317,6 +317,9 @@ namespace RtpProxy {
 extern const std::string kDumpDir;
 //rtp接收超时时间
 extern const std::string kTimeoutSec;
+//随机端口范围，最少确保36个端口
+//该范围同时限制rtsp服务器udp端口范围
+extern const std::string kPortRange;
 } //namespace RtpProxy
 
 /**

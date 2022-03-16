@@ -62,12 +62,6 @@ API_EXPORT int API_CALL mk_media_init_video(mk_media ctx, int codec_id, int widt
 API_EXPORT int API_CALL mk_media_init_audio(mk_media ctx, int codec_id, int sample_rate, int channels, int sample_bit);
 
 /**
- * 添加静音音频轨道
- * @param ctx 对象指针
- */
-API_EXPORT void API_CALL mk_media_init_mute_audio(mk_media ctx);
-
-/**
  * 初始化h264/h265/aac完毕后调用此函数，
  * 在单track(只有音频或视频)时，因为ZLMediaKit不知道后续是否还要添加track，所以会多等待3秒钟
  * 如果产生的流是单Track类型，请调用此函数以便加快流生成速度，当然不调用该函数，影响也不大(会多等待3秒)
@@ -100,7 +94,7 @@ API_EXPORT int API_CALL mk_media_input_h265(mk_media ctx, const void *data, int 
 /**
  * 输入单帧AAC音频(单独指定adts头)
  * @param ctx 对象指针
- * @param data 不包含adts头的单帧AAC数据
+ * @param data 不包含adts头的单帧AAC数据，adts头7个字节
  * @param len 单帧AAC数据字节数
  * @param dts 时间戳，毫秒
  * @param adts adts头，可以为null

@@ -104,6 +104,11 @@ void HlsPlayer::fetchSegment() {
         }
         if (err) {
             WarnL << "download ts segment " << url << " failed:" << err.what();
+            if (err.getErrCode() == Err_timeout) {
+                strong_self->_timeout_multiple = MAX(strong_self->_timeout_multiple + 1, MAX_TIMEOUT_MULTIPLE);
+            }else{
+                strong_self->_timeout_multiple = MAX(strong_self->_timeout_multiple -1 , MIN_TIMEOUT_MULTIPLE);
+            }
         }
         //提前半秒下载好
         auto delay = duration - ticker.elapsedTime() / 1000.0f - 0.5;
@@ -122,8 +127,8 @@ void HlsPlayer::fetchSegment() {
     });
 
     _http_ts_player->setMethod("GET");
-    //ts切片必须在其时长的3倍内下载完毕
-    _http_ts_player->setCompleteTimeout(3 * duration * 1000);
+    //ts切片必须在其时长的2-5倍内下载完毕
+    _http_ts_player->setCompleteTimeout(_timeout_multiple * duration * 1000);
     _http_ts_player->sendRequest(url);
 }
 
@@ -172,7 +177,7 @@ void HlsPlayer::onResponseHeader(const string &status, const HttpClient::HttpHea
         throw invalid_argument("bad http status code:" + status);
     }
     auto content_type = strToLower(const_cast<HttpClient::HttpHeader &>(headers)["Content-Type"]);
-    if (content_type.find("application/vnd.apple.mpegurl") != 0 && content_type.find("application/x-mpegurl") != 0) {
+    if (content_type.find("application/vnd.apple.mpegurl") != 0 && content_type.find("/x-mpegurl") == _StrPrinter::npos) {
         WarnL << "may not a hls video: " << content_type << ", url: " << getUrl();
     }
     _m3u8.clear();

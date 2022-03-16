@@ -163,7 +163,11 @@ API_EXPORT int API_CALL mk_media_total_reader_count(mk_media ctx){
 API_EXPORT mk_media API_CALL mk_media_create(const char *vhost, const char *app, const char *stream,
                                              float duration, int hls_enabled, int mp4_enabled) {
     assert(vhost && app && stream);
-    MediaHelper::Ptr *obj(new MediaHelper::Ptr(new MediaHelper(vhost, app, stream, duration, hls_enabled, mp4_enabled)));
+    ProtocolOption option;
+    option.enable_hls = hls_enabled;
+    option.enable_mp4 = mp4_enabled;
+
+    MediaHelper::Ptr *obj(new MediaHelper::Ptr(new MediaHelper(vhost, app, stream, duration, option)));
     (*obj)->attachEvent();
     return (mk_media) obj;
 }
@@ -194,12 +198,6 @@ API_EXPORT int API_CALL mk_media_init_audio(mk_media ctx, int codec_id, int samp
     info.iChannel = channels;
     info.iSampleBit = sample_bit;
     return (*obj)->getChannel()->initAudio(info);
-}
-
-API_EXPORT void API_CALL mk_media_init_mute_audio(mk_media ctx) {
-    assert(ctx);
-    MediaHelper::Ptr *obj = (MediaHelper::Ptr *) ctx;
-    (*obj)->getChannel()->addMuteAudioTrack();
 }
 
 API_EXPORT void API_CALL mk_media_init_complete(mk_media ctx){
