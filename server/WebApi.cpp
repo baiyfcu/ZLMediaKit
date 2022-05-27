@@ -371,7 +371,7 @@ uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable
     }
 
     RtpServer::Ptr server = std::make_shared<RtpServer>();
-    server->start(local_port, stream_id, enable_tcp, local_ip, enable_reuse, ssrc);
+    server->start(local_port, stream_id, enable_tcp, local_ip, re_use_port, ssrc);
     server->setOnDetach([stream_id]() {
         //设置rtp超时移除事件
         lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
@@ -1158,10 +1158,9 @@ void installWebApi() {
                     }
                     val["local_port"] = local_port;
                     invoker(200, headerOut, val.toStyledString());
-                });
-            }
-        }
-        else {
+                    });
+            });
+        }else {
             auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
             if (!src) {
                 throw ApiRetException("该媒体流不存在", API::OtherFailed);
@@ -1176,8 +1175,7 @@ void installWebApi() {
                 invoker(200, headerOut, val.toStyledString());
             });
         }
-    }
-
+    });
 
     api_regist("/index/api/startSendRtpPassive",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
@@ -1205,7 +1203,6 @@ void installWebApi() {
             val["local_port"] = local_port;
             invoker(200, headerOut, val.toStyledString());
         });
->>>>>>> e2908e9775e3e16344e59717b9e0f4b2d846467b
     });
 
     api_regist("/index/api/stopSendRtp",[](API_ARGS_MAP){
