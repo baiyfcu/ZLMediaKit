@@ -14,7 +14,7 @@
 #include "Rtsp/UDPServer.h"
 #include "Player/MediaPlayer.h"
 #include "Util/onceToken.h"
-#include "FFMpegDecoder.h"
+#include "Codec/Transcode.h"
 #include "YuvDisplayer.h"
 #include "AudioSRC.h"
 using namespace std;
@@ -84,7 +84,7 @@ int main(int argc, char *argv[]) {
                 });
             });
             auto delegate = std::make_shared<FrameWriterInterfaceHelper>([decoder](const Frame::Ptr &frame) {
-                return decoder->inputFrame(frame, false);
+                return decoder->inputFrame(frame, false, true);
             });
             videoTrack->addDelegate(delegate);
         }
@@ -103,10 +103,10 @@ int main(int argc, char *argv[]) {
                 }
                 auto pcm = swr->inputFrame(frame);
                 auto len = pcm->get()->nb_samples * pcm->get()->channels * av_get_bytes_per_sample((enum AVSampleFormat)pcm->get()->format);
-                audio_player->playPCM((const char *) (pcm->get()->data[0]), len);
+                audio_player->playPCM((const char *) (pcm->get()->data[0]), MIN(len, frame->get()->linesize[0]));
             });
             auto audio_delegate = std::make_shared<FrameWriterInterfaceHelper>( [decoder](const Frame::Ptr &frame) {
-                return decoder->inputFrame(frame, false);
+                return decoder->inputFrame(frame, false, true);
             });
             audioTrack->addDelegate(audio_delegate);
         }

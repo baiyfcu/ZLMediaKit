@@ -35,7 +35,8 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
                          uint32_t bufSize,
                          float seg_duration,
                          uint32_t seg_number,
-                         Recorder::type type) : HlsMaker(seg_duration, seg_number, type) {
+                         bool seg_keep,
+                         Recorder::type type):HlsMaker(seg_duration, seg_number, seg_keep, type) {
     _poller = EventPollerPool::Instance().getPoller();
     _path_prefix = m3u8_file.substr(0, m3u8_file.rfind('/'));
     _path_hls = m3u8_file;
@@ -63,7 +64,7 @@ void HlsMakerImp::clearCache(bool first) {
 void HlsMakerImp::clearCache(bool immediately, bool eof, bool first) {
     //录制完了
     flushLastSegment(eof);
-    if (!isLive()) {
+    if (!isLive()||isKeep()) {
         if (first) return; //第一次创建清除cache不需要上报
 
         //hook接口，hls落盘录制，触发hook

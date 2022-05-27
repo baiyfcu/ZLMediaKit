@@ -312,60 +312,8 @@ string SdpParser::toString() const {
     return title + video + audio;
 }
 
-bool RtspUrl::parse(const string &strUrl) {
-    auto schema = FindField(strUrl.data(), nullptr, "://");
-    bool isSSL = strcasecmp(schema.data(), "rtsps") == 0;
-    //查找"://"与"/"之间的字符串，用于提取用户名密码
-    auto middle_url = FindField(strUrl.data(), "://", "/");
-    if (middle_url.empty()) {
-        middle_url = FindField(strUrl.data(), "://", nullptr);
-    }
-    auto pos = middle_url.rfind('@');
-    if (pos == string::npos) {
-        //并没有用户名密码
-        return setup(isSSL, strUrl, "", "");
-    }
-
-    //包含用户名密码
-    auto user_pwd = middle_url.substr(0, pos);
-    auto suffix = strUrl.substr(schema.size() + 3 + pos + 1);
-    auto url = StrPrinter << "rtsp://" << suffix << endl;
-    if (user_pwd.find(":") == string::npos) {
-        return setup(isSSL, url, user_pwd, "");
-    }
-    auto user = FindField(user_pwd.data(), nullptr, ":");
-    auto pwd = FindField(user_pwd.data(), ":", nullptr);
-    return setup(isSSL, url, user, pwd);
-}
-
-bool RtspUrl::setup(bool isSSL, const string &strUrl, const string &strUser, const string &strPwd) {
-    auto ip = FindField(strUrl.data(), "://", "/");
-    if (ip.empty()) {
-        ip = split(FindField(strUrl.data(), "://", NULL), "?")[0];
-    }
-    auto port = atoi(FindField(ip.data(), ":", NULL).data());
-    if (port <= 0 || port > UINT16_MAX) {
-        //rtsp 默认端口554
-        port = isSSL ? 322 : 554;
-    } else {
-        //服务器域名
-        ip = FindField(ip.data(), NULL, ":");
-    }
-
-    if (ip.empty()) {
-        return false;
-    }
-
-    _url = std::move(strUrl);
-    _user = std::move(strUser);
-    _passwd = std::move(strPwd);
-    _host = std::move(ip);
-    _port = port;
-    _is_ssl = isSSL;
-    return true;
-}
-
-class PortManager : public std::enable_shared_from_this<PortManager> {
+template<int type>
+class PortManager : public std::enable_shared_from_this<PortManager<type> > {
 public:
     PortManager() {
         static auto func = [](const string &str, int index) {
@@ -375,7 +323,7 @@ public:
         };
         GET_CONFIG_FUNC(uint16_t, s_min_port, RtpProxy::kPortRange, [](const string &str) { return func(str, 0); });
         GET_CONFIG_FUNC(uint16_t, s_max_port, RtpProxy::kPortRange, [](const string &str) { return func(str, 1); });
-        assert(s_max_port > s_min_port + 36);
+        assert(s_max_port >= s_min_port + 36 -1);
         setRange((s_min_port + 1) / 2, s_max_port / 2);
     }
 
@@ -384,28 +332,44 @@ public:
         return *instance;
     }
 
-    void bindUdpSock(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip) {
+    void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip, bool re_use_port, bool is_udp) {
         auto &sock0 = pair.first;
         auto &sock1 = pair.second;
         auto sock_pair = getPortPair();
         if (!sock_pair) {
-            throw runtime_error("none reserved udp port in pool");
+            throw runtime_error("none reserved port in pool");
         }
+        if (is_udp) {
+            if (!sock0->bindUdpSock(2 * *sock_pair, local_ip.data(), re_use_port)) {
+                //分配端口失败
+                throw runtime_error("open udp socket[0] failed");
+            }
 
-        if (!sock0->bindUdpSock(2 * *sock_pair, local_ip.data(), false)) {
-            //分配端口失败
-            throw runtime_error("open udp socket[0] failed");
+            if (!sock1->bindUdpSock(2 * *sock_pair + 1, local_ip.data(), re_use_port)) {
+                //分配端口失败
+                throw runtime_error("open udp socket[1] failed");
+            }
+
+            auto on_cycle = [sock_pair](Socket::Ptr &, std::shared_ptr<void> &) {};
+            // udp socket没onAccept事件，设置该回调，目的是为了在销毁socket时，回收对象
+            sock0->setOnAccept(on_cycle);
+            sock1->setOnAccept(on_cycle);
+        } else {
+            if (!sock0->listen(2 * *sock_pair, local_ip.data())) {
+                //分配端口失败
+                throw runtime_error("listen tcp socket[0] failed");
+            }
+
+            if (!sock1->listen(2 * *sock_pair + 1, local_ip.data())) {
+                //分配端口失败
+                throw runtime_error("listen tcp socket[1] failed");
+            }
+
+            auto on_cycle = [sock_pair](const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len) {};
+            // udp socket没onAccept事件，设置该回调，目的是为了在销毁socket时，回收对象
+            sock0->setOnRead(on_cycle);
+            sock1->setOnRead(on_cycle);
         }
-
-        if (!sock1->bindUdpSock(2 * *sock_pair + 1, local_ip.data(), false)) {
-            //分配端口失败
-            throw runtime_error("open udp socket[1] failed");
-        }
-
-        auto on_cycle = [sock_pair](Socket::Ptr &, std::shared_ptr<void> &) {};
-        // udp socket没onAccept事件，设置该回调，目的是为了在销毁socket时，回收对象
-        sock0->setOnAccept(on_cycle);
-        sock1->setOnAccept(on_cycle);
     }
 
 private:
@@ -425,7 +389,7 @@ private:
         _port_pair_pool.pop_front();
         InfoL << "got port from pool:" << 2 * pos << "-" << 2 * pos + 1;
 
-        weak_ptr<PortManager> weak_self = shared_from_this();
+        weak_ptr<PortManager> weak_self = this->shared_from_this();
         std::shared_ptr<uint16_t> ret(new uint16_t(pos), [weak_self, pos](uint16_t *ptr) {
             delete ptr;
             auto strong_self = weak_self.lock();
@@ -445,24 +409,22 @@ private:
     deque<uint16_t> _port_pair_pool;
 };
 
-static void makeSockPair_l(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip) {
-    PortManager::Instance().bindUdpSock(pair, local_ip);
-}
-
-void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip) {
-    //全局互斥锁保护，防止端口重复分配
-    static recursive_mutex s_mtx;
-    lock_guard<recursive_mutex> lck(s_mtx);
+void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip, bool re_use_port, bool is_udp) {
     int try_count = 0;
     while (true) {
         try {
-            makeSockPair_l(pair, local_ip);
+            //udp和tcp端口池使用相同算法和范围分配，但是互不相干
+            if (is_udp) {
+                PortManager<0>::Instance().makeSockPair(pair, local_ip, re_use_port, is_udp);
+            } else {
+                PortManager<1>::Instance().makeSockPair(pair, local_ip, re_use_port, is_udp);
+            }
             break;
         } catch (exception &ex) {
             if (++try_count == 3) {
                 throw;
             }
-            WarnL << "open udp socket failed:" << ex.what() << ", retry: " << try_count;
+            WarnL << "open socket failed:" << ex.what() << ", retry: " << try_count;
         }
     }
 }

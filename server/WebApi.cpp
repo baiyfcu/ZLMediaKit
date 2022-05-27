@@ -363,7 +363,7 @@ Value makeMediaSourceJson(MediaSource &media){
     return item;
 }
 
-uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable_tcp, bool enable_reuse) {
+uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable_tcp, const char *local_ip, bool re_use_port, uint32_t ssrc) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     if (s_rtpServerMap.find(stream_id) != s_rtpServerMap.end()) {
         //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
@@ -371,7 +371,7 @@ uint16_t openRtpServer(uint16_t local_port, const string& stream_id, bool enable
     }
 
     RtpServer::Ptr server = std::make_shared<RtpServer>();
-    server->start(local_port, stream_id, enable_tcp, "0.0.0.0", enable_reuse);
+    server->start(local_port, stream_id, enable_tcp, local_ip, enable_reuse, ssrc);
     server->setOnDetach([stream_id]() {
         //设置rtp超时移除事件
         lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
@@ -1080,7 +1080,8 @@ void installWebApi() {
         CHECK_SECRET();
         CHECK_ARGS("port", "enable_tcp", "stream_id");
         auto stream_id = allArgs["stream_id"];
-        auto port = openRtpServer(allArgs["port"], stream_id.c_str(), allArgs["enable_tcp"].as<bool>(), false);
+        auto port = openRtpServer(allArgs["port"], stream_id, allArgs["enable_tcp"].as<bool>(), "::",
+                      allArgs["re_use_port"].as<bool>(), allArgs["ssrc"].as<uint32_t>());
         if(port == 0) {
             //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
             throw InvalidArgsException("该stream_id已存在");
@@ -1115,6 +1116,19 @@ void installWebApi() {
     api_regist("/index/api/startSendRtp",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("vhost", "app", "stream", "ssrc", "dst_url", "dst_port", "is_udp");
+
+        MediaSourceEvent::SendRtpArgs args;
+        args.passive = false;
+        args.dst_url = allArgs["dst_url"];
+        args.dst_port = allArgs["dst_port"];
+        args.ssrc = allArgs["ssrc"];
+        args.is_udp = allArgs["is_udp"];
+        args.src_port = allArgs["src_port"];
+        args.pt = allArgs["pt"].empty() ? 96 : allArgs["pt"].as<int>();
+        args.use_ps = allArgs["use_ps"].empty() ? true : allArgs["use_ps"].as<bool>();
+        args.only_audio = allArgs["only_audio"].empty() ? false : allArgs["only_audio"].as<bool>();
+        TraceL << "startSendRtp, pt " << int(args.pt) << " ps " << args.use_ps << " audio " <<  args.only_audio;
+
         bool isAsync = false;
         if (checkArgs(allArgs, "is_async"))
             isAsync = allArgs["is_async"];
@@ -1137,34 +1151,61 @@ void installWebApi() {
                 }
                 auto src = dynamic_pointer_cast<RtspMediaSource>(src_in);
                 //src_port为空时，则随机本地端口
-                src->startSendRtp(allArgs["dst_url"], allArgs["dst_port"], allArgs["ssrc"], allArgs["is_udp"], allArgs["src_port"], [val, headerOut, invoker](uint16_t local_port, const SockException& ex) mutable {
+                src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
                     if (ex) {
                         val["code"] = API::OtherFailed;
                         val["msg"] = ex.what();
                     }
                     val["local_port"] = local_port;
                     invoker(200, headerOut, val.toStyledString());
-                    });
                 });
+            }
         }
-        else
-        {
+        else {
             auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
             if (!src) {
                 throw ApiRetException("该媒体流不存在", API::OtherFailed);
             }
 
-            //src_port为空时，则随机本地端口
-            src->startSendRtp(allArgs["dst_url"], allArgs["dst_port"], allArgs["ssrc"], allArgs["is_udp"], allArgs["src_port"], [val, headerOut, invoker](uint16_t local_port, const SockException& ex) mutable {
+            src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
                 if (ex) {
                     val["code"] = API::OtherFailed;
                     val["msg"] = ex.what();
                 }
                 val["local_port"] = local_port;
                 invoker(200, headerOut, val.toStyledString());
-                });
+            });
+        }
+    }
+
+
+    api_regist("/index/api/startSendRtpPassive",[](API_ARGS_MAP_ASYNC){
+        CHECK_SECRET();
+        CHECK_ARGS("vhost", "app", "stream", "ssrc");
+
+        auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
+        if (!src) {
+            throw ApiRetException("该媒体流不存在", API::OtherFailed);
         }
 
+        MediaSourceEvent::SendRtpArgs args;
+        args.passive = true;
+        args.ssrc = allArgs["ssrc"];
+        args.is_udp = false;
+        args.src_port = allArgs["src_port"];
+        args.pt = allArgs["pt"].empty() ? 96 : allArgs["pt"].as<int>();
+        args.use_ps = allArgs["use_ps"].empty() ? true : allArgs["use_ps"].as<bool>();
+        args.only_audio = allArgs["only_audio"].empty() ? false : allArgs["only_audio"].as<bool>();
+        TraceL << "startSendRtpPassive, pt " << int(args.pt) << " ps " << args.use_ps << " audio " <<  args.only_audio;
+        src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
+            if (ex) {
+                val["code"] = API::OtherFailed;
+                val["msg"] = ex.what();
+            }
+            val["local_port"] = local_port;
+            invoker(200, headerOut, val.toStyledString());
+        });
+>>>>>>> e2908e9775e3e16344e59717b9e0f4b2d846467b
     });
 
     api_regist("/index/api/stopSendRtp",[](API_ARGS_MAP){
@@ -1422,7 +1463,9 @@ void installWebApi() {
 #ifdef ENABLE_WEBRTC
     class WebRtcArgsImp : public WebRtcArgs {
     public:
-        WebRtcArgsImp(const HttpAllArgs<string> &args) : _args(args) {}
+        WebRtcArgsImp(const HttpAllArgs<string> &args, std::string session_id)
+            : _args(args)
+            , _session_id(std::move(session_id)) {}
         ~WebRtcArgsImp() override = default;
 
         variant operator[](const string &key) const override {
@@ -1438,11 +1481,12 @@ void installWebApi() {
             CHECK_ARGS("app", "stream");
 
             return StrPrinter << RTC_SCHEMA << "://" << _args["Host"] << "/" << _args["app"] << "/"
-                              << _args["stream"] << "?" << _args.getParser().Params();
+                              << _args["stream"] << "?" << _args.getParser().Params() + "&session=" + _session_id;
         }
 
     private:
         HttpAllArgs<string> _args;
+        std::string _session_id;
     };
 
     api_regist("/index/api/webrtc",[](API_ARGS_STRING_ASYNC){
@@ -1451,8 +1495,9 @@ void installWebApi() {
         auto offer = allArgs.getArgs();
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
 
-        WebRtcPluginManager::Instance().getAnswerSdp(*(static_cast<Session *>(&sender)), type, offer, WebRtcArgsImp(allArgs),
-        [invoker, val, offer, headerOut](const WebRtcInterface &exchanger) mutable {
+        WebRtcPluginManager::Instance().getAnswerSdp(
+            *(static_cast<Session *>(&sender)), type, offer, WebRtcArgsImp(allArgs, sender.getIdentifier()),
+            [invoker, val, offer, headerOut](const WebRtcInterface &exchanger) mutable {
             //设置返回类型
             headerOut["Content-Type"] = HttpFileManager::getContentType(".json");
             //设置跨域

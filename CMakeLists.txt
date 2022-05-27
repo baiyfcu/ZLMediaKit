@@ -1,5 +1,23 @@
 project(ZLMediaKit)
 cmake_minimum_required(VERSION 3.1.3)
+include(CheckStructHasMember)
+include(CheckSymbolExists)
+
+# 检查sendmmsg相关依赖并设置对应的宏
+list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
+check_struct_has_member("struct mmsghdr" msg_hdr sys/socket.h HAVE_MMSG_HDR)
+check_symbol_exists(sendmmsg sys/socket.h HAVE_SENDMMSG_API)
+check_symbol_exists(recvmmsg sys/socket.h HAVE_RECVMMSG_API)
+
+if(HAVE_MMSG_HDR)
+    add_definitions(-DHAVE_MMSG_HDR)
+endif()
+if(HAVE_SENDMMSG_API)
+    add_definitions(-DHAVE_SENDMMSG_API)
+endif()
+if(HAVE_RECVMMSG_API)
+    add_definitions(-DHAVE_RECVMMSG_API)
+endif()
 #使能c++11
 set(CMAKE_CXX_STANDARD 11)
 #加载自定义模块
@@ -10,6 +28,12 @@ if(CCACHE_FOUND)
     set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
 endif(CCACHE_FOUND)
+
+#add_compile_options(-D__STDC_FORMAT_MACROS)
+if(CMAKE_COMPILER_IS_GNUCXX)
+    add_compile_options(-D__STDC_FORMAT_MACROS)
+    message(STATUS "-D__STDC_FORMAT_MACROS")
+endif(CMAKE_COMPILER_IS_GNUCXX)
 
 #set(CMAKE_BUILD_TYPE "Release")
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "")
@@ -78,6 +102,7 @@ option(ENABLE_MEM_DEBUG "Enable Memory Debug" false)
 option(ENABLE_ASAN "Enable Address Sanitize" false)
 option(ENABLE_WEBRTC "Enable WebRTC" true)
 option(ENABLE_PLAYER "Enable Player" true)
+option(ENABLE_FFMPEG "Enable FFmpeg" true)
 option(ENABLE_MSVC_MT "Enable MSVC Mt/Mtd lib" true)
 option(ENABLE_API_STATIC_LIB "Enable mk_api static lib" false)
 option(USE_SOLUTION_FOLDERS "Enable solution dir supported" ON)
@@ -153,7 +178,7 @@ endif ()
 
 configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/version.h.ini
-        ${CMAKE_BINARY_DIR}/Version.h
+        ${CMAKE_BINARY_DIR}/version.h
         @ONLY
 )
 
@@ -175,6 +200,101 @@ if (ENABLE_ASAN)
 endif ()
 
 set(LINK_LIB_LIST zlmediakit zltoolkit)
+
+if (ENABLE_FFMPEG)
+    find_package(PkgConfig QUIET)
+    #查找ffmpeg/libutil是否安装
+    if (PKG_CONFIG_FOUND)
+        pkg_check_modules(AVUTIL QUIET IMPORTED_TARGET libavutil)
+        if (AVUTIL_FOUND)
+            include_directories(${AVUTIL_INCLUDE_DIRS})
+            link_directories(${AVUTIL_LIBRARY_DIRS})
+            list(APPEND LINK_LIB_LIST ${AVUTIL_LIBRARIES})
+            message(STATUS "found library:${AVUTIL_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libavcodec是否安装
+    if (PKG_CONFIG_FOUND)
+        pkg_check_modules(AVCODEC QUIET IMPORTED_TARGET libavcodec)
+        if (AVCODEC_FOUND)
+            include_directories(${AVCODEC_INCLUDE_DIRS})
+            link_directories(${AVCODEC_LIBRARY_DIRS})
+            list(APPEND LINK_LIB_LIST ${AVCODEC_LIBRARIES})
+            message(STATUS "found library:${AVCODEC_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libswscale是否安装
+    if (PKG_CONFIG_FOUND)
+        pkg_check_modules(SWSCALE QUIET IMPORTED_TARGET libswscale)
+        if (SWSCALE_FOUND)
+            include_directories(${SWSCALE_INCLUDE_DIRS})
+            link_directories(${SWSCALE_LIBRARY_DIRS})
+            list(APPEND LINK_LIB_LIST ${SWSCALE_LIBRARIES})
+            message(STATUS "found library:${SWSCALE_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libswresample是否安装
+    if (PKG_CONFIG_FOUND)
+        pkg_check_modules(SWRESAMPLE QUIET IMPORTED_TARGET libswresample)
+        if (SWRESAMPLE_FOUND)
+            include_directories(${SWRESAMPLE_INCLUDE_DIRS})
+            link_directories(${SWRESAMPLE_LIBRARY_DIRS})
+            list(APPEND LINK_LIB_LIST ${SWRESAMPLE_LIBRARIES})
+            message(STATUS "found library:${SWRESAMPLE_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libutil是否安装
+    if (NOT AVUTIL_FOUND)
+        find_package(AVUTIL QUIET)
+        if (AVUTIL_FOUND)
+            include_directories(${AVUTIL_INCLUDE_DIR})
+            list(APPEND LINK_LIB_LIST ${AVUTIL_LIBRARIES})
+            message(STATUS "found library:${AVUTIL_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libavcodec是否安装
+    if (NOT AVCODEC_FOUND)
+        find_package(AVCODEC QUIET)
+        if (AVCODEC_FOUND)
+            include_directories(${AVCODEC_INCLUDE_DIR})
+            list(APPEND LINK_LIB_LIST ${AVCODEC_LIBRARIES})
+            message(STATUS "found library:${AVCODEC_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libswscale是否安装
+    if (NOT SWSCALE_FOUND)
+        find_package(SWSCALE QUIET)
+        if (SWSCALE_FOUND)
+            include_directories(${SWSCALE_INCLUDE_DIR})
+            list(APPEND LINK_LIB_LIST ${SWSCALE_LIBRARIES})
+            message(STATUS "found library:${SWSCALE_LIBRARIES}")
+        endif ()
+    endif ()
+
+    #查找ffmpeg/libswresample是否安装
+    if (NOT SWRESAMPLE_FOUND)
+        find_package(SWRESAMPLE QUIET)
+        if (SWRESAMPLE_FOUND)
+            include_directories(${SWRESAMPLE_INCLUDE_DIRS})
+            list(APPEND LINK_LIB_LIST ${SWRESAMPLE_LIBRARIES})
+            message(STATUS "found library:${SWRESAMPLE_LIBRARIES}")
+        endif ()
+    endif ()
+
+    if (AVUTIL_FOUND AND AVCODEC_FOUND AND SWSCALE_FOUND AND SWRESAMPLE_FOUND)
+        add_definitions(-DENABLE_FFMPEG)
+    else ()
+        set(ENABLE_FFMPEG off)
+        message(WARNING "ffmpeg相关功能未找到")
+    endif ()
+
+endif ()
 
 #默认链接jemalloc库避免内存碎片
 find_package(JEMALLOC QUIET)
@@ -333,13 +453,9 @@ elseif (NOT ANDROID OR IOS)
 endif ()
 
 #复制文件过来
-execute_process(COMMAND cp -r ${CMAKE_CURRENT_SOURCE_DIR}/www ${EXECUTABLE_OUTPUT_PATH}/)
-execute_process(COMMAND cp ${CMAKE_CURRENT_SOURCE_DIR}/conf/config.ini ${EXECUTABLE_OUTPUT_PATH}/)
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/www" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/config.ini" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 
-#添加c库
-if (ENABLE_API)
-    add_subdirectory(api)
-endif ()
 
 if (ENABLE_WEBRTC)
     #查找srtp是否安装
@@ -355,10 +471,24 @@ if (ENABLE_WEBRTC)
         add_library(webrtc ${SRC_WEBRTC_LIST})
         list(APPEND LINK_LIB_LIST webrtc)
         message(STATUS "webrtc功能已开启")
+
+        find_package(SCTP QUIET)
+        if (SCTP_FOUND)
+            message(STATUS "found library:${SCTP_INCLUDE_DIRS} ${SCTP_LIBRARIES}")
+            include_directories(${SCTP_INCLUDE_DIRS})
+            list(APPEND LINK_LIB_LIST ${SCTP_LIBRARIES})
+            add_definitions(-DENABLE_SCTP)
+            message(STATUS "webrtc datachannel功能已打开")
+        endif ()
     else ()
         set(ENABLE_WEBRTC off)
         message(WARNING "srtp未找到, webrtc相关功能打开失败")
     endif ()
+endif ()
+
+#添加c库
+if (ENABLE_API)
+    add_subdirectory(api)
 endif ()
 
 #ios不编译可执行程序

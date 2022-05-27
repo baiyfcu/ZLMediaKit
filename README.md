@@ -25,6 +25,7 @@
 - 极致性能，单机10W级别播放器，100Gb/s级别io带宽能力。
 - 极致体验，[独家特性](https://github.com/ZLMediaKit/ZLMediaKit/wiki/ZLMediakit%E7%8B%AC%E5%AE%B6%E7%89%B9%E6%80%A7%E4%BB%8B%E7%BB%8D)
 - [谁在使用zlmediakit?](https://github.com/ZLMediaKit/ZLMediaKit/issues/511)
+- 全面支持ipv6网络
 
 ## 项目定位
 
@@ -105,6 +106,7 @@
   - 支持remb/pli/sr/rr rtcp
   - 支持rtp扩展解析
   - 支持GOP缓冲，webrtc播放秒开
+  - 支持datachannel
   
 - 其他
   - 支持丰富的restful api以及web hook事件 
@@ -174,6 +176,7 @@ bash build_docker_images.sh
  - 播放器
    - [基于wasm支持H265的播放器](https://github.com/numberwolf/h265web.js)
    - [基于MSE的websocket-fmp4播放器](https://github.com/v354412101/wsPlayer) 
+   - [全国产webrtc sdk(metaRTC)](https://github.com/metartc/metaRTC)
    
 ## 授权协议
 
@@ -261,6 +264,17 @@ bash build_docker_images.sh
 [cgm](mailto:2958580318@qq.com)
 [hejilin](mailto:1724010622@qq.com)
 [alexliyu7352](mailto:liyu7352@gmail.com)
+[cgm](mailto:2958580318@qq.com)
+[haorui wang](https://github.com/HaoruiWang)
+[joshuafc](mailto:joshuafc@foxmail.com)
+[JayChen0519](https://github.com/JayChen0519)
+[zx](mailto:zuoxue@qq.com)
+[wangcker](mailto:wangcker@163.com)
+[WuPeng](mailto:wp@zafu.edu.cn)
+[starry](https://github.com/starry)
+[mtdxc](https://github.com/mtdxc)
+[胡刚风](https://github.com/hugangfeng333)
+[zhao85](https://github.com/zhao85)
 
 ## 使用案例
 

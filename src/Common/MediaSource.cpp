@@ -237,13 +237,13 @@ bool MediaSource::isRecording(Recorder::type type){
     return listener->isRecording(*this, type);
 }
 
-void MediaSource::startSendRtp(const string &dst_url, uint16_t dst_port, const string &ssrc, bool is_udp, uint16_t src_port, const function<void(uint16_t local_port, const SockException &ex)> &cb){
+void MediaSource::startSendRtp(const MediaSourceEvent::SendRtpArgs &args, const std::function<void(uint16_t, const toolkit::SockException &)> cb) {
     auto listener = _listener.lock();
     if (!listener) {
         cb(0, SockException(Err_other, "尚未设置事件监听器"));
         return;
     }
-    return listener->startSendRtp(*this, dst_url, dst_port, ssrc, is_udp, src_port, cb);
+    return listener->startSendRtp(*this, args, cb);
 }
 
 bool MediaSource::stopSendRtp(const string &ssrc) {
@@ -506,15 +506,9 @@ void MediaInfo::parse(const string &url_in){
     }
     auto split_vec = split(url.substr(schema_pos + 3), "/");
     if (split_vec.size() > 0) {
-        auto vhost = split_vec[0];
-        auto pos = vhost.find(":");
-        if (pos != string::npos) {
-            _host = _vhost = vhost.substr(0, pos);
-            _port = vhost.substr(pos + 1);
-        } else {
-            _host = _vhost = vhost;
-        }
-        if (_vhost == "localhost" || INADDR_NONE != inet_addr(_vhost.data())) {
+        splitUrl(split_vec[0], _host, _port);
+        _vhost = _host;
+         if (_vhost == "localhost" || isIP(_vhost.data())) {
             //如果访问的是localhost或ip，那么则为默认虚拟主机
             _vhost = DEFAULT_VHOST;
         }
@@ -720,12 +714,12 @@ vector<Track::Ptr> MediaSourceEventInterceptor::getMediaTracks(MediaSource &send
     return listener->getMediaTracks(sender, trackReady);
 }
 
-void MediaSourceEventInterceptor::startSendRtp(MediaSource &sender, const string &dst_url, uint16_t dst_port, const string &ssrc, bool is_udp, uint16_t src_port, const function<void(uint16_t local_port, const SockException &ex)> &cb){
+void MediaSourceEventInterceptor::startSendRtp(MediaSource &sender, const MediaSourceEvent::SendRtpArgs &args, const std::function<void(uint16_t, const toolkit::SockException &)> cb) {
     auto listener = _listener.lock();
     if (listener) {
-        listener->startSendRtp(sender, dst_url, dst_port, ssrc, is_udp, src_port, cb);
+        listener->startSendRtp(sender, args, cb);
     } else {
-        MediaSourceEvent::startSendRtp(sender, dst_url, dst_port, ssrc, is_udp, src_port, cb);
+        MediaSourceEvent::startSendRtp(sender, args, cb);
     }
 }
 

@@ -42,7 +42,22 @@ void HlsPlayer::teardown_l(const SockException &ex) {
         _play_result = true;
         onPlayResult(ex);
     } else {
-        onShutdown(ex);
+        //如果不是主动关闭的，则重新拉取索引文件
+        if (ex.getErrCode() != Err_shutdown) {
+            // 当切片列表已空, 且没有正在下载的切片并且重试次数已经达到最大次数时, 则认为失败关闭播放器
+            if (_ts_list.empty() && !(_http_ts_player && _http_ts_player->waitResponse())
+                && _try_fetch_index_times >= MAX_TRY_FETCH_INDEX_TIMES) {
+                onShutdown(ex);
+            } else {
+                _try_fetch_index_times += 1;
+                shutdown(ex);
+                WarnL << "重新尝试拉取索引文件[" << _try_fetch_index_times << "]:" << _play_url;
+                fetchIndexFile();
+                return;
+            }
+        } else {
+            onShutdown(ex);
+        }
     }
     _timer.reset();
     _timer_ts.reset();
@@ -260,6 +275,14 @@ void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener) 
     }, poller);
 }
 
+void HlsDemuxer::pushTask(std::function<void()> task) {
+    int64_t stamp = 0;
+    if (!_frame_cache.empty()) {
+        stamp = _frame_cache.back().first;
+    }
+    _frame_cache.emplace_back(std::make_pair(stamp, std::move(task)));
+}
+
 bool HlsDemuxer::inputFrame(const Frame::Ptr &frame) {
     //为了避免track准备时间过长, 因此在没准备好之前, 直接消费掉所有的帧
     if (!_delegate.isAllTrackReady()) {
@@ -272,12 +295,15 @@ bool HlsDemuxer::inputFrame(const Frame::Ptr &frame) {
         setPlayPosition(frame->dts());
     }
     //根据时间戳缓存frame
-    _frame_cache.emplace(frame->dts(), Frame::getCacheAbleFrame(frame));
+    auto cached_frame = Frame::getCacheAbleFrame(frame);
+    _frame_cache.emplace_back(std::make_pair(frame->dts(), [cached_frame, this]() {
+        _delegate.inputFrame(cached_frame);
+    }));
 
     if (getBufferMS() > 30 * 1000) {
         //缓存超过30秒，强制消费至15秒(减少延时或内存占用)
         while (getBufferMS() > 15 * 1000) {
-            _delegate.inputFrame(_frame_cache.begin()->second);
+            _frame_cache.begin()->second();
             _frame_cache.erase(_frame_cache.begin());
         }
         //接着播放缓存中最早的帧
@@ -317,7 +343,7 @@ void HlsDemuxer::onTick() {
         }
 
         //消费掉已经到期的帧
-        _delegate.inputFrame(it->second);
+        it->second();
         it = _frame_cache.erase(it);
     }
 }
@@ -352,8 +378,18 @@ void HlsPlayerImp::onPlayResult(const SockException &ex) {
 }
 
 void HlsPlayerImp::onShutdown(const SockException &ex) {
-    PlayerImp<HlsPlayer, PlayerBase>::onShutdown(ex);
-    _demuxer = nullptr;
+    if (_demuxer) {
+        std::weak_ptr<HlsPlayerImp> weak_self = static_pointer_cast<HlsPlayerImp>(shared_from_this());
+        static_pointer_cast<HlsDemuxer>(_demuxer)->pushTask([weak_self, ex]() {
+            auto strong_self = weak_self.lock();
+            if (strong_self) {
+                strong_self->_demuxer = nullptr;
+                strong_self->onShutdown(ex);
+            }
+        });
+    } else {
+        PlayerImp<HlsPlayer, PlayerBase>::onShutdown(ex);
+    }
 }
 
 vector<Track::Ptr> HlsPlayerImp::getTracks(bool ready) const {

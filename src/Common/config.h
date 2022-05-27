@@ -187,6 +187,10 @@ extern const std::string kTSDemand;
 extern const std::string kFMP4Demand;
 //转协议是否全局开启或忽略音频
 extern const std::string kEnableAudio;
+//在docker环境下，不能通过英伟达驱动是否存在来判断是否支持硬件转码
+extern const std::string kCheckNvidiaDev;
+//是否开启ffmpeg日志
+extern const std::string kEnableFFmpegLog;
 //最多等待未初始化的Track 10秒，超时之后会忽略未初始化的Track
 extern const std::string kWaitTrackReadyMS;
 //如果直播流只有单Track，最多等待3秒，超时后未收到其他Track的数据，则认为是单Track
@@ -299,6 +303,8 @@ namespace Hls {
 extern const std::string kSegmentDuration;
 //m3u8文件中HLS切片个数，如果设置为0，则不删除切片，而是保存为点播
 extern const std::string kSegmentNum;
+//如果设置为0，则不保留切片，设置为1则一直保留切片
+extern const std::string kSegmentKeep;
 //HLS切片从m3u8文件中移除后，继续保留在磁盘上的个数
 extern const std::string kSegmentRetain;
 //HLS文件写缓存大小

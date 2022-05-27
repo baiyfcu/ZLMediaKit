@@ -60,6 +60,9 @@ void WebRtcTransport::onCreate(){
 }
 
 void WebRtcTransport::onDestory(){
+#ifdef ENABLE_SCTP
+    _sctp = nullptr;
+#endif
     _dtls_transport = nullptr;
     _ice_server = nullptr;
 }
@@ -112,6 +115,10 @@ void WebRtcTransport::OnDtlsTransportConnected(
     InfoL;
     _srtp_session_send = std::make_shared<RTC::SrtpSession>(RTC::SrtpSession::Type::OUTBOUND, srtpCryptoSuite, srtpLocalKey, srtpLocalKeyLen);
     _srtp_session_recv = std::make_shared<RTC::SrtpSession>(RTC::SrtpSession::Type::INBOUND, srtpCryptoSuite, srtpRemoteKey, srtpRemoteKeyLen);
+#ifdef ENABLE_SCTP
+    _sctp = std::make_shared<RTC::SctpAssociationImp>(getPoller(), this, 128, 128, 262144, true);
+    _sctp->TransportConnected();
+#endif
     onStartWebRTC();
 }
 
@@ -134,8 +141,44 @@ void WebRtcTransport::OnDtlsTransportClosed(const RTC::DtlsTransport *dtlsTransp
 }
 
 void WebRtcTransport::OnDtlsTransportApplicationDataReceived(const RTC::DtlsTransport *dtlsTransport, const uint8_t *data, size_t len) {
+#ifdef ENABLE_SCTP
+    _sctp->ProcessSctpData(data, len);
+#else
     InfoL << hexdump(data, len);
+#endif
 }
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#ifdef ENABLE_SCTP
+void WebRtcTransport::OnSctpAssociationConnecting(RTC::SctpAssociation* sctpAssociation) {
+    TraceL;
+}
+
+void WebRtcTransport::OnSctpAssociationConnected(RTC::SctpAssociation* sctpAssociation) {
+    InfoL << getIdentifier();
+}
+
+void WebRtcTransport::OnSctpAssociationFailed(RTC::SctpAssociation* sctpAssociation) {
+    WarnL << getIdentifier();
+}
+
+void WebRtcTransport::OnSctpAssociationClosed(RTC::SctpAssociation* sctpAssociation) {
+    InfoL << getIdentifier();
+}
+
+void WebRtcTransport::OnSctpAssociationSendData(RTC::SctpAssociation* sctpAssociation, const uint8_t* data, size_t len) {
+    _dtls_transport->SendApplicationData(data, len);
+}
+
+void WebRtcTransport::OnSctpAssociationMessageReceived(RTC::SctpAssociation *sctpAssociation, uint16_t streamId,
+                                                       uint32_t ppid, const uint8_t *msg, size_t len) {
+    InfoL << getIdentifier() << " " << streamId << " " << ppid << " " << len << " " << string((char *)msg, len);
+    RTC::SctpStreamParameters params;
+    params.streamId = streamId;
+    //回显数据
+    _sctp->SendSctpMessage(params, ppid, msg, len);
+}
+#endif
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void WebRtcTransport::sendSockData(const char *buf, size_t len, RTC::TransportTuple *tuple){
@@ -231,7 +274,7 @@ static bool is_rtcp(char *buf) {
 }
 
 static string getPeerAddress(RTC::TransportTuple *tuple){
-    return SockUtil::inet_ntoa(((struct sockaddr_in *)tuple)->sin_addr) + ":" + to_string(ntohs(((struct sockaddr_in *)tuple)->sin_port));
+    return SockUtil::inet_ntoa(tuple);
 }
 
 void WebRtcTransport::inputSockData(char *buf, int len, RTC::TransportTuple *tuple) {
@@ -368,6 +411,9 @@ bool WebRtcTransportImp::canRecvRtp() const{
 void WebRtcTransportImp::onStartWebRTC() {
     //获取ssrc和pt相关信息,届时收到rtp和rtcp时分别可以根据pt和ssrc找到相关的信息
     for (auto &m_answer : _answer_sdp->media) {
+        if (m_answer.type == TrackApplication) {
+            continue;
+        }
         auto m_offer = _offer_sdp->getMedia(m_answer.type);
         auto track = std::make_shared<MediaTrack>();
 
@@ -376,7 +422,7 @@ void WebRtcTransportImp::onStartWebRTC() {
         track->answer_ssrc_rtx = m_answer.getRtxSSRC();
         track->offer_ssrc_rtp = m_offer->getRtpSSRC();
         track->offer_ssrc_rtx = m_offer->getRtxSSRC();
-        track->plan_rtp = &m_answer.plan[0];;
+        track->plan_rtp = &m_answer.plan[0];
         track->plan_rtx = m_answer.getRelatedRtxPlan(track->plan_rtp->pt);
         track->rtcp_context_send = std::make_shared<RtcpContextForSend>();
 
@@ -399,38 +445,48 @@ void WebRtcTransportImp::onStartWebRTC() {
             //rtx pt --> MediaTrack
             _pt_to_track.emplace(track->plan_rtx->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track)));
         }
-        if (m_offer->type != TrackApplication) {
-            //记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id
-            track->rtp_ext_ctx = std::make_shared<RtpExtContext>(*m_offer);
-            weak_ptr<MediaTrack> weak_track = track;
-            track->rtp_ext_ctx->setOnGetRtp([this, weak_track](uint8_t pt, uint32_t ssrc, const string &rid) {
-                //ssrc --> MediaTrack
-                auto track = weak_track.lock();
-                assert(track);
-                _ssrc_to_track[ssrc] = std::move(track);
-                InfoL << "get rtp, pt:" << (int) pt << ", ssrc:" << ssrc << ", rid:" << rid;
-            });
+        //记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id
+        track->rtp_ext_ctx = std::make_shared<RtpExtContext>(*m_offer);
+        weak_ptr<MediaTrack> weak_track = track;
+        track->rtp_ext_ctx->setOnGetRtp([this, weak_track](uint8_t pt, uint32_t ssrc, const string &rid) {
+            //ssrc --> MediaTrack
+            auto track = weak_track.lock();
+            assert(track);
+            _ssrc_to_track[ssrc] = std::move(track);
+            InfoL << "get rtp, pt:" << (int) pt << ", ssrc:" << ssrc << ", rid:" << rid;
+        });
 
-            size_t index = 0;
-            for (auto &ssrc : m_offer->rtp_ssrc_sim) {
-                //记录ssrc对应的MediaTrack
-                _ssrc_to_track[ssrc.ssrc] = track;
-                if (m_offer->rtp_rids.size() > index) {
-                    //支持firefox的simulcast, 提前映射好ssrc和rid的关系
-                    track->rtp_ext_ctx->setRid(ssrc.ssrc, m_offer->rtp_rids[index]);
-                }
-                ++index;
+        size_t index = 0;
+        for (auto &ssrc : m_offer->rtp_ssrc_sim) {
+            //记录ssrc对应的MediaTrack
+            _ssrc_to_track[ssrc.ssrc] = track;
+            if (m_offer->rtp_rids.size() > index) {
+                //支持firefox的simulcast, 提前映射好ssrc和rid的关系
+                track->rtp_ext_ctx->setRid(ssrc.ssrc, m_offer->rtp_rids[index]);
+            } else {
+                // SDP munging没有rid, 它通过group-ssrc:SIM给出ssrc列表;
+                // 系统又要有rid，这里手工生成rid，并为其绑定ssrc
+                std::string rid = "r" + std::to_string(index);
+                track->rtp_ext_ctx->setRid(ssrc.ssrc, rid);
+                if(ssrc.rtx_ssrc)
+                    track->rtp_ext_ctx->setRid(ssrc.rtx_ssrc, rid);
             }
+            ++index;
         }
     }
 }
 
 void WebRtcTransportImp::onCheckAnswer(RtcSession &sdp) {
     //修改answer sdp的ip、端口信息
-    GET_CONFIG(string, extern_ip, RTC::kExternIP);
+    GET_CONFIG_FUNC(std::vector<std::string>, extern_ips, RTC::kExternIP, [](string str){
+        std::vector<std::string> ret;
+        if (str.length())
+            ret = split(str, ",");
+        return ret;
+    });
     for (auto &m : sdp.media) {
         m.addr.reset();
-        m.addr.address = extern_ip.empty() ? SockUtil::get_local_ip() : extern_ip;
+        m.addr.address = extern_ips.empty() ? SockUtil::get_local_ip() : extern_ips[0];
         m.rtcp_addr.reset();
         m.rtcp_addr.address = m.addr.address;
 
@@ -478,27 +534,47 @@ void WebRtcTransportImp::onCheckSdp(SdpType type, RtcSession &sdp) {
     }
 }
 
-void WebRtcTransportImp::onRtcConfigure(RtcConfigure &configure) const {
-    WebRtcTransport::onRtcConfigure(configure);
-    //添加接收端口candidate信息
-    configure.addCandidate(*getIceCandidate());
-}
-
-SdpAttrCandidate::Ptr WebRtcTransportImp::getIceCandidate() const{
+SdpAttrCandidate::Ptr makeIceCandidate(std::string ip, uint16_t port, 
+    uint32_t priority = 100, std::string proto = "udp") {
     auto candidate = std::make_shared<SdpAttrCandidate>();
-    candidate->foundation = "udpcandidate";
     //rtp端口
     candidate->component = 1;
-    candidate->transport = "udp";
+    candidate->transport = proto;
+    candidate->foundation = proto + "candidate";
     //优先级，单candidate时随便
-    candidate->priority = 100;
-    GET_CONFIG(string, extern_ip, RTC::kExternIP);
-    candidate->address = extern_ip.empty() ? SockUtil::get_local_ip() : extern_ip;
-    GET_CONFIG(uint16_t, local_port, RTC::kPort);
-    candidate->port = local_port;
+    candidate->priority = priority;
+    candidate->address = ip;
+    candidate->port = port;
     candidate->type = "host";
     return candidate;
 }
+
+void WebRtcTransportImp::onRtcConfigure(RtcConfigure &configure) const {
+    WebRtcTransport::onRtcConfigure(configure);
+    
+    GET_CONFIG(uint16_t, local_port, RTC::kPort);
+    //添加接收端口candidate信息
+    GET_CONFIG_FUNC(std::vector<std::string>, extern_ips, RTC::kExternIP, [](string str){
+        std::vector<std::string> ret;
+        if (str.length())
+            ret = split(str, ",");
+        return ret;
+    });
+    if (extern_ips.empty()) {
+        std::string localIp = SockUtil::get_local_ip();
+        configure.addCandidate(*makeIceCandidate(localIp, local_port, 120, "udp"));
+    }
+    else {
+        const uint32_t delta = 10;
+        uint32_t priority = 100 + delta * extern_ips.size();
+        for (auto ip : extern_ips) {
+            configure.addCandidate(*makeIceCandidate(ip, local_port, priority, "udp"));
+            priority -= delta;
+        }
+    }
+}
+
+
 
 ///////////////////////////////////////////////////////////////////
 
