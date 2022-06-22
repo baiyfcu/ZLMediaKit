@@ -368,7 +368,7 @@ Value makeMediaSourceJson(MediaSource &media){
     return item;
 }
 
-uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable_tcp, const char *local_ip, bool re_use_port, uint32_t ssrc) {
+uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable_tcp, const string &local_ip, bool re_use_port, uint32_t ssrc) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     if (s_rtpServerMap.find(stream_id) != s_rtpServerMap.end()) {
         //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
@@ -376,7 +376,7 @@ uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable
     }
 
     RtpServer::Ptr server = std::make_shared<RtpServer>();
-    server->start(local_port, stream_id, enable_tcp, local_ip, re_use_port, ssrc);
+    server->start(local_port, stream_id, enable_tcp, local_ip.c_str(), re_use_port, ssrc);
     server->setOnDetach([stream_id]() {
         //设置rtp超时移除事件
         lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
