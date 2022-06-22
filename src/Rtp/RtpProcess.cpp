@@ -119,7 +119,7 @@ bool RtpProcess::inputFrame(const Frame::Ptr &frame) {
         return _muxer->inputFrame(frame);
     }
     if (_cached_func.size() > kMaxCachedFrame) {
-        WarnL << "cached frame of track(" << frame->getCodecName() << ") is too much, now dropped";
+        WarnL << "cached frame of track(" << frame->getCodecName() << ") is too much, now dropped, please check your on_publish hook url in config.ini file";
         return false;
     }
     auto frame_cached = Frame::getCacheAbleFrame(frame);
@@ -275,6 +275,10 @@ string RtpProcess::getOriginUrl(MediaSource &sender) const {
 
 std::shared_ptr<SockInfo> RtpProcess::getOriginSock(MediaSource &sender) const {
     return const_cast<RtpProcess *>(this)->shared_from_this();
+}
+
+toolkit::EventPoller::Ptr RtpProcess::getOwnerPoller(MediaSource &sender) {
+    return _sock ? _sock->getPoller() : nullptr;
 }
 
 }//namespace mediakit

@@ -333,6 +333,8 @@ Value makeMediaSourceJson(MediaSource &media){
         item["originSock"] = Json::nullValue;
     }
 
+    //getLossRate有线程安全问题；使用getMediaInfo接口才能获取丢包率；getMediaList接口将忽略丢包率
+    auto current_thread = media.getOwnerPoller()->isCurrentThread();
     for(auto &track : media.getTracks(false)){
         Value obj;
         auto codec_type = track->getTrackType();
@@ -340,6 +342,9 @@ Value makeMediaSourceJson(MediaSource &media){
         obj["codec_id_name"] = track->getCodecName();
         obj["ready"] = track->ready();
         obj["codec_type"] = codec_type;
+        if (current_thread) {
+            obj["loss"] = media.getLossRate(codec_type);
+        }
         switch(codec_type){
             case TrackAudio : {
                 auto audio_track = dynamic_pointer_cast<AudioTrack>(track);
@@ -384,7 +389,7 @@ uint16_t openRtpServer(uint16_t local_port, const string &stream_id, bool enable
     return server->getPort();
 }
 
-bool closeRtpServer(const string& stream_id) {
+bool closeRtpServer(const string &stream_id) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     auto it = s_rtpServerMap.find(stream_id);
     if (it == s_rtpServerMap.end()) {
@@ -729,22 +734,23 @@ void installWebApi() {
     });
 
     //测试url http://127.0.0.1/index/api/getMediaInfo?schema=rtsp&vhost=__defaultVhost__&app=live&stream=obs
-    api_regist("/index/api/getMediaInfo",[](API_ARGS_MAP){
+    api_regist("/index/api/getMediaInfo",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("schema","vhost","app","stream");
         auto src = MediaSource::find(allArgs["schema"],allArgs["vhost"],allArgs["app"],allArgs["stream"]);
         if(!src){
-            val["online"] = false;
-            return;
+            throw ApiRetException("can not find the stream", API::NotFound);
         }
-        val = makeMediaSourceJson(*src);
-        val["online"] = true;
-        val["code"] = API::Success;
+        src->getOwnerPoller()->async([=]() mutable {
+            auto val = makeMediaSourceJson(*src);
+            val["code"] = API::Success;
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     //主动关断流，包括关断拉流、推流
     //测试url http://127.0.0.1/index/api/close_stream?schema=rtsp&vhost=__defaultVhost__&app=live&stream=obs&force=1
-    api_regist("/index/api/close_stream",[](API_ARGS_MAP){
+    api_regist("/index/api/close_stream",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("schema","vhost","app","stream");
         //踢掉推流器
@@ -752,16 +758,18 @@ void installWebApi() {
                                      allArgs["vhost"],
                                      allArgs["app"],
                                      allArgs["stream"]);
-        if (src) {
-            bool flag = src->close(allArgs["force"].as<bool>());
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        bool force = allArgs["force"].as<bool>();
+        src->getOwnerPoller()->async([=]() mutable {
+            bool flag = src->close(force);
             val["result"] = flag ? 0 : -1;
             val["msg"] = flag ? "success" : "close failed";
             val["code"] = flag ? API::Success : API::OtherFailed;
-        } else {
-            val["result"] = -2;
-            val["msg"] = "can not find the stream";
-            val["code"] = API::OtherFailed;
-        }
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     //批量主动关断流，包括关断拉流、推流
@@ -778,8 +786,8 @@ void installWebApi() {
         }, allArgs["schema"], allArgs["vhost"], allArgs["app"], allArgs["stream"]);
 
         bool force = allArgs["force"].as<bool>();
-        for(auto &media : media_list){
-            if(media->close(force)){
+        for (auto &media : media_list) {
+            if (media->close(force)) {
                 ++count_closed;
             }
         }
@@ -808,7 +816,7 @@ void installWebApi() {
             jsession["local_ip"] = session->get_local_ip();
             jsession["local_port"] = session->get_local_port();
             jsession["id"] = id;
-            jsession["typeid"] = typeid(*session).name();
+            jsession["typeid"] = toolkit::demangle(typeid(*session).name());
             val["data"].append(jsession);
         });
     });
@@ -1083,7 +1091,6 @@ void installWebApi() {
         auto port = openRtpServer(allArgs["port"], stream_id, allArgs["enable_tcp"].as<bool>(), "::",
                       allArgs["re_use_port"].as<bool>(), allArgs["ssrc"].as<uint32_t>());
         if(port == 0) {
-            //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
             throw InvalidArgsException("该stream_id已存在");
         }
         //回复json
@@ -1117,6 +1124,11 @@ void installWebApi() {
         CHECK_SECRET();
         CHECK_ARGS("vhost", "app", "stream", "ssrc", "dst_url", "dst_port", "is_udp");
 
+        auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
+        if (!src) {
+            throw ApiRetException("can not find the source stream", API::NotFound);
+        }
+
         MediaSourceEvent::SendRtpArgs args;
         args.passive = false;
         args.dst_url = allArgs["dst_url"];
@@ -1127,45 +1139,9 @@ void installWebApi() {
         args.pt = allArgs["pt"].empty() ? 96 : allArgs["pt"].as<int>();
         args.use_ps = allArgs["use_ps"].empty() ? true : allArgs["use_ps"].as<bool>();
         args.only_audio = allArgs["only_audio"].empty() ? false : allArgs["only_audio"].as<bool>();
-        TraceL << "startSendRtp, pt " << int(args.pt) << " ps " << args.use_ps << " audio " <<  args.only_audio;
+        TraceL << "startSendRtp, pt " << int(args.pt) << " ps " << args.use_ps << " audio " << args.only_audio;
 
-        bool isAsync = false;
-        if (checkArgs(allArgs, "is_async"))
-            isAsync = allArgs["is_async"];
-        if (isAsync)
-        {
-            MediaInfo info = {};
-            info._vhost = allArgs["vhost"];
-            info._app = allArgs["app"];
-            info._streamid = allArgs["stream"];
-            info._schema = RTSP_SCHEMA;
-            auto session = static_cast<TcpSession*>(&sender);
-            auto session_ptr = session->shared_from_this();
-
-            MediaSource::findAsync(info, session_ptr, [=](const MediaSource::Ptr& src_in) mutable {
-                if (!src_in) {
-                    val["code"] = API::OtherFailed;
-                    val["msg"] = "该媒体流不存在";
-                    invoker(200, headerOut, val.toStyledString());
-                    return;
-                }
-                auto src = dynamic_pointer_cast<RtspMediaSource>(src_in);
-                //src_port为空时，则随机本地端口
-                src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
-                    if (ex) {
-                        val["code"] = API::OtherFailed;
-                        val["msg"] = ex.what();
-                    }
-                    val["local_port"] = local_port;
-                    invoker(200, headerOut, val.toStyledString());
-                    });
-            });
-        }else {
-            auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
-            if (!src) {
-                throw ApiRetException("该媒体流不存在", API::OtherFailed);
-            }
-
+        src->getOwnerPoller()->async([=]() mutable {
             src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
                 if (ex) {
                     val["code"] = API::OtherFailed;
@@ -1174,7 +1150,7 @@ void installWebApi() {
                 val["local_port"] = local_port;
                 invoker(200, headerOut, val.toStyledString());
             });
-        }
+        });
     });
 
     api_regist("/index/api/startSendRtpPassive",[](API_ARGS_MAP_ASYNC){
@@ -1183,7 +1159,7 @@ void installWebApi() {
 
         auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"], allArgs["from_mp4"].as<int>());
         if (!src) {
-            throw ApiRetException("该媒体流不存在", API::OtherFailed);
+            throw ApiRetException("can not find the source stream", API::NotFound);
         }
 
         MediaSourceEvent::SendRtpArgs args;
@@ -1195,29 +1171,38 @@ void installWebApi() {
         args.use_ps = allArgs["use_ps"].empty() ? true : allArgs["use_ps"].as<bool>();
         args.only_audio = allArgs["only_audio"].empty() ? false : allArgs["only_audio"].as<bool>();
         TraceL << "startSendRtpPassive, pt " << int(args.pt) << " ps " << args.use_ps << " audio " <<  args.only_audio;
-        src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
-            if (ex) {
-                val["code"] = API::OtherFailed;
-                val["msg"] = ex.what();
-            }
-            val["local_port"] = local_port;
-            invoker(200, headerOut, val.toStyledString());
+
+        src->getOwnerPoller()->async([=]() mutable {
+            src->startSendRtp(args, [val, headerOut, invoker](uint16_t local_port, const SockException &ex) mutable {
+                if (ex) {
+                    val["code"] = API::OtherFailed;
+                    val["msg"] = ex.what();
+                }
+                val["local_port"] = local_port;
+                invoker(200, headerOut, val.toStyledString());
+            });
         });
     });
 
-    api_regist("/index/api/stopSendRtp",[](API_ARGS_MAP){
+    api_regist("/index/api/stopSendRtp",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("vhost", "app", "stream");
 
         auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"]);
         if (!src) {
-            throw ApiRetException("该媒体流不存在", API::OtherFailed);
+            throw ApiRetException("can not find the stream", API::NotFound);
         }
 
-        //ssrc如果为空，关闭全部
-        if (!src->stopSendRtp(allArgs["ssrc"])) {
-            throw ApiRetException("尚未开始推流,停止失败", API::OtherFailed);
-        }
+        src->getOwnerPoller()->async([=]() mutable {
+            // ssrc如果为空，关闭全部
+            if (!src->stopSendRtp(allArgs["ssrc"])) {
+                val["code"] = API::OtherFailed;
+                val["msg"] = "stopSendRtp failed";
+                invoker(200, headerOut, val.toStyledString());
+                return;
+            }
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     api_regist("/index/api/pauseRtpCheck", [](API_ARGS_MAP) {
@@ -1246,80 +1231,102 @@ void installWebApi() {
 #endif//ENABLE_RTPPROXY
 
     // 开始录制hls或MP4
-    api_regist("/index/api/startRecord",[](API_ARGS_MAP){
+    api_regist("/index/api/startRecord",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("type","vhost","app","stream");
-        auto result = Recorder::startRecord((Recorder::type) allArgs["type"].as<int>(),
-                                            allArgs["vhost"],
-                                            allArgs["app"],
-                                            allArgs["stream"],
-                                            allArgs["customized_path"],
-                                            allArgs["max_second"].as<size_t>());
-        val["result"] = result;
-        val["code"] = result ? API::Success : API::OtherFailed;
-        val["msg"] = result ? "success" :  "start record failed";
+
+        auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"] );
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        src->getOwnerPoller()->async([=]() mutable {
+            auto result = src->setupRecord((Recorder::type)allArgs["type"].as<int>(), true, allArgs["customized_path"], allArgs["max_second"].as<size_t>());
+            val["result"] = result;
+            val["code"] = result ? API::Success : API::OtherFailed;
+            val["msg"] = result ? "success" :  "start record failed";
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
     
     //设置录像流播放速度
-    api_regist("/index/api/setRecordSpeed", [](API_ARGS_MAP) {
+    api_regist("/index/api/setRecordSpeed", [](API_ARGS_MAP_ASYNC) {
         CHECK_SECRET();
         CHECK_ARGS("schema", "vhost", "app", "stream", "speed");
         auto src = MediaSource::find(allArgs["schema"],
                                      allArgs["vhost"],
                                      allArgs["app"],
                                      allArgs["stream"]);
-        if (src) {
-            bool flag = src->speed(allArgs["speed"].as<float>());
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        auto speed = allArgs["speed"].as<float>();
+        src->getOwnerPoller()->async([=]() mutable {
+            bool flag = src->speed(speed);
             val["result"] = flag ? 0 : -1;
             val["msg"] = flag ? "success" : "set failed";
             val["code"] = flag ? API::Success : API::OtherFailed;
-        } else {
-            val["result"] = -2;
-            val["msg"] = "can not find the stream";
-            val["code"] = API::OtherFailed;
-        }
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
-    api_regist("/index/api/seekRecordStamp", [](API_ARGS_MAP) {
+    api_regist("/index/api/seekRecordStamp", [](API_ARGS_MAP_ASYNC) {
         CHECK_SECRET();
         CHECK_ARGS("schema", "vhost", "app", "stream", "stamp");
         auto src = MediaSource::find(allArgs["schema"],
                                      allArgs["vhost"],
                                      allArgs["app"],
                                      allArgs["stream"]);
-        if (src) {
-            bool flag = src->seekTo(allArgs["stamp"].as<size_t>());
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        auto stamp = allArgs["stamp"].as<size_t>();
+        src->getOwnerPoller()->async([=]() mutable {
+            bool flag = src->seekTo(stamp);
             val["result"] = flag ? 0 : -1;
             val["msg"] = flag ? "success" : "seek failed";
             val["code"] = flag ? API::Success : API::OtherFailed;
-        } else {
-            val["result"] = -2;
-            val["msg"] = "can not find the stream";
-            val["code"] = API::OtherFailed;
-        }
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     // 停止录制hls或MP4
-    api_regist("/index/api/stopRecord",[](API_ARGS_MAP){
+    api_regist("/index/api/stopRecord",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("type","vhost","app","stream");
-        auto result = Recorder::stopRecord((Recorder::type) allArgs["type"].as<int>(),
-                                             allArgs["vhost"],
-                                             allArgs["app"],
-                                             allArgs["stream"]);
-        val["result"] = result;
-        val["code"] = result ? API::Success : API::OtherFailed;
-        val["msg"] = result ? "success" :  "stop record failed";
+
+        auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"] );
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        auto type = (Recorder::type)allArgs["type"].as<int>();
+        src->getOwnerPoller()->async([=]() mutable {
+            auto result = src->setupRecord(type, false, "", 0);
+            val["result"] = result;
+            val["code"] = result ? API::Success : API::OtherFailed;
+            val["msg"] = result ? "success" : "stop record failed";
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     // 获取hls或MP4录制状态
-    api_regist("/index/api/isRecording",[](API_ARGS_MAP){
+    api_regist("/index/api/isRecording",[](API_ARGS_MAP_ASYNC){
         CHECK_SECRET();
         CHECK_ARGS("type","vhost","app","stream");
-        val["status"] = Recorder::isRecording((Recorder::type) allArgs["type"].as<int>(),
-                                              allArgs["vhost"],
-                                              allArgs["app"],
-                                              allArgs["stream"]);
+
+        auto src = MediaSource::find(allArgs["vhost"], allArgs["app"], allArgs["stream"]);
+        if (!src) {
+            throw ApiRetException("can not find the stream", API::NotFound);
+        }
+
+        auto type = (Recorder::type)allArgs["type"].as<int>();
+        src->getOwnerPoller()->async([=]() mutable {
+            val["status"] = src->isRecording(type);
+            invoker(200, headerOut, val.toStyledString());
+        });
     });
 
     //获取录像文件夹列表或mp4文件列表
@@ -1618,11 +1625,7 @@ void installWebApi() {
         //录制mp4分片完毕事件
     });
 
-    api_regist("/index/hook/on_record_hls",[](API_ARGS_MAP){
-        //录制hls分片完毕事件
-    });
-
-    api_regist("/index/hook/on_shell_login",[](API_ARGS_MAP){
+    api_regist("/index/hook/on_shell_login",[](API_ARGS_JSON){
         //shell登录调试事件
     });
 

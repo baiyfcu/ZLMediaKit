@@ -80,6 +80,7 @@ private:
     std::string getOriginUrl(MediaSource &sender) const override;
     // 获取媒体源客户端相关信息
     std::shared_ptr<SockInfo> getOriginSock(MediaSource &sender) const override;
+    toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
 
     void setSocketFlags();
     std::string getStreamId(const std::string &str);
@@ -89,6 +90,8 @@ private:
 private:
     bool _set_meta_data = false;
     double _recv_req_id = 0;
+    //断连续推延时
+    uint32_t _continue_push_ms = 0;
     //消耗的总流量
     uint64_t _total_bytes = 0;
     std::string _tc_url;

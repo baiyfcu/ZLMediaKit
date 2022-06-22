@@ -612,7 +612,11 @@ public:
     }
 
     int getLossRate() {
-        return _rtcp_context.geLostInterval() * 100 / _rtcp_context.getExpectedPacketsInterval();
+        auto expected =  _rtcp_context.getExpectedPacketsInterval();
+        if (!expected) {
+            return 0;
+        }
+        return _rtcp_context.geLostInterval() * 100 / expected;
     }
 
 private:
@@ -653,6 +657,20 @@ std::shared_ptr<RtpChannel> MediaTrack::getRtpChannel(uint32_t ssrc) const{
         return nullptr;
     }
     return it_chn->second;
+}
+
+int WebRtcTransportImp::getLossRate(mediakit::TrackType type) {
+    for (auto &pr : _ssrc_to_track) {
+        auto ssrc = pr.first;
+        auto &track = pr.second;
+        auto rtp_chn = track->getRtpChannel(ssrc);
+        if (rtp_chn) {
+            if (track->media && type == track->media->type) {
+                return rtp_chn->getLossRate();
+            }
+        }
+    }
+    return -1;
 }
 
 void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
@@ -1086,7 +1104,7 @@ void push_plugin(Session &sender, const string &offer_sdp, const WebRtcArgs &arg
             push_src_ownership = push_src->getOwnership();
             push_src->setProtocolOption(option);
         }
-        auto rtc = WebRtcPusher::create(EventPollerPool::Instance().getPoller(), push_src, push_src_ownership, info);
+        auto rtc = WebRtcPusher::create(EventPollerPool::Instance().getPoller(), push_src, push_src_ownership, info, option);
         push_src->setListener(rtc);
         cb(*rtc);
     };

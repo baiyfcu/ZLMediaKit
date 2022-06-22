@@ -18,7 +18,7 @@ public:
     using Ptr = std::shared_ptr<WebRtcPusher>;
     ~WebRtcPusher() override = default;
     static Ptr create(const EventPoller::Ptr &poller, const mediakit::RtspMediaSourceImp::Ptr &src,
-                      const std::shared_ptr<void> &ownership, const mediakit::MediaInfo &info);
+                      const std::shared_ptr<void> &ownership, const mediakit::MediaInfo &info, const mediakit::ProtocolOption &option);
 
 protected:
     ///////WebRtcTransportImp override///////
@@ -39,13 +39,19 @@ protected:
     std::string getOriginUrl(mediakit::MediaSource &sender) const override;
     // 获取媒体源客户端相关信息
     std::shared_ptr<SockInfo> getOriginSock(mediakit::MediaSource &sender) const override;
+    // 获取丢包率
+    int getLossRate(mediakit::MediaSource &sender,mediakit::TrackType type) override;
+    // 获取MediaSource归属线程
+    toolkit::EventPoller::Ptr getOwnerPoller(mediakit::MediaSource &sender) override;
 
 private:
     WebRtcPusher(const EventPoller::Ptr &poller, const mediakit::RtspMediaSourceImp::Ptr &src,
-                 const std::shared_ptr<void> &ownership, const mediakit::MediaInfo &info);
+                 const std::shared_ptr<void> &ownership, const mediakit::MediaInfo &info, const mediakit::ProtocolOption &option);
 
 private:
     bool _simulcast = false;
+    //断连续推延时
+    uint32_t _continue_push_ms = 0;
     //媒体相关元数据
     mediakit::MediaInfo _media_info;
     //推流的rtsp源

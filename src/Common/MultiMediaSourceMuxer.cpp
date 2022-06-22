@@ -26,11 +26,14 @@ ProtocolOption::ProtocolOption() {
     GET_CONFIG(bool, s_to_mp4, General::kPublishToMP4);
     GET_CONFIG(bool, s_enabel_audio, General::kEnableAudio);
     GET_CONFIG(bool, s_add_mute_audio, General::kAddMuteAudio);
+    GET_CONFIG(uint32_t, s_continue_push_ms, General::kContinuePushMS);
+
 
     enable_hls = s_to_hls;
     enable_mp4 = s_to_mp4;
     enable_audio = s_enabel_audio;
     add_mute_audio = s_add_mute_audio;
+    continue_push_ms = s_continue_push_ms;
 }
 
 static std::shared_ptr<MediaSinkInterface> makeRecorder(MediaSource &sender, const vector<Track::Ptr> &tracks, Recorder::type type, const string &custom_path, size_t max_second){
@@ -137,16 +140,13 @@ void MultiMediaSourceMuxer::setTrackListener(const std::weak_ptr<Listener> &list
 
 int MultiMediaSourceMuxer::totalReaderCount() const {
     auto hls = _hls;
-    auto hls_disk = _hls_disk;
     auto ret = (_rtsp ? _rtsp->readerCount() : 0) +
                (_rtmp ? _rtmp->readerCount() : 0) +
                (_ts ? _ts->readerCount() : 0) +
                #if defined(ENABLE_MP4)
                (_fmp4 ? _fmp4->readerCount() : 0) +
-               (_mp4 ? 1 : 0) +
                #endif
-               (hls ? hls->readerCount() : 0) +
-               (hls_disk ? 1 : 0);
+               (hls ? hls->readerCount() : 0);
 
 #if defined(ENABLE_RTPPROXY)
     return ret + (int)_rtp_sender.size();
@@ -174,7 +174,6 @@ int MultiMediaSourceMuxer::totalReaderCount(MediaSource &sender) {
 
 //此函数可能跨线程调用
 bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type, bool start, const string &custom_path, size_t max_second) {
-    bool ret = false;
     switch (type) {
         case Recorder::type_hls : {
             if (start && !_hls) {
@@ -189,8 +188,7 @@ bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type
                 //停止录制
                 _hls = nullptr;
             }
-            ret = true;
-            goto ret;
+            return true;
         }
         case Recorder::type_mp4 : {
             if (start && !_mp4) {
@@ -200,28 +198,10 @@ bool MultiMediaSourceMuxer::setupRecord(MediaSource &sender, Recorder::type type
                 //停止录制
                 _mp4 = nullptr;
             }
-            ret = true;
-            goto ret;
+            return true;
         }
-        case Recorder::type_hls_disk: {
-            if (start && !_hls_disk) {
-                // 开始录制
-                _hls_disk = makeRecorder(sender, getTracks(), type, custom_path, max_second);
-            } else if (!start && _hls_disk) {
-                // 停止录制
-                _hls_disk = nullptr;
-            }
-            ret = true;
-            goto ret;
-        }
-        default : {
-            ret = false;
-            goto ret;
-        }
+        default : return false;
     }
-ret:
-    MediaSourceEventInterceptor::onReaderChanged(sender, totalReaderCount());
-    return ret;
 }
 
 //此函数可能跨线程调用
@@ -231,8 +211,6 @@ bool MultiMediaSourceMuxer::isRecording(MediaSource &sender, Recorder::type type
             return !!_hls;
         case Recorder::type_mp4 :
             return !!_mp4;
-        case Recorder::type_hls_disk:
-            return !!_hls_disk;
         default:
             return false;
     }
@@ -252,7 +230,6 @@ void MultiMediaSourceMuxer::startSendRtp(MediaSource &, const MediaSourceEvent::
             rtp_sender->addTrack(track);
         }
         rtp_sender->addTrackCompleted();
-        lock_guard<mutex> lck(strong_self->_rtp_sender_mtx);
         strong_self->_rtp_sender[args.ssrc] = rtp_sender;
     });
 #else
@@ -271,13 +248,11 @@ bool MultiMediaSourceMuxer::stopSendRtp(MediaSource &sender, const string &ssrc)
     }
     if (ssrc.empty()) {
         //关闭全部
-        lock_guard<mutex> lck(_rtp_sender_mtx);
         auto size = _rtp_sender.size();
         _rtp_sender.clear();
         return size;
     }
     //关闭特定的
-    lock_guard<mutex> lck(_rtp_sender_mtx);
     return _rtp_sender.erase(ssrc);
 #else
     return false;
@@ -315,17 +290,10 @@ bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
     if (hls) {
         ret = hls->addTrack(track) ? true : ret;
     }
-
     auto mp4 = _mp4;
     if (mp4) {
         ret = mp4->addTrack(track) ? true : ret;
     }
-
-    auto hls_disk = _hls_disk;
-    if (hls_disk) {
-        ret = hls_disk->addTrack(track) ? true : ret;
-    }
-
     return ret;
 }
 
@@ -369,7 +337,6 @@ void MultiMediaSourceMuxer::resetTracks() {
 #endif
 
 #if defined(ENABLE_RTPPROXY)
-    lock_guard<mutex> lck(_rtp_sender_mtx);
     for (auto &pr : _rtp_sender) {
         pr.second->resetTracks();
     }
@@ -384,11 +351,6 @@ void MultiMediaSourceMuxer::resetTracks() {
     auto mp4 = _mp4;
     if (mp4) {
         mp4->resetTracks();
-    }
-
-    auto hls_disk = _hls_disk;
-    if (hls_disk) {
-        hls_disk->resetTracks();
     }
 }
 
@@ -469,15 +431,9 @@ bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
     if (hls) {
         ret = hls->inputFrame(frame) ? true : ret;
     }
-
     auto mp4 = _mp4;
     if (mp4) {
         ret = mp4->inputFrame(frame) ? true : ret;
-    }
-
-    auto hls_disk = _hls_disk;
-    if (hls_disk) {
-        ret = hls_disk->inputFrame(frame) ? true : ret;
     }
 
 #if defined(ENABLE_MP4)
@@ -487,7 +443,6 @@ bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
 #endif
 
 #if defined(ENABLE_RTPPROXY)
-    lock_guard<mutex> lck(_rtp_sender_mtx);
     for (auto &pr : _rtp_sender) {
         ret = pr.second->inputFrame(frame) ? true : ret;
     }

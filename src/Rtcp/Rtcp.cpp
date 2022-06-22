@@ -206,8 +206,7 @@ vector<RtcpHeader *> RtcpHeader::loadFromBytes(char *data, size_t len) {
         RtcpHeader *rtcp = (RtcpHeader *) ptr;
         auto rtcp_len = rtcp->getSize();
         if (remain < (ssize_t) rtcp_len) {
-            //WarnL << "非法的rtcp包,声明的长度超过实际数据长度";
-
+            WarnL << "非法的rtcp包,声明的长度超过实际数据长度";
             break;
         }
         try {

@@ -45,9 +45,10 @@ const string kOnStreamNoneReader = HOOK_FIELD"on_stream_none_reader";
 const string kOnHttpAccess = HOOK_FIELD"on_http_access";
 const string kOnServerStarted = HOOK_FIELD"on_server_started";
 const string kOnServerKeepalive = HOOK_FIELD"on_server_keepalive";
-const string kOnRecordHls = HOOK_FIELD"on_record_hls";
 const string kAdminParams = HOOK_FIELD"admin_params";
 const string kAliveInterval = HOOK_FIELD"alive_interval";
+const string kRetry = HOOK_FIELD"retry";
+const string kRetryDelay = HOOK_FIELD"retry_delay";
 
 onceToken token([](){
     mINI::Instance()[kEnable] = false;
@@ -67,9 +68,10 @@ onceToken token([](){
     mINI::Instance()[kOnHttpAccess] = "";
     mINI::Instance()[kOnServerStarted] = "";
     mINI::Instance()[kOnServerKeepalive] = "";
-    mINI::Instance()[kOnRecordHls] = "";
     mINI::Instance()[kAdminParams] = "secret=035c73f7-bb6b-4889-a715-d9eb2d1925cc";
     mINI::Instance()[kAliveInterval] = 30.0;
+    mINI::Instance()[kRetry] = 1;
+    mINI::Instance()[kRetryDelay] = 3.0;
 },nullptr);
 }//namespace Hook
 
@@ -77,10 +79,12 @@ namespace Cluster {
 #define CLUSTER_FIELD "cluster."
 const string kOriginUrl = CLUSTER_FIELD "origin_url";
 const string kTimeoutSec = CLUSTER_FIELD "timeout_sec";
+const string kRetryCount = CLUSTER_FIELD "retry_count";
 
 static onceToken token([]() {
     mINI::Instance()[kOriginUrl] = "";
     mINI::Instance()[kTimeoutSec] = 15;
+    mINI::Instance()[kRetryCount] = 3;
 });
 
 }//namespace Cluster
@@ -147,9 +151,10 @@ string getVhost(const HttpArgs &value) {
     return val != value.end() ? val->second : "";
 }
 
-void do_http_hook(const string &url,const ArgsType &body,const function<void(const Value &,const string &)> &func){
+void do_http_hook(const string &url, const ArgsType &body, const function<void(const Value &, const string &)> &func, uint32_t retry) {
     GET_CONFIG(string, mediaServerId, General::kMediaServerId);
     GET_CONFIG(float, hook_timeoutSec, Hook::kTimeoutSec);
+    GET_CONFIG(float, retry_delay, Hook::kRetryDelay);
 
     const_cast<ArgsType &>(body)["mediaServerId"] = mediaServerId;
     HttpRequester::Ptr requester(new HttpRequester);
@@ -161,23 +166,38 @@ void do_http_hook(const string &url,const ArgsType &body,const function<void(con
     if (!vhost.empty()) {
         requester->addHeader("X-VHOST", vhost);
     }
-    std::shared_ptr<Ticker> pTicker(new Ticker);
-    requester->startRequester(url, [url, func, bodyStr, requester, pTicker](const SockException &ex,
-                                                                            const Parser &res) mutable{
-        onceToken token(nullptr, [&]() mutable{
-            requester.reset();
-        });
-        parse_http_response(ex, res, [&](const Value &obj, const string &err) {
+    Ticker ticker;
+    requester->startRequester(url, [url, func, bodyStr, body, requester, ticker, retry](const SockException &ex, const Parser &res) mutable {
+            onceToken token(nullptr, [&]() mutable { requester.reset(); });
+            parse_http_response(ex, res, [&](const Value &obj, const string &err) {
+            if (!err.empty()) {
+                // hook失败
+                WarnL << "hook " << url << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << bodyStr;
+
+                if (retry-- > 0) {
+                    requester->getPoller()->doDelayTask(MAX(retry_delay, 0.0) * 1000, [url, body, func, retry] {
+                        do_http_hook(url, body, func, retry);
+                        return 0;
+                    });
+                    //重试不需要触发回调
+                    return;
+                }
+
+            } else if (ticker.elapsedTime() > 500) {
+                //hook成功，但是hook响应超过500ms，打印警告日志
+                DebugL << "hook " << url << " " << ticker.elapsedTime() << "ms,success:" << bodyStr;
+            }
+
             if (func) {
                 func(obj, err);
             }
-            if (!err.empty()) {
-                WarnL << "hook " << url << " " << pTicker->elapsedTime() << "ms,failed" << err << ":" << bodyStr;
-            } else if (pTicker->elapsedTime() > 500) {
-                DebugL << "hook " << url << " " << pTicker->elapsedTime() << "ms,success:" << bodyStr;
-            }
         });
     }, hook_timeoutSec);
+}
+
+void do_http_hook(const string &url, const ArgsType &body, const function<void(const Value &, const string &)> &func) {
+    GET_CONFIG(uint32_t, hook_retry, Hook::kRetry);
+    do_http_hook(url, body, func, hook_retry);
 }
 
 static ArgsType make_json(const MediaInfo &args){
@@ -242,6 +262,8 @@ static void pullStreamFromOrigin(const vector<string>& urls, size_t index, size_
                                  const function<void()> &closePlayer) {
 
     GET_CONFIG(float, cluster_timeout_sec, Cluster::kTimeoutSec);
+    GET_CONFIG(int, retry_count, Cluster::kRetryCount);
+
     auto url = getPullUrl(urls[index % urls.size()], args);
     auto timeout_sec = cluster_timeout_sec / urls.size();
     InfoL << "pull stream from origin, failed_cnt: " << failed_cnt << ", timeout_sec: " << timeout_sec << ", url: " << url;
@@ -250,7 +272,7 @@ static void pullStreamFromOrigin(const vector<string>& urls, size_t index, size_
     option.enable_hls =  option.enable_hls || (args._schema == HLS_SCHEMA);
     option.enable_mp4 = false;
 
-    addStreamProxy(args._vhost, args._app, args._streamid, url, -1, option, Rtsp::RTP_TCP, timeout_sec,
+    addStreamProxy(args._vhost, args._app, args._streamid, url, retry_count, option, Rtsp::RTP_TCP, timeout_sec,
                   [=](const SockException &ex, const string &key) mutable {
         if (!ex) {
             return;
@@ -320,6 +342,9 @@ void installWebHook(){
                 }
                 if (obj.isMember("enable_fmp4")) {
                     option.enable_fmp4 = obj["enable_fmp4"].asBool();
+                }
+                if (obj.isMember("continue_push_ms")) {
+                    option.continue_push_ms = obj["continue_push_ms"].asUInt();
                 }
                 invoker(err, option);
             } else {
@@ -500,20 +525,6 @@ void installWebHook(){
         do_http_hook(hook_record_mp4, getRecordInfo(info), nullptr);
     });
 #endif //ENABLE_MP4
-
-#ifdef ENABLE_HLS
-    //录制hls文件落盘成功后广播
-    NoticeCenter::Instance().addListener(nullptr,Broadcast::kBroadcastRecordHlsDisk,[](BroadcastRecordHlsDiskArgs){
-        GET_CONFIG(bool, hook_enable, Hook::kEnable)
-        GET_CONFIG(string, hook_record_hls, Hook::kOnRecordHls);
-        if(!hook_enable || hook_record_hls.empty()){
-            return;
-        }
-
-        //执行hook
-        do_http_hook(hook_record_hls, getRecordInfo(info), nullptr);
-    });
-#endif
 
     NoticeCenter::Instance().addListener(nullptr, Broadcast::kBroadcastRecordTs, [](BroadcastRecordTsArgs) {
         GET_CONFIG(string,hook_record_ts,Hook::kOnRecordTs);

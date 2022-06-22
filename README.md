@@ -7,6 +7,7 @@
 [![platform](https://img.shields.io/badge/platform-linux%20|%20macos%20|%20windows-blue.svg)](https://github.com/xia-chu/ZLMediaKit)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-yellow.svg)](https://github.com/xia-chu/ZLMediaKit/pulls)
 [![Build Status](https://travis-ci.org/xia-chu/ZLMediaKit.svg?branch=master)](https://travis-ci.org/xia-chu/ZLMediaKit)
+[![Docker](https://img.shields.io/docker/pulls/zlmediakit/zlmediakit)](https://hub.docker.com/r/zlmediakit/zlmediakit/tags)
 
 ## 项目特点
 
@@ -107,7 +108,7 @@
   - 支持rtp扩展解析
   - 支持GOP缓冲，webrtc播放秒开
   - 支持datachannel
-  
+- [SRT支持](./srt/srt.md)
 - 其他
   - 支持丰富的restful api以及web hook事件 
   - 支持简单的telnet调试
@@ -140,11 +141,8 @@
 你可以从Docker Hub下载已经编译好的镜像并启动它：
 
 ```bash
-#此镜像为zlmediakit开发团队提供，推荐
-docker run -id -p 1935:1935 -p 8080:80 -p 8554:554 -p 10000:10000 -p 10000:10000/udp -p 8000:8000/udp zlmediakit/zlmediakit:Release.last
-
-#此镜像委托第三方提供
-docker run -id -p 1935:1935 -p 8080:80 -p 8554:554 -p 10000:10000 -p 10000:10000/udp panjjo/zlmediakit
+#此镜像为github持续集成自动编译推送，跟代码(master分支)保持最新状态
+docker run -id -p 1935:1935 -p 8080:80 -p 8443:443 -p 8554:554 -p 10000:10000 -p 10000:10000/udp -p 8000:8000/udp -p 9000:9000/udp zlmediakit/zlmediakit:master
 ```
 
 你也可以根据Dockerfile编译镜像：
