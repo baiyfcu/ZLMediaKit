@@ -20,7 +20,7 @@
 
 #ifdef ENABLE_WEBRTC
 #include "jsoncpp/json.h"
-#include "mk_webrtc_api.h"
+#include "mk_webrtc_private.h"
 #endif
 
 using namespace toolkit;
@@ -241,10 +241,11 @@ API_EXPORT void API_CALL mk_media_source_find(const char *schema,
                                               const char *vhost,
                                               const char *app,
                                               const char *stream,
+                                              int from_mp4,
                                               void *user_data,
                                               on_mk_media_source_find_cb cb) {
     assert(schema && vhost && app && stream && cb);
-    auto src = MediaSource::find(schema, vhost, app, stream);
+    auto src = MediaSource::find(schema, vhost, app, stream, from_mp4);
     cb(user_data, src.get());
 }
 
