@@ -18,16 +18,9 @@
 #include <unordered_map>
 #include "amf.h"
 #include "Rtmp.h"
-#include "RtmpDemuxer.h"
-#include "Common/config.h"
 #include "Common/MediaSource.h"
-#include "Util/util.h"
-#include "Util/logger.h"
+#include "Common/PacketCache.h"
 #include "Util/RingBuffer.h"
-#include "Util/TimeTicker.h"
-#include "Util/ResourcePool.h"
-#include "Util/NoticeCenter.h"
-#include "Thread/ThreadPool.h"
 
 #define RTMP_GOP_SIZE 512
 
@@ -60,13 +53,18 @@ public:
             MediaSource(RTMP_SCHEMA, vhost, app, stream_id), _ring_size(ring_size) {
     }
 
-    ~RtmpMediaSource() override{}
+    ~RtmpMediaSource() override { flush(); }
 
     /**
      * 	获取媒体源的环形缓冲
      */
     const RingType::Ptr &getRing() const {
         return _ring;
+    }
+
+    void getPlayerList(const std::function<void(const std::list<std::shared_ptr<void>> &info_list)> &cb,
+                       const std::function<std::shared_ptr<void>(std::shared_ptr<void> &&info)> &on_change) override {
+        _ring->getInfoList(cb, on_change);
     }
 
     /**
@@ -121,68 +119,12 @@ public:
      * 输入rtmp包
      * @param pkt rtmp包
      */
-    void onWrite(RtmpPacket::Ptr pkt, bool = true) override {
-        bool is_video = pkt->type_id == MSG_VIDEO;
-        _speed[is_video ? TrackVideo : TrackAudio] += pkt->size();
-        //保存当前时间戳
-        switch (pkt->type_id) {
-            case MSG_VIDEO : _track_stamps[TrackVideo] = pkt->time_stamp, _have_video = true; break;
-            case MSG_AUDIO : _track_stamps[TrackAudio] = pkt->time_stamp, _have_audio = true; break;
-            default :  break;
-        }
-
-        if (pkt->isCfgFrame()) {
-            std::lock_guard<std::recursive_mutex> lock(_mtx);
-            _config_frame_map[pkt->type_id] = pkt;
-            if (!_ring) {
-                //注册后收到config帧更新到各播放器
-                return;
-            }
-        }
-
-        if (!_ring) {
-            std::weak_ptr<RtmpMediaSource> weakSelf = std::dynamic_pointer_cast<RtmpMediaSource>(shared_from_this());
-            auto lam = [weakSelf](int size) {
-                auto strongSelf = weakSelf.lock();
-                if (!strongSelf) {
-                    return;
-                }
-                strongSelf->onReaderChanged(size);
-            };
-
-            //GOP默认缓冲512组RTMP包，每组RTMP包时间戳相同(如果开启合并写了，那么每组为合并写时间内的RTMP包),
-            //每次遇到关键帧第一个RTMP包，则会清空GOP缓存(因为有新的关键帧了，同样可以实现秒开)
-            _ring = std::make_shared<RingType>(_ring_size,std::move(lam));
-            onReaderChanged(0);
-
-            if(_metadata){
-                regist();
-            }
-        }
-        bool key = pkt->isVideoKeyFrame();
-        auto stamp  = pkt->time_stamp;
-        PacketCache<RtmpPacket>::inputPacket(stamp, is_video, std::move(pkt), key);
-    }
+    void onWrite(RtmpPacket::Ptr pkt, bool = true) override;
 
     /**
      * 获取当前时间戳
      */
-    uint32_t getTimeStamp(TrackType trackType) override {
-        assert(trackType >= TrackInvalid && trackType < TrackMax);
-        if (trackType != TrackInvalid) {
-            //获取某track的时间戳
-            return _track_stamps[trackType];
-        }
-
-        //获取所有track的最小时间戳
-        uint32_t ret = UINT32_MAX;
-        for (auto &stamp : _track_stamps) {
-            if (stamp > 0 && stamp < ret) {
-                ret = stamp;
-            }
-        }
-        return ret;
-    }
+    uint32_t getTimeStamp(TrackType trackType) override;
 
     void clearCache() override{
         PacketCache<RtmpPacket>::clearCache();

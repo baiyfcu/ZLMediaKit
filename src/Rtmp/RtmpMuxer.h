@@ -18,15 +18,15 @@
 
 namespace mediakit{
 
-class RtmpMuxer : public MediaSinkInterface{
+class RtmpMuxer : public MediaSinkInterface {
 public:
-    typedef std::shared_ptr<RtmpMuxer> Ptr;
+    using Ptr = std::shared_ptr<RtmpMuxer>;
 
     /**
      * 构造函数
      */
     RtmpMuxer(const TitleMeta::Ptr &title);
-    virtual ~RtmpMuxer(){}
+    ~RtmpMuxer() override = default;
 
     /**
      * 获取完整的SDP字符串
@@ -50,6 +50,11 @@ public:
      * @param frame 帧
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出所有frame缓存
+     */
+    void flush() override;
 
     /**
      * 重置所有track

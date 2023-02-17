@@ -14,13 +14,12 @@
 #include <memory>
 #include <string>
 #include "PusherBase.h"
-#include "Thread/TaskExecutor.h"
 
 namespace mediakit {
 
 class MediaPusher : public PusherImp<PusherBase,PusherBase> {
 public:
-    typedef std::shared_ptr<MediaPusher> Ptr;
+    using Ptr = std::shared_ptr<MediaPusher>;
 
     MediaPusher(const std::string &schema,
                 const std::string &vhost,

@@ -12,6 +12,8 @@
 #define ZLMEDIAKIT_TSMEDIASOURCE_H
 
 #include "Common/MediaSource.h"
+#include "Common/PacketCache.h"
+#include "Util/RingBuffer.h"
 
 #define TS_GOP_SIZE 512
 
@@ -31,7 +33,7 @@ public:
 };
 
 //TS直播源
-class TSMediaSource : public MediaSource, public toolkit::RingDelegate<TSPacket::Ptr>, private PacketCache<TSPacket>{
+class TSMediaSource final : public MediaSource, public toolkit::RingDelegate<TSPacket::Ptr>, private PacketCache<TSPacket>{
 public:
     using Ptr = std::shared_ptr<TSMediaSource>;
     using RingDataType = std::shared_ptr<toolkit::List<TSPacket::Ptr> >;
@@ -42,13 +44,18 @@ public:
                   const std::string &stream_id,
                   int ring_size = TS_GOP_SIZE) : MediaSource(TS_SCHEMA, vhost, app, stream_id), _ring_size(ring_size) {}
 
-    ~TSMediaSource() override = default;
+    ~TSMediaSource() override { flush(); }
 
     /**
      * 获取媒体源的环形缓冲
      */
     const RingType::Ptr &getRing() const {
         return _ring;
+    }
+
+    void getPlayerList(const std::function<void(const std::list<std::shared_ptr<void>> &info_list)> &cb,
+                       const std::function<std::shared_ptr<void>(std::shared_ptr<void> &&info)> &on_change) override {
+        _ring->getInfoList(cb, on_change);
     }
 
     /**
@@ -93,7 +100,6 @@ private:
             }
             strong_self->onReaderChanged(size);
         });
-        onReaderChanged(0);
         //注册媒体源
         regist();
     }

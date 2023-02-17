@@ -13,6 +13,8 @@
 #include "HlsMakerImp.h"
 #include "Util/util.h"
 #include "Util/uv_errno.h"
+#include "Util/File.h"
+#include "Common/config.h"
 
 using namespace std;
 using namespace toolkit;
@@ -38,7 +40,12 @@ HlsMakerImp::HlsMakerImp(const string &m3u8_file,
 }
 
 HlsMakerImp::~HlsMakerImp() {
-    clearCache(false, true);
+    try {
+        // 可能hls注册时导致抛异常
+        clearCache(false, true);
+    } catch (std::exception &ex) {
+        WarnL << ex.what();
+    }
 }
 
 void HlsMakerImp::clearCache() {

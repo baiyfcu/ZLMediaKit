@@ -14,6 +14,10 @@
 #include "Util/MD5.h"
 #include "Util/logger.h"
 #include "Extension/AAC.h"
+#include "Rtmp/RtmpMediaSource.h"
+#include "Rtsp/RtspMediaSource.h"
+#include "Rtmp/RtmpPlayer.h"
+#include "Rtsp/RtspPlayer.h"
 
 using namespace toolkit;
 using namespace std;
@@ -115,7 +119,6 @@ void PlayerProxy::setDirectProxy() {
     }
     if (mediaSource) {
         setMediaSource(mediaSource);
-        mediaSource->setListener(shared_from_this());
     }
 }
 
@@ -144,11 +147,7 @@ void PlayerProxy::rePlay(const string &strUrl, int iFailedCnt) {
     }, getPoller());
 }
 
-bool PlayerProxy::close(MediaSource &sender, bool force) {
-    if (!force && totalReaderCount()) {
-        return false;
-    }
-
+bool PlayerProxy::close(MediaSource &sender) {
     //通知其停止推流
     weak_ptr<PlayerProxy> weakSelf = dynamic_pointer_cast<PlayerProxy>(shared_from_this());
     getPoller()->async_first([weakSelf]() {
@@ -161,7 +160,7 @@ bool PlayerProxy::close(MediaSource &sender, bool force) {
         strongSelf->teardown();
     });
     _on_close(SockException(Err_shutdown, "closed by user"));
-    WarnL << sender.getSchema() << "/" << sender.getVhost() << "/" << sender.getApp() << "/" << sender.getId() << " " << force;
+    WarnL << "close media: " << sender.getUrl();
     return true;
 }
 
@@ -185,8 +184,8 @@ std::shared_ptr<SockInfo> PlayerProxy::getOriginSock(MediaSource &sender) const 
     return getSockInfo();
 }
 
-toolkit::EventPoller::Ptr PlayerProxy::getOwnerPoller(MediaSource &sender) {
-    return getPoller();
+float PlayerProxy::getLossRate(MediaSource &sender, TrackType type) {
+    return getPacketLossRate(type);
 }
 
 void PlayerProxy::onPlaySuccess() {

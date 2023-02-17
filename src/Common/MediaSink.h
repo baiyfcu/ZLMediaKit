@@ -44,7 +44,7 @@ public:
 
 class MediaSinkInterface : public FrameWriterInterface, public TrackListener {
 public:
-    typedef std::shared_ptr<MediaSinkInterface> Ptr;
+    using Ptr = std::shared_ptr<MediaSinkInterface>;
 
     MediaSinkInterface() = default;
     ~MediaSinkInterface() override = default;
@@ -55,13 +55,13 @@ public:
  */
 class MuteAudioMaker : public FrameDispatcher {
 public:
-    typedef std::shared_ptr<MuteAudioMaker> Ptr;
+    using Ptr = std::shared_ptr<MuteAudioMaker>;
     MuteAudioMaker() = default;
     ~MuteAudioMaker() override = default;
     bool inputFrame(const Frame::Ptr &frame) override;
 
 private:
-    uint32_t _audio_idx = 0;
+    uint64_t _audio_idx = 0;
 };
 
 /**
@@ -70,7 +70,7 @@ private:
  */
 class MediaSink : public MediaSinkInterface, public TrackSource{
 public:
-    typedef std::shared_ptr<MediaSink> Ptr;
+    using Ptr = std::shared_ptr<MediaSink>;
     MediaSink() = default;
     ~MediaSink() override = default;
 
@@ -95,6 +95,12 @@ public:
     void addTrackCompleted() override;
 
     /**
+     * 设置最大track数，取值范围1~2；该方法与addTrackCompleted类型；
+     * 在设置单track时，可以加快媒体注册速度
+     */
+    void setMaxTrackCount(size_t i);
+
+    /**
      * 重置track
      */
     void resetTracks() override;
@@ -114,6 +120,11 @@ public:
      * 设置是否开启音频
      */
     void enableAudio(bool flag);
+
+    /**
+     * 设置单音频
+     */
+    void setOnlyAudio();
 
     /**
      * 设置是否开启添加静音音频
@@ -157,6 +168,7 @@ private:
 
 private:
     bool _enable_audio = true;
+    bool _only_audio = false;
     bool _add_mute_audio = true;
     bool _all_track_ready = false;
     size_t _max_track_size = 2;
@@ -167,6 +179,44 @@ private:
     MuteAudioMaker::Ptr _mute_audio_maker;
 };
 
+
+class MediaSinkDelegate : public MediaSink {
+public:
+    MediaSinkDelegate() = default;
+    ~MediaSinkDelegate() override = default;
+
+    /**
+     * 设置track监听器
+     */
+    void setTrackListener(TrackListener *listener);
+
+protected:
+    void resetTracks() override;
+    bool onTrackReady(const Track::Ptr & track) override;
+    void onAllTrackReady() override;
+
+private:
+    TrackListener *_listener = nullptr;
+};
+
+class Demuxer : protected TrackListener, public TrackSource {
+public:
+    Demuxer() = default;
+    ~Demuxer() override = default;
+
+    void setTrackListener(TrackListener *listener, bool wait_track_ready = false);
+    std::vector<Track::Ptr> getTracks(bool trackReady = true) const override;
+
+protected:
+    bool addTrack(const Track::Ptr &track) override;
+    void addTrackCompleted() override;
+    void resetTracks() override;
+
+private:
+    MediaSink::Ptr _sink;
+    TrackListener *_listener = nullptr;
+    std::vector<Track::Ptr> _origin_track;
+};
 
 }//namespace mediakit
 

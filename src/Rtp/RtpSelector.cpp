@@ -25,25 +25,6 @@ void RtpSelector::clear(){
     _map_rtp_process.clear();
 }
 
-bool RtpSelector::inputRtp(const Socket::Ptr &sock, const char *data, size_t data_len, const struct sockaddr *addr,
-                           uint64_t *dts_out) {
-    uint32_t ssrc = 0;
-    if (!getSSRC(data, data_len, ssrc)) {
-        WarnL << "get ssrc from rtp failed:" << data_len;
-        return false;
-    }
-    auto process = getProcess(printSSRC(ssrc), true);
-    if (process) {
-        try {
-            return process->inputRtp(true, sock, data, data_len, addr, dts_out);
-        } catch (...) {
-            delProcess(printSSRC(ssrc), process.get());
-            throw;
-        }
-    }
-    return false;
-}
-
 bool RtpSelector::getSSRC(const char *data, size_t data_len, uint32_t &ssrc){
     if (data_len < 12) {
         return false;
@@ -58,6 +39,10 @@ RtpProcess::Ptr RtpSelector::getProcess(const string &stream_id,bool makeNew) {
     auto it = _map_rtp_process.find(stream_id);
     if (it == _map_rtp_process.end() && !makeNew) {
         return nullptr;
+    }
+    if (it != _map_rtp_process.end() && makeNew) {
+        //已经被其他线程持有了，不得再被持有，否则会存在线程安全的问题
+        throw std::runtime_error(StrPrinter << "RtpProcess(" << stream_id << ") already existed");
     }
     RtpProcessHelper::Ptr &ref = _map_rtp_process[stream_id];
     if (!ref) {
@@ -120,12 +105,6 @@ void RtpSelector::onManager() {
     });
 }
 
-RtpSelector::RtpSelector() {
-}
-
-RtpSelector::~RtpSelector() {
-}
-
 RtpProcessHelper::RtpProcessHelper(const string &stream_id, const weak_ptr<RtpSelector> &parent) {
     _stream_id = stream_id;
     _parent = parent;
@@ -133,28 +112,29 @@ RtpProcessHelper::RtpProcessHelper(const string &stream_id, const weak_ptr<RtpSe
 }
 
 RtpProcessHelper::~RtpProcessHelper() {
+    auto process = std::move(_process);
+    try {
+        // flush时，确保线程安全
+        process->getOwnerPoller(MediaSource::NullMediaSource())->async([process]() { process->flush(); });
+    } catch (...) {
+        // 忽略getOwnerPoller可能抛出的异常
+    }
 }
 
 void RtpProcessHelper::attachEvent() {
-    _process->setListener(shared_from_this());
+    //主要目的是close回调触发时能把对象从RtpSelector中删除
+    _process->setDelegate(shared_from_this());
 }
 
-bool RtpProcessHelper::close(MediaSource &sender, bool force) {
+bool RtpProcessHelper::close(MediaSource &sender) {
     //此回调在其他线程触发
-    if (!_process || (!force && _process->getTotalReaderCount())) {
-        return false;
-    }
     auto parent = _parent.lock();
     if (!parent) {
         return false;
     }
     parent->delProcess(_stream_id, _process.get());
-    WarnL << "close media:" << sender.getSchema() << "/" << sender.getVhost() << "/" << sender.getApp() << "/" << sender.getId() << " " << force;
+    WarnL << "close media: " << sender.getUrl();
     return true;
-}
-
-int RtpProcessHelper::totalReaderCount(MediaSource &sender) {
-    return _process ? _process->getTotalReaderCount() : sender.totalReaderCount();
 }
 
 RtpProcess::Ptr &RtpProcessHelper::getProcess() {

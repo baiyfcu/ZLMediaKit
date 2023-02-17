@@ -16,20 +16,22 @@
 
 namespace mediakit {
 
-class RtmpMediaSourceMuxer : public RtmpMuxer, public MediaSourceEventInterceptor,
-                             public std::enable_shared_from_this<RtmpMediaSourceMuxer> {
+class RtmpMediaSourceMuxer final : public RtmpMuxer, public MediaSourceEventInterceptor,
+                                   public std::enable_shared_from_this<RtmpMediaSourceMuxer> {
 public:
-    typedef std::shared_ptr<RtmpMediaSourceMuxer> Ptr;
+    using Ptr = std::shared_ptr<RtmpMediaSourceMuxer>;
 
     RtmpMediaSourceMuxer(const std::string &vhost,
                          const std::string &strApp,
                          const std::string &strId,
-                         const TitleMeta::Ptr &title = nullptr) : RtmpMuxer(title){
+                         const ProtocolOption &option,
+                         const TitleMeta::Ptr &title = nullptr) : RtmpMuxer(title) {
+        _option = option;
         _media_src = std::make_shared<RtmpMediaSource>(vhost, strApp, strId);
         getRtmpRing()->setDelegate(_media_src);
     }
 
-    ~RtmpMediaSourceMuxer() override{}
+    ~RtmpMediaSourceMuxer() override { RtmpMuxer::flush(); }
 
     void setListener(const std::weak_ptr<MediaSourceEvent> &listener){
         setDelegate(listener);
@@ -50,35 +52,33 @@ public:
     }
 
     void onReaderChanged(MediaSource &sender, int size) override {
-        GET_CONFIG(bool, rtmp_demand, General::kRtmpDemand);
-        _enabled = rtmp_demand ? size : true;
-        if (!size && rtmp_demand) {
+        _enabled = _option.rtmp_demand ? size : true;
+        if (!size && _option.rtmp_demand) {
             _clear_cache = true;
         }
         MediaSourceEventInterceptor::onReaderChanged(sender, size);
     }
 
     bool inputFrame(const Frame::Ptr &frame) override {
-        GET_CONFIG(bool, rtmp_demand, General::kRtmpDemand);
-        if (_clear_cache && rtmp_demand) {
+        if (_clear_cache && _option.rtmp_demand) {
             _clear_cache = false;
             _media_src->clearCache();
         }
-        if (_enabled || !rtmp_demand) {
+        if (_enabled || !_option.rtmp_demand) {
             return RtmpMuxer::inputFrame(frame);
         }
         return false;
     }
 
     bool isEnabled() {
-        GET_CONFIG(bool, rtmp_demand, General::kRtmpDemand);
         //缓存尚未清空时，还允许触发inputFrame函数，以便及时清空缓存
-        return rtmp_demand ? (_clear_cache ? true : _enabled) : true;
+        return _option.rtmp_demand ? (_clear_cache ? true : _enabled) : true;
     }
 
 private:
     bool _enabled = true;
     bool _clear_cache = false;
+    ProtocolOption _option;
     RtmpMediaSource::Ptr _media_src;
 };
 

@@ -14,8 +14,9 @@
 #include <map>
 #include <string>
 #include <memory>
-#include "RtpCodec.h"
-#include "RtspMediaSource.h"
+#include "Rtsp/Rtsp.h"
+#include "Extension/Frame.h"
+// for NtpStamp
 #include "Common/Stamp.h"
 
 namespace mediakit {
@@ -60,6 +61,10 @@ public:
      * @param packet 包负载
      */
     void sortPacket(SEQ seq, T packet) {
+        if(!_is_inited && _next_seq_out == 0){
+            _next_seq_out = seq;
+            _is_inited = true;
+        }
         if (seq < _next_seq_out) {
             if (_next_seq_out < seq + kMax) {
                 //过滤seq回退包(回环包除外)
@@ -147,6 +152,9 @@ private:
     }
 
 private:
+    //第一个包是已经进入
+    bool _is_inited = false;
+
     //下次应该输出的SEQ
     SEQ _next_seq_out = 0;
     //seq回环次数计数
@@ -159,7 +167,7 @@ private:
     std::function<void(SEQ seq, T &packet)> _cb;
 };
 
-class RtpTrack : private PacketSortor<RtpPacket::Ptr>{
+class RtpTrack : private PacketSortor<RtpPacket::Ptr> {
 public:
     class BadRtpException : public std::invalid_argument {
     public:

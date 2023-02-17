@@ -14,7 +14,9 @@
 #include <stdint.h>
 #include <map>
 #include <functional>
-#include "Util/TimeTicker.h"
+#include <string>
+
+namespace mediakit {
 
 class TwccContext {
 public:
@@ -44,5 +46,5 @@ private:
     onSendTwccCB _cb;
 };
 
-
+}// namespace mediakit
 #endif //ZLMEDIAKIT_TWCCCONTEXT_H

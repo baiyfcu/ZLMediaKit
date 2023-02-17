@@ -165,6 +165,7 @@ public:
                              [](const std::shared_ptr<ostream> &stream, const string &arg) -> bool {
                                  //版本信息
                                  *stream << "编译日期: " << BUILD_TIME << std::endl;
+                                 *stream << "代码日期: " << COMMIT_TIME << std::endl;
                                  *stream << "当前git分支: " << BRANCH_NAME << std::endl;
                                  *stream << "当前git hash值: " << COMMIT_HASH << std::endl;
                                  throw ExitException();
@@ -222,6 +223,9 @@ int start_main(int argc,char *argv[]) {
 
         //启动异步日志线程
         Logger::Instance().setWriter(std::make_shared<AsyncLogWriter>());
+
+        InfoL << kServerName;
+
         //加载配置文件，如果配置文件不存在就创建一个
         loadIniConfig(g_ini_file.data());
 
@@ -273,9 +277,10 @@ int start_main(int argc,char *argv[]) {
 #endif//defined(ENABLE_RTPPROXY)
 
 #if defined(ENABLE_WEBRTC)
+        auto rtcSrv_tcp = std::make_shared<TcpServer>();
         //webrtc udp服务器
-        auto rtcSrv = std::make_shared<UdpServer>();
-        rtcSrv->setOnCreateSocket([](const EventPoller::Ptr &poller, const Buffer::Ptr &buf, struct sockaddr *, int) {
+        auto rtcSrv_udp = std::make_shared<UdpServer>();
+        rtcSrv_udp->setOnCreateSocket([](const EventPoller::Ptr &poller, const Buffer::Ptr &buf, struct sockaddr *, int) {
             if (!buf) {
                 return Socket::createSocket(poller, false);
             }
@@ -286,7 +291,8 @@ int start_main(int argc,char *argv[]) {
             }
             return Socket::createSocket(new_poller, false);
         });
-        uint16_t rtcPort = mINI::Instance()[RTC::kPort];
+        uint16_t rtcPort = mINI::Instance()[Rtc::kPort];
+        uint16_t rtcTcpPort = mINI::Instance()[Rtc::kTcpPort];
 #endif//defined(ENABLE_WEBRTC)
 
 
@@ -333,15 +339,15 @@ int start_main(int argc,char *argv[]) {
 
 #if defined(ENABLE_WEBRTC)
             //webrtc udp服务器
-            if (rtcPort) { rtcSrv->start<WebRtcSession>(rtcPort); }
-#endif//defined(ENABLE_WEBRTC)
+            if (rtcPort) { rtcSrv_udp->start<WebRtcSession>(rtcPort);}
 
+            if (rtcTcpPort) { rtcSrv_tcp->start<WebRtcSession>(rtcTcpPort);}
+             
+#endif//defined(ENABLE_WEBRTC)
 
 #if defined(ENABLE_SRT)
         // srt udp服务器
-        if(srtPort){
-            srtSrv->start<SRT::SrtSession>(srtPort);
-        }
+        if(srtPort) { srtSrv->start<SRT::SrtSession>(srtPort); }
 #endif//defined(ENABLE_SRT)
 
         } catch (std::exception &ex) {

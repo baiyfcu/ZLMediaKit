@@ -18,9 +18,9 @@
 
 namespace mediakit {
 
-class RtpProcess : public toolkit::SockInfo, public MediaSinkInterface, public MediaSourceEventInterceptor, public std::enable_shared_from_this<RtpProcess>{
+class RtpProcess final : public RtcpContextForRecv, public toolkit::SockInfo, public MediaSinkInterface, public MediaSourceEventInterceptor, public std::enable_shared_from_this<RtpProcess>{
 public:
-    typedef std::shared_ptr<RtpProcess> Ptr;
+    using Ptr = std::shared_ptr<RtpProcess>;
     friend class RtpProcessHelper;
     RtpProcess(const std::string &stream_id);
     ~RtpProcess();
@@ -50,12 +50,23 @@ public:
     /**
      * 设置onDetach事件回调
      */
-    void setOnDetach(const std::function<void()> &cb);
+    void setOnDetach(std::function<void()> cb);
 
     /**
      * 设置onDetach事件回调,false检查RTP超时，true停止
      */
     void setStopCheckRtp(bool is_check=false);
+
+    /**
+     * 设置为单track，单音频时可以加快媒体注册速度
+     * 请在inputRtp前调用此方法，否则可能会是空操作
+     */
+    void setOnlyAudio(bool only_audio);
+
+    /**
+     * flush输出缓存
+     */
+    void flush() override;
 
     /// SockInfo override
     std::string get_local_ip() override;
@@ -64,11 +75,6 @@ public:
     uint16_t get_peer_port() override;
     std::string getIdentifier() const override;
 
-    int getTotalReaderCount();
-    void setListener(const std::weak_ptr<MediaSourceEvent> &listener);
-
-    void setHelper(const std::weak_ptr<RtcpContext> help);
-    int getLossRate(MediaSource &sender, TrackType type) override;
 protected:
     bool inputFrame(const Frame::Ptr &frame) override;
     bool addTrack(const Track::Ptr & track) override;
@@ -80,12 +86,14 @@ protected:
     std::string getOriginUrl(MediaSource &sender) const override;
     std::shared_ptr<SockInfo> getOriginSock(MediaSource &sender) const override;
     toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
+    float getLossRate(MediaSource &sender, TrackType type) override;
 
 private:
     void emitOnPublish();
     void doCachedFunc();
 
 private:
+    bool _only_audio = false;
     uint64_t _dts = 0;
     uint64_t _total_bytes = 0;
     std::unique_ptr<sockaddr_storage> _addr;
@@ -98,11 +106,9 @@ private:
     ProcessInterface::Ptr _process;
     MultiMediaSourceMuxer::Ptr _muxer;
     std::atomic_bool _stop_rtp_check{false};
-    std::atomic_flag _busy_flag{false};
     toolkit::Ticker _last_check_alive;
     std::recursive_mutex _func_mtx;
     std::deque<std::function<void()> > _cached_func;
-    std::weak_ptr<RtcpContext> _help;
 };
 
 }//namespace mediakit

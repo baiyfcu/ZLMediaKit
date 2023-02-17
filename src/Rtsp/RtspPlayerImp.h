@@ -14,11 +14,9 @@
 #include <memory>
 #include <algorithm>
 #include <functional>
-#include "Common/config.h"
 #include "RtspPlayer.h"
 #include "RtspDemuxer.h"
-#include "Poller/Timer.h"
-#include "Util/TimeTicker.h"
+#include "RtspMediaSource.h"
 
 namespace mediakit {
 
@@ -57,49 +55,21 @@ public:
         seekToMilliSecond(pos);
     }
 
-    float getDuration() const override {
-        return _demuxer ? _demuxer->getDuration() : 0;
-    }
+    float getDuration() const override;
 
-    std::vector<Track::Ptr> getTracks(bool ready = true) const override {
-        return _demuxer ? _demuxer->getTracks(ready) : Super::getTracks(ready);
-    }
+    std::vector<Track::Ptr> getTracks(bool ready = true) const override;
 
 private:
     //派生类回调函数
-    bool onCheckSDP(const std::string &sdp) override {
-        _rtsp_media_src = std::dynamic_pointer_cast<RtspMediaSource>(_media_src);
-        if (_rtsp_media_src) {
-            _rtsp_media_src->setSdp(sdp);
-        }
-        _demuxer = std::make_shared<RtspDemuxer>();
-        _demuxer->setTrackListener(this, (*this)[Client::kWaitTrackReady].as<bool>());
-        _demuxer->loadSdp(sdp);
-        return true;
-    }
+    bool onCheckSDP(const std::string &sdp) override;
 
-    void onRecvRTP(RtpPacket::Ptr rtp, const SdpTrack::Ptr &track) override {
-        //rtp解复用时可以判断是否为关键帧起始位置
-        auto key_pos = _demuxer->inputRtp(rtp);
-        if (_rtsp_media_src) {
-            _rtsp_media_src->onWrite(std::move(rtp), key_pos);
-        }
-    }
+    void onRecvRTP(RtpPacket::Ptr rtp, const SdpTrack::Ptr &track) override;
 
-    void onPlayResult(const toolkit::SockException &ex) override {
-        if (!(*this)[Client::kWaitTrackReady].as<bool>() || ex) {
-            Super::onPlayResult(ex);
-            return;
-        }
-    }
+    void onPlayResult(const toolkit::SockException &ex) override;
 
     bool addTrack(const Track::Ptr &track) override { return true; }
 
-    void addTrackCompleted() override {
-        if ((*this)[Client::kWaitTrackReady].as<bool>()) {
-            Super::onPlayResult(toolkit::SockException(toolkit::Err_success, "play success"));
-        }
-    }
+    void addTrackCompleted() override;
 
 private:
     RtspDemuxer::Ptr _demuxer;

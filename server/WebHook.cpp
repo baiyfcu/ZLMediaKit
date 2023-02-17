@@ -15,7 +15,7 @@
 #include "Common/config.h"
 #include "Common/MediaSource.h"
 #include "Http/HttpRequester.h"
-#include "Network/TcpSession.h"
+#include "Network/Session.h"
 #include "Rtsp/RtspSession.h"
 #include "Http/HttpSession.h"
 #include "WebHook.h"
@@ -45,6 +45,8 @@ const string kOnStreamNoneReader = HOOK_FIELD"on_stream_none_reader";
 const string kOnHttpAccess = HOOK_FIELD"on_http_access";
 const string kOnServerStarted = HOOK_FIELD"on_server_started";
 const string kOnServerKeepalive = HOOK_FIELD"on_server_keepalive";
+const string kOnSendRtpStopped = HOOK_FIELD"on_send_rtp_stopped";
+const string kOnRtpServerTimeout = HOOK_FIELD"on_rtp_server_timeout";
 const string kAdminParams = HOOK_FIELD"admin_params";
 const string kAliveInterval = HOOK_FIELD"alive_interval";
 const string kRetry = HOOK_FIELD"retry";
@@ -68,6 +70,8 @@ onceToken token([](){
     mINI::Instance()[kOnHttpAccess] = "";
     mINI::Instance()[kOnServerStarted] = "";
     mINI::Instance()[kOnServerKeepalive] = "";
+    mINI::Instance()[kOnSendRtpStopped] = "";
+    mINI::Instance()[kOnRtpServerTimeout] = "";
     mINI::Instance()[kAdminParams] = "secret=035c73f7-bb6b-4889-a715-d9eb2d1925cc";
     mINI::Instance()[kAliveInterval] = 30.0;
     mINI::Instance()[kRetry] = 1;
@@ -290,6 +294,21 @@ static void pullStreamFromOrigin(const vector<string>& urls, size_t index, size_
 
 static void *web_hook_tag = nullptr;
 
+static mINI jsonToMini(const Value &obj) {
+    mINI ret;
+    if (obj.isObject()) {
+        for (auto it = obj.begin(); it != obj.end(); ++it) {
+            try {
+                auto str = (*it).asString();
+                ret[it.name()] = std::move(str);
+            } catch (std::exception &) {
+                WarnL << "Json is not convertible to string, key: " << it.name() << ", value: " << (*it);
+            }
+        }
+    }
+    return ret;
+}
+
 void installWebHook(){
     GET_CONFIG(bool,hook_enable,Hook::kEnable);
     GET_CONFIG(string,hook_adminparams,Hook::kAdminParams);
@@ -309,49 +328,12 @@ void installWebHook(){
         body["originTypeStr"] = getOriginTypeString(type);
         //执行hook
         do_http_hook(hook_publish, body, [invoker](const Value &obj, const string &err) mutable {
-            ProtocolOption option;
             if (err.empty()) {
                 //推流鉴权成功
-                if (obj.isMember("enable_hls")) {
-                    option.enable_hls = obj["enable_hls"].asBool();
-                }
-                if (obj.isMember("enable_mp4")) {
-                    option.enable_mp4 = obj["enable_mp4"].asBool();
-                }
-                if (obj.isMember("enable_audio")) {
-                    option.enable_audio = obj["enable_audio"].asBool();
-                }
-                if (obj.isMember("add_mute_audio")) {
-                    option.add_mute_audio = obj["add_mute_audio"].asBool();
-                }
-                if (obj.isMember("mp4_save_path")) {
-                    option.mp4_save_path = obj["mp4_save_path"].asString();
-                }
-                if (obj.isMember("mp4_max_second")) {
-                    option.mp4_max_second = obj["mp4_max_second"].asUInt();
-                }
-                if (obj.isMember("hls_save_path")) {
-                    option.hls_save_path = obj["hls_save_path"].asString();
-                }
-                if (obj.isMember("enable_rtsp")) {
-                    option.enable_rtsp = obj["enable_rtsp"].asBool();
-                }
-                if (obj.isMember("enable_rtmp")) {
-                    option.enable_rtmp = obj["enable_rtmp"].asBool();
-                }
-                if (obj.isMember("enable_ts")) {
-                    option.enable_ts = obj["enable_ts"].asBool();
-                }
-                if (obj.isMember("enable_fmp4")) {
-                    option.enable_fmp4 = obj["enable_fmp4"].asBool();
-                }
-                if (obj.isMember("continue_push_ms")) {
-                    option.continue_push_ms = obj["continue_push_ms"].asUInt();
-                }
-                invoker(err, option);
+                invoker(err, ProtocolOption(jsonToMini(obj)));
             } else {
                 //推流鉴权失败
-                invoker(err, option);
+                invoker(err, ProtocolOption());
             }
         });
     });
@@ -497,8 +479,17 @@ void installWebHook(){
         body["ip"] = sender.get_peer_ip();
         body["port"] = sender.get_peer_port();
         body["id"] = sender.getIdentifier();
+
+        // Hook回复立即关闭流
+        auto res_cb = [closePlayer](const Value &res, const string &err) {
+            bool flag = res["close"].asBool();
+            if (flag) {
+                closePlayer();
+            }
+        };
+
         //执行hook
-        do_http_hook(hook_stream_not_found, body, nullptr);
+        do_http_hook(hook_stream_not_found, body, res_cb);
     });
 
     static auto getRecordInfo = [](const RecordInfo &info) {
@@ -586,6 +577,26 @@ void installWebHook(){
         });
     });
 
+    NoticeCenter::Instance().addListener(&web_hook_tag, Broadcast::kBroadcastSendRtpStopped, [](BroadcastSendRtpStopped) {
+        GET_CONFIG(string, hook_send_rtp_stopped, Hook::kOnSendRtpStopped);
+        if (!hook_enable || hook_send_rtp_stopped.empty()) {
+            return;
+        }
+
+        ArgsType body;
+        body[VHOST_KEY] = sender.getVhost();
+        body["app"] = sender.getApp();
+        body["stream"] = sender.getStreamId();
+        body["ssrc"] = ssrc;
+        body["originType"] = (int)sender.getOriginType(MediaSource::NullMediaSource());
+        body["originTypeStr"] = getOriginTypeString(sender.getOriginType(MediaSource::NullMediaSource()));
+        body["originUrl"] = sender.getOriginUrl(MediaSource::NullMediaSource());
+        body["msg"] = ex.what();
+        body["err"] = ex.getErrCode();
+        //执行hook
+        do_http_hook(hook_send_rtp_stopped, body, nullptr);
+    });
+
     /**
      * kBroadcastHttpAccess事件触发机制
      * 1、根据http请求头查找cookie，找到进入步骤3
@@ -637,6 +648,21 @@ void installWebHook(){
             //second参数规定该cookie超时时间，如果second为0，本次鉴权结果不缓存
             invoker(obj["err"].asString(),obj["path"].asString(),obj["second"].asInt());
         });
+    });
+
+    NoticeCenter::Instance().addListener(&web_hook_tag, Broadcast::KBroadcastRtpServerTimeout, [](BroadcastRtpServerTimeout) {
+        GET_CONFIG(string, rtp_server_timeout, Hook::kOnRtpServerTimeout);
+        if (!hook_enable || rtp_server_timeout.empty()) {
+            return;
+        }
+
+        ArgsType body;
+        body["local_port"] = local_port;
+        body["stream_id"] = stream_id;
+        body["tcp_mode"] = tcp_mode;
+        body["re_use_port"] = re_use_port;
+        body["ssrc"] = ssrc;
+        do_http_hook(rtp_server_timeout, body);
     });
 
     //汇报服务器重新启动

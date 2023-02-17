@@ -11,6 +11,8 @@
 #include "H264.h"
 #include "SPSParser.h"
 #include "Util/logger.h"
+#include "Util/base64.h"
+
 using namespace toolkit;
 using namespace std;
 
@@ -149,6 +151,7 @@ bool H264Track::ready() {
 bool H264Track::inputFrame(const Frame::Ptr &frame) {
     using H264FrameInternal = FrameInternal<H264FrameNoCacheAble>;
     int type = H264_TYPE(frame->data()[frame->prefixSize()]);
+   
     if ((type == H264Frame::NAL_B_P || type == H264Frame::NAL_IDR) && ready()) {
         return inputFrame_l(frame);
     }
@@ -202,7 +205,9 @@ bool H264Track::inputFrame_l(const Frame::Ptr &frame) {
             if (frame->keyFrame() && !_latest_is_config_frame) {
                 insertConfigFrame(frame);
             }
-            _latest_is_config_frame = false;
+            if(!frame->dropAble()){
+                _latest_is_config_frame = false;
+            }
             ret = VideoTrack::inputFrame(frame);
             break;
     }
@@ -245,23 +250,19 @@ public:
         _printer << "a=rtpmap:" << payload_type << " " << getCodecName() << "/" << 90000 << "\r\n";
         _printer << "a=fmtp:" << payload_type << " packetization-mode=1; profile-level-id=";
 
-        char strTemp[1024];
         uint32_t profile_level_id = 0;
         if (strSPS.length() >= 4) { // sanity check
             profile_level_id = (uint8_t(strSPS[1]) << 16) |
                                (uint8_t(strSPS[2]) << 8) |
                                (uint8_t(strSPS[3])); // profile_idc|constraint_setN_flag|level_idc
         }
-        memset(strTemp, 0, sizeof(strTemp));
-        snprintf(strTemp, sizeof(strTemp), "%06X", profile_level_id);
-        _printer << strTemp;
+
+        char profile[8];
+        snprintf(profile, sizeof(profile), "%06X", profile_level_id);
+        _printer << profile;
         _printer << "; sprop-parameter-sets=";
-        memset(strTemp, 0, sizeof(strTemp));
-        av_base64_encode(strTemp, sizeof(strTemp), (uint8_t *)strSPS.data(), (int)strSPS.size());
-        _printer << strTemp << ",";
-        memset(strTemp, 0, sizeof(strTemp));
-        av_base64_encode(strTemp, sizeof(strTemp), (uint8_t *)strPPS.data(), (int)strPPS.size());
-        _printer << strTemp << "\r\n";
+        _printer << encodeBase64(strSPS) << ",";
+        _printer << encodeBase64(strPPS) << "\r\n";
         _printer << "a=control:trackID=" << (int)TrackVideo << "\r\n";
     }
 

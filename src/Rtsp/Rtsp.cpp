@@ -12,6 +12,8 @@
 #include <cinttypes>
 #include "Rtsp.h"
 #include "Common/Parser.h"
+#include "Common/config.h"
+#include "Network/Socket.h"
 
 using namespace std;
 using namespace toolkit;
@@ -164,9 +166,10 @@ void SdpParser::load(const string &sdp) {
                     break;
                 case 'm': {
                     track = std::make_shared<SdpTrack>();
-                    int pt, port;
+                    int pt, port, port_count;
                     char rtp[16] = {0}, type[16];
-                    if (4 == sscanf(opt_val.data(), " %15[^ ] %d %15[^ ] %d", type, &port, rtp, &pt)) {
+                    if (4 == sscanf(opt_val.data(), " %15[^ ] %d %15[^ ] %d", type, &port, rtp, &pt) ||
+                        5 == sscanf(opt_val.data(), " %15[^ ] %d/%d %15[^ ] %d", type, &port, &port_count, rtp, &pt)) {
                         track->_pt = pt;
                         track->_samplerate = RtpPayload::getClockRate(pt);
                         track->_channel = RtpPayload::getAudioChannel(pt);
@@ -587,6 +590,41 @@ RtpPacket::Ptr RtpPacket::create() {
 #else
     return Ptr(new RtpPacket);
 #endif
+}
+
+
+/**
+* 构造title类型sdp
+* @param dur_sec rtsp点播时长，0代表直播，单位秒
+* @param header 自定义sdp描述
+* @param version sdp版本
+*/
+
+TitleSdp::TitleSdp(float dur_sec, const std::map<std::string, std::string>& header, int version) : Sdp(0, 0) {
+    _printer << "v=" << version << "\r\n";
+
+    if (!header.empty()) {
+        for (auto &pr : header) {
+            _printer << pr.first << "=" << pr.second << "\r\n";
+        }
+    }
+    else {
+        _printer << "o=- 0 0 IN IP4 0.0.0.0\r\n";
+        _printer << "s=Streamed by " << kServerName << "\r\n";
+        _printer << "c=IN IP4 0.0.0.0\r\n";
+        _printer << "t=0 0\r\n";
+    }
+
+    if (dur_sec <= 0) {
+        //直播
+        _printer << "a=range:npt=now-\r\n";
+    }
+    else {
+        //点播
+        _dur_sec = dur_sec;
+        _printer << "a=range:npt=0-" << dur_sec << "\r\n";
+    }
+    _printer << "a=control:*\r\n";
 }
 
 }//namespace mediakit

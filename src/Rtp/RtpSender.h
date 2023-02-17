@@ -13,16 +13,21 @@
 #if defined(ENABLE_RTPPROXY)
 #include "PSEncoder.h"
 #include "Extension/CommonRtp.h"
+#include "Rtcp/RtcpContext.h"
+#include "Common/MediaSource.h"
+#include "Common/MediaSink.h"
 
 namespace mediakit{
 
-//rtp发送客户端，支持发送GB28181协议
-class RtpSender : public MediaSinkInterface, public std::enable_shared_from_this<RtpSender>{
-public:
-    typedef std::shared_ptr<RtpSender> Ptr;
+class RtpSession;
 
-    RtpSender();
-    ~RtpSender() override = default;
+//rtp发送客户端，支持发送GB28181协议
+class RtpSender final : public MediaSinkInterface, public std::enable_shared_from_this<RtpSender>{
+public:
+    using Ptr = std::shared_ptr<RtpSender>;
+
+    RtpSender(toolkit::EventPoller::Ptr poller = nullptr);
+    ~RtpSender() override;
 
     /**
      * 开始发送ps-rtp包
@@ -35,6 +40,11 @@ public:
      * 输入帧数据
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出frame缓存
+     */
+    void flush() override;
 
     /**
      * 添加track，内部会调用Track的clone方法
@@ -53,21 +63,32 @@ public:
      */
     virtual void resetTracks() override;
 
+    void setOnClose(std::function<void(const toolkit::SockException &ex)> on_close);
+
 private:
     //合并写输出
     void onFlushRtpList(std::shared_ptr<toolkit::List<toolkit::Buffer::Ptr> > rtp_list);
     //udp/tcp连接成功回调
     void onConnect();
     //异常断开socket事件
-    void onErr(const toolkit::SockException &ex, bool is_connect = false);
+    void onErr(const toolkit::SockException &ex);
+    void createRtcpSocket();
+    void onRecvRtcp(RtcpHeader *rtcp);
+    void onSendRtpUdp(const toolkit::Buffer::Ptr &buf, bool check);
+    void onClose(const toolkit::SockException &ex);
 
 private:
     bool _is_connect = false;
     MediaSourceEvent::SendRtpArgs _args;
-    toolkit::Socket::Ptr _socket;
+    toolkit::Socket::Ptr _socket_rtp;
+    toolkit::Socket::Ptr _socket_rtcp;
     toolkit::EventPoller::Ptr _poller;
-    toolkit::Timer::Ptr _connect_timer;
     MediaSinkInterface::Ptr _interface;
+    std::shared_ptr<RtcpContext> _rtcp_context;
+    toolkit::Ticker _rtcp_send_ticker;
+    toolkit::Ticker _rtcp_recv_ticker;
+    std::shared_ptr<RtpSession> _rtp_session;
+    std::function<void(const toolkit::SockException &ex)> _on_close;
 };
 
 }//namespace mediakit

@@ -43,7 +43,7 @@
 
 ## 功能清单
 ### 功能一览
-<img width="800" alt="功能一览" src="https://user-images.githubusercontent.com/11495632/114176523-d50fce80-996d-11eb-81f8-0a2e2715ba7b.png">
+<img width="800" alt="功能一览" src="https://user-images.githubusercontent.com/11495632/190864440-91c45f8f-480f-43db-8110-5bb44e6300ff.png">
 
 - RTSP[S]
   - RTSP[S] 服务器，支持RTMP/MP4/HLS转RTSP[S],支持亚马逊echo show这样的设备
@@ -53,7 +53,7 @@
   - 服务器/客户端完整支持Basic/Digest方式的登录鉴权，全异步可配置化的鉴权接口
   - 支持H265编码
   - 服务器支持RTSP推流(包括`rtp over udp` `rtp over tcp`方式)
-  - 支持H264/H265/AAC/G711/OPUS编码，其他编码能转发但不能转协议
+  - 支持H264/H265/AAC/G711/OPUS/MJPEG编码，其他编码能转发但不能转协议
 
 - RTMP[S]
   - RTMP[S] 播放服务器，支持RTSP/MP4/HLS转RTMP
@@ -80,7 +80,7 @@
 - fMP4
   - 支持http[s]-fmp4直播
   - 支持ws[s]-fmp4直播
-  - 支持H264/H265/AAC/G711/OPUS编码
+  - 支持H264/H265/AAC/G711/OPUS/MJPEG编码
 
 - HTTP[S]与WebSocket
   - 服务器支持`目录索引生成`,`文件下载`,`表单提交请求`
@@ -92,10 +92,11 @@
   - 支持http文件访问鉴权
 
 - GB28181与RTP推流
-  - 支持UDP/TCP国标RTP(PS或TS)推流服务器，可以转换成RTSP/RTMP/HLS等协议
-  - 支持RTSP/RTMP/HLS转国标推流客户端，支持TCP/UDP模式，提供相应restful api
+  - 支持UDP/TCP RTP(PS/TS/ES)推流服务器，可以转换成RTSP/RTMP/HLS等协议
+  - 支持RTSP/RTMP/HLS等协议转rtp推流客户端，支持TCP/UDP模式，提供相应restful api，支持主动被动方式。
   - 支持H264/H265/AAC/G711/OPUS编码
   - 支持海康ehome推流
+  - 支持GB28181主动拉流模式
 
 - MP4点播与录制
   - 支持录制为FLV/HLS/MP4
@@ -114,6 +115,7 @@
   - 支持rtp扩展解析
   - 支持GOP缓冲，webrtc播放秒开
   - 支持datachannel
+  - 支持webrtc over tcp模式
 - [SRT支持](./srt/srt.md)
 - 其他
   - 支持丰富的restful api以及web hook事件 
@@ -186,7 +188,7 @@ bash build_docker_images.sh
 ## 授权协议
 
 本项目自有代码使用宽松的MIT协议，在保留版权信息的情况下可以自由应用于各自商用、非商业的项目。
-但是本项目也零碎的使用了一些其他的开源代码，在商用的情况下请自行替代或剔除；
+但是本项目也零碎的使用了一些其他的[开源代码](https://github.com/ZLMediaKit/ZLMediaKit/wiki/%E4%BB%A3%E7%A0%81%E4%BE%9D%E8%B5%96%E4%B8%8E%E7%89%88%E6%9D%83%E5%A3%B0%E6%98%8E)，在商用的情况下请自行替代或剔除；
 由于使用本项目而产生的商业纠纷或侵权行为一概与本项目及开发者无关，请自行承担法律风险。
 在使用本项目代码时，也应该在授权协议中同时表明本项目依赖的第三方库的协议。
 
@@ -284,6 +286,11 @@ bash build_docker_images.sh
 [dingcan](https://github.com/dcan123)
 [Haibo Chen](https://github.com/duiniuluantanqin)
 [Leon](https://gitee.com/leon14631)
+[custompal](https://github.com/custompal)
+[PioLing](https://github.com/PioLing)
+[KevinZang](https://github.com/ZSC714725)
+[gongluck](https://github.com/gongluck)
+[a-ucontrol](https://github.com/a-ucontrol)
 
 ## 使用案例
 

@@ -12,6 +12,8 @@
 #include "GB28181Process.h"
 #include "RtpProcess.h"
 #include "Http/HttpTSPlayer.h"
+#include "Util/File.h"
+#include "Common/config.h"
 
 using namespace std;
 using namespace toolkit;
@@ -49,12 +51,16 @@ RtpProcess::RtpProcess(const string &stream_id) {
     }
 }
 
+void RtpProcess::flush() {
+    if (_process) {
+        _process->flush();
+    }
+}
+
 RtpProcess::~RtpProcess() {
     uint64_t duration = (_last_frame_time.createdTime() - _last_frame_time.elapsedTime()) / 1000;
     WarnP(this) << "RTP推流器("
-                << _media_info._vhost << "/"
-                << _media_info._app << "/"
-                << _media_info._streamid
+                << _media_info.shortUrl()
                 << ")断开,耗时(s):" << duration;
 
     //流量统计事件广播
@@ -65,23 +71,14 @@ RtpProcess::~RtpProcess() {
 }
 
 bool RtpProcess::inputRtp(bool is_udp, const Socket::Ptr &sock, const char *data, size_t len, const struct sockaddr *addr, uint64_t *dts_out) {
-    auto is_busy = _busy_flag.test_and_set();
-    if (is_busy) {
-        //其他线程正在执行本函数
-        WarnP(this) << "其他线程正在执行本函数";
-        return false;
-    }
-    //没有其他线程执行本函数
-    onceToken token(nullptr, [&]() {
-        //本函数执行完毕时，释放状态
-        _busy_flag.clear();
-    });
-
-    if (!_sock) {
-        //第一次运行本函数
+    if (_sock != sock) {
+        // 第一次运行本函数
+        bool first = !_sock;
         _sock = sock;
         _addr.reset(new sockaddr_storage(*((sockaddr_storage *)addr)));
-        emitOnPublish();
+        if (first) {
+            emitOnPublish();
+        }
     }
 
     _total_bytes += len;
@@ -94,6 +91,9 @@ bool RtpProcess::inputRtp(bool is_udp, const Socket::Ptr &sock, const char *data
     if (!_process) {
         _process = std::make_shared<GB28181Process>(_media_info, this);
     }
+
+    auto header = (RtpHeader *) data;
+    onRtp(ntohs(header->seq), ntohl(header->stamp), 0/*不发送sr,所以可以设置为0*/ , 90000/*ps/ts流时间戳按照90K采样率*/, len);
 
     GET_CONFIG(string, dump_dir, RtpProxy::kDumpDir);
     if (_muxer && !_muxer->isEnabled() && !dts_out && dump_dir.empty()) {
@@ -187,14 +187,18 @@ void RtpProcess::setStopCheckRtp(bool is_check){
     }
 }
 
+void RtpProcess::setOnlyAudio(bool only_audio){
+    _only_audio = only_audio;
+}
+
 void RtpProcess::onDetach() {
     if (_on_detach) {
         _on_detach();
     }
 }
 
-void RtpProcess::setOnDetach(const function<void()> &cb) {
-    _on_detach = cb;
+void RtpProcess::setOnDetach(function<void()> cb) {
+    _on_detach = std::move(cb);
 }
 
 string RtpProcess::get_peer_ip() {
@@ -229,14 +233,6 @@ string RtpProcess::getIdentifier() const {
     return _media_info._streamid;
 }
 
-int RtpProcess::getTotalReaderCount() {
-    return _muxer ? _muxer->totalReaderCount() : 0;
-}
-
-void RtpProcess::setListener(const std::weak_ptr<MediaSourceEvent> &listener) {
-    setDelegate(listener);
-}
-
 void RtpProcess::emitOnPublish() {
     weak_ptr<RtpProcess> weak_self = shared_from_this();
     Broadcast::PublishAuthInvoker invoker = [weak_self](const string &err, const ProtocolOption &option) {
@@ -244,7 +240,7 @@ void RtpProcess::emitOnPublish() {
         if (!strong_self) {
             return;
         }
-        auto poller = strong_self->_sock ? strong_self->_sock->getPoller() : EventPollerPool::Instance().getPoller();
+        auto poller = strong_self->getOwnerPoller(MediaSource::NullMediaSource());
         poller->async([weak_self, err, option]() {
             auto strong_self = weak_self.lock();
             if (!strong_self) {
@@ -255,6 +251,9 @@ void RtpProcess::emitOnPublish() {
                                                                               strong_self->_media_info._app,
                                                                               strong_self->_media_info._streamid,0.0f,
                                                                               option);
+                if (strong_self->_only_audio) {
+                    strong_self->_muxer->setOnlyAudio();
+                }
                 strong_self->_muxer->setMediaListener(strong_self);
                 strong_self->doCachedFunc();
                 InfoP(strong_self) << "允许RTP推流";
@@ -277,7 +276,7 @@ MediaOriginType RtpProcess::getOriginType(MediaSource &sender) const{
 }
 
 string RtpProcess::getOriginUrl(MediaSource &sender) const {
-    return _media_info._schema + "://" + _media_info._vhost + "/" + _media_info._app + "/" + _media_info._streamid;
+    return _media_info.getUrl();
 }
 
 std::shared_ptr<SockInfo> RtpProcess::getOriginSock(MediaSource &sender) const {
@@ -285,23 +284,18 @@ std::shared_ptr<SockInfo> RtpProcess::getOriginSock(MediaSource &sender) const {
 }
 
 toolkit::EventPoller::Ptr RtpProcess::getOwnerPoller(MediaSource &sender) {
-    return _sock ? _sock->getPoller() : nullptr;
+    if (_sock) {
+        return _sock->getPoller();
+    }
+    throw std::runtime_error("RtpProcess::getOwnerPoller failed:" + _media_info._streamid);
 }
 
-void RtpProcess::setHelper(std::weak_ptr<RtcpContext> help) {
-	_help = std::move(help);
-}
-
-int RtpProcess::getLossRate(MediaSource &sender, TrackType type) {
-     auto help = _help.lock();
-	 if (!help) {
-	 	return -1;	
-	 }
-     auto expected =  help->getExpectedPacketsInterval();
-     if (!expected) {
-        return 0;
-     }
-     return help->geLostInterval() * 100 / expected;
+float RtpProcess::getLossRate(MediaSource &sender, TrackType type) {
+    auto expected = getExpectedPacketsInterval();
+    if (!expected) {
+        return -1;
+    }
+    return geLostInterval() * 100 / expected;
 }
 
 }//namespace mediakit

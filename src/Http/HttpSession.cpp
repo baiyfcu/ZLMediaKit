@@ -23,7 +23,7 @@ using namespace toolkit;
 
 namespace mediakit {
 
-HttpSession::HttpSession(const Socket::Ptr &pSock) : TcpSession(pSock) {
+HttpSession::HttpSession(const Socket::Ptr &pSock) : Session(pSock) {
     TraceP(this);
     GET_CONFIG(uint32_t,keep_alive_sec,Http::kKeepAliveSecond);
     pSock->setSendTimeOutSecond(keep_alive_sec);
@@ -103,9 +103,7 @@ void HttpSession::onError(const SockException& err) {
         //flv/ts播放器
         uint64_t duration = _ticker.createdTime() / 1000;
         WarnP(this) << "FLV/TS/FMP4播放器("
-                    << _mediaInfo._vhost << "/"
-                    << _mediaInfo._app << "/"
-                    << _mediaInfo._streamid
+                    << _mediaInfo.shortUrl()
                     << ")断开:" << err.what()
                     << ",耗时(s):" << duration;
 
@@ -245,8 +243,8 @@ bool HttpSession::checkLiveStream(const string &schema, const string  &url_suffi
     };
 
     Broadcast::AuthInvoker invoker = [weak_self, onRes](const string &err) {
-        if (auto strongSelf = weak_self.lock()) {
-            strongSelf->async([onRes, err]() { onRes(err); });
+        if (auto strong_self = weak_self.lock()) {
+            strong_self->async([onRes, err]() { onRes(err); });
         }
     };
 
@@ -277,6 +275,7 @@ bool HttpSession::checkLiveStreamFMP4(const function<void()> &cb){
         weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
         fmp4_src->pause(false);
         _fmp4_reader = fmp4_src->getRing()->attach(getPoller());
+        _fmp4_reader->setGetInfoCB([weak_self]() { return weak_self.lock(); });
         _fmp4_reader->setDetachCB([weak_self]() {
             auto strong_self = weak_self.lock();
             if (!strong_self) {
@@ -318,6 +317,7 @@ bool HttpSession::checkLiveStreamTS(const function<void()> &cb){
         weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
         ts_src->pause(false);
         _ts_reader = ts_src->getRing()->attach(getPoller());
+        _ts_reader->setGetInfoCB([weak_self]() { return weak_self.lock(); });
         _ts_reader->setDetachCB([weak_self](){
             auto strong_self = weak_self.lock();
             if (!strong_self) {
@@ -412,19 +412,19 @@ void HttpSession::Handle_Req_GET_l(ssize_t &content_len, bool sendBody) {
     }
 
     bool bClose = !strcasecmp(_parser["Connection"].data(),"close");
-    weak_ptr<HttpSession> weakSelf = dynamic_pointer_cast<HttpSession>(shared_from_this());
-    HttpFileManager::onAccessPath(*this, _parser, [weakSelf, bClose](int code, const string &content_type,
+    weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
+    HttpFileManager::onAccessPath(*this, _parser, [weak_self, bClose](int code, const string &content_type,
                                                                      const StrCaseMap &responseHeader, const HttpBody::Ptr &body) {
-        auto strongSelf = weakSelf.lock();
-        if (!strongSelf) {
+        auto strong_self = weak_self.lock();
+        if (!strong_self) {
             return;
         }
-        strongSelf->async([weakSelf, bClose, code, content_type, responseHeader, body]() {
-            auto strongSelf = weakSelf.lock();
-            if (!strongSelf) {
+        strong_self->async([weak_self, bClose, code, content_type, responseHeader, body]() {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
                 return;
             }
-            strongSelf->sendResponse(code, bClose, content_type.data(), responseHeader, body);
+            strong_self->sendResponse(code, bClose, content_type.data(), responseHeader, body);
         });
     });
 }
@@ -439,8 +439,8 @@ static string dateStr() {
 class AsyncSenderData {
 public:
     friend class AsyncSender;
-    typedef std::shared_ptr<AsyncSenderData> Ptr;
-    AsyncSenderData(const TcpSession::Ptr &session, const HttpBody::Ptr &body, bool close_when_complete) {
+    using Ptr = std::shared_ptr<AsyncSenderData>;
+    AsyncSenderData(const Session::Ptr &session, const HttpBody::Ptr &body, bool close_when_complete) {
         _session = dynamic_pointer_cast<HttpSession>(session);
         _body = body;
         _close_when_complete = close_when_complete;
@@ -455,7 +455,7 @@ private:
 
 class AsyncSender {
 public:
-    typedef std::shared_ptr<AsyncSender> Ptr;
+    using Ptr = std::shared_ptr<AsyncSender>;
     static bool onSocketFlushed(const AsyncSenderData::Ptr &data) {
         if (data->_read_complete) {
             if (data->_close_when_complete) {
@@ -645,19 +645,19 @@ void HttpSession::urlDecode(Parser &parser){
 bool HttpSession::emitHttpEvent(bool doInvoke){
     bool bClose = !strcasecmp(_parser["Connection"].data(),"close");
     /////////////////////异步回复Invoker///////////////////////////////
-    weak_ptr<HttpSession> weakSelf = dynamic_pointer_cast<HttpSession>(shared_from_this());
-    HttpResponseInvoker invoker = [weakSelf,bClose](int code, const KeyValue &headerOut, const HttpBody::Ptr &body){
-        auto strongSelf = weakSelf.lock();
-        if(!strongSelf) {
+    weak_ptr<HttpSession> weak_self = dynamic_pointer_cast<HttpSession>(shared_from_this());
+    HttpResponseInvoker invoker = [weak_self,bClose](int code, const KeyValue &headerOut, const HttpBody::Ptr &body){
+        auto strong_self = weak_self.lock();
+        if(!strong_self) {
             return;
         }
-        strongSelf->async([weakSelf, bClose, code, headerOut, body]() {
-            auto strongSelf = weakSelf.lock();
-            if (!strongSelf) {
+        strong_self->async([weak_self, bClose, code, headerOut, body]() {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
                 //本对象已经销毁
                 return;
             }
-            strongSelf->sendResponse(code, bClose, nullptr, headerOut, body);
+            strong_self->sendResponse(code, bClose, nullptr, headerOut, body);
         });
     };
     ///////////////////广播HTTP事件///////////////////////////
@@ -672,7 +672,10 @@ bool HttpSession::emitHttpEvent(bool doInvoke){
 
 std::string HttpSession::get_peer_ip() {
     GET_CONFIG(string, forwarded_ip_header, Http::kForwardedIpHeader);
-    return forwarded_ip_header.empty() ? TcpSession::get_peer_ip() : _parser.getHeader()[forwarded_ip_header];
+    if(!forwarded_ip_header.empty() && !_parser.getHeader()[forwarded_ip_header].empty()){
+        return _parser.getHeader()[forwarded_ip_header];
+    }
+    return Session::get_peer_ip();
 }
 
 void HttpSession::Handle_Req_POST(ssize_t &content_len) {

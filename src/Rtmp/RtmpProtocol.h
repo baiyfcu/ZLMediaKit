@@ -14,12 +14,9 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <unordered_map>
 #include "amf.h"
 #include "Rtmp.h"
-#include "Util/util.h"
-#include "Util/logger.h"
-#include "Util/TimeTicker.h"
-#include "Network/Socket.h"
 #include "Util/ResourcePool.h"
 #include "Http/HttpRequestSplitter.h"
 
@@ -32,7 +29,7 @@ public:
 
     void onParseRtmp(const char *data, size_t size);
     //作为客户端发送c0c1，等待s0s1s2并且回调
-    void startClientSession(const std::function<void()> &cb);
+    void startClientSession(const std::function<void()> &cb, bool complex = true);
 
 protected:
     virtual void onSendRawData(toolkit::Buffer::Ptr buffer) = 0;
@@ -84,18 +81,20 @@ private:
 
 protected:
     int _send_req_id = 0;
+    int _now_stream_index = 0;
     uint32_t _stream_index = STREAM_CONTROL;
 
 private:
-    int _now_stream_index = 0;
-    int _now_chunk_id = 0;
     bool _data_started = false;
+    int _now_chunk_id = 0;
     ////////////ChunkSize////////////
     size_t _chunk_size_in = DEFAULT_CHUNK_LEN;
     size_t _chunk_size_out = DEFAULT_CHUNK_LEN;
     ////////////Acknowledgement////////////
-    uint32_t _bytes_sent = 0;
-    uint32_t _bytes_sent_last = 0;
+    uint64_t _bytes_sent = 0;
+    uint64_t _bytes_sent_last = 0;
+    uint64_t _bytes_recv = 0;
+    uint64_t _bytes_recv_last = 0;
     uint32_t _windows_size = 0;
     ///////////PeerBandwidth///////////
     uint32_t _bandwidth = 2500000;

@@ -12,8 +12,8 @@
 #define ZLMEDIAKIT_H264RTPCODEC_H
 
 #include "Rtsp/RtpCodec.h"
-#include "Util/ResourcePool.h"
 #include "Extension/H264.h"
+// for DtsGenerator
 #include "Common/Stamp.h"
 
 namespace mediakit{
@@ -25,7 +25,7 @@ namespace mediakit{
  */
 class H264RtpDecoder : public RtpCodec{
 public:
-    typedef std::shared_ptr<H264RtpDecoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtpDecoder>;
 
     H264RtpDecoder();
     ~H264RtpDecoder() {}
@@ -63,7 +63,7 @@ private:
  */
 class H264RtpEncoder : public H264RtpDecoder ,public RtpInfo{
 public:
-    typedef std::shared_ptr<H264RtpEncoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtpEncoder>;
 
     /**
      * @param ssrc ssrc
@@ -84,6 +84,11 @@ public:
      * @param frame 帧数据，必须
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出所有frame缓存
+     */
+    void flush() override;
 
 private:
     void insertConfigFrame(uint64_t pts);

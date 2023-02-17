@@ -38,6 +38,7 @@ set(LINK_LIBRARIES ${SRTP_LIBRARIES})
 set(COMPILE_DEFINITIONS)
 set(INCLUDE_DIRECTORIES)
 
+if(ENABLE_SCTP)
 find_package(SCTP QUIET)
 if(SCTP_FOUND)
   message(STATUS "found library: ${SCTP_INCLUDE_DIRS} ${SCTP_LIBRARIES}")
@@ -48,12 +49,13 @@ if(SCTP_FOUND)
   list(APPEND LINK_LIBRARIES ${SCTP_LIBRARIES})
   message(STATUS "WebRTC datachannel 功能已打开")
 endif()
+endif()
 
 file(GLOB WEBRTC_SRC_LIST
   ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
-add_library(webrtc ${WEBRTC_SRC_LIST})
+add_library(webrtc STATIC ${WEBRTC_SRC_LIST})
 add_library(ZLMediaKit::WebRTC ALIAS webrtc)
 target_compile_definitions(webrtc
   # ENABLE_SCTP 暂时需要暴露

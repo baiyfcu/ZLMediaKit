@@ -15,10 +15,9 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
-#include "Util/util.h"
-#include "Common/config.h"
 #include "Common/macros.h"
 #include "Extension/Frame.h"
+#include "Network/Socket.h"
 
 namespace mediakit {
 
@@ -49,7 +48,7 @@ typedef enum {
     XX(DVI4_22050, TrackAudio, 17, 22050, 1, CodecInvalid) \
     XX(G729, TrackAudio, 18, 8000, 1, CodecInvalid) \
     XX(CelB, TrackVideo, 25, 90000, 1, CodecInvalid) \
-    XX(JPEG, TrackVideo, 26, 90000, 1, CodecInvalid) \
+    XX(JPEG, TrackVideo, 26, 90000, 1, CodecJPEG) \
     XX(nv, TrackVideo, 28, 90000, 1, CodecInvalid) \
     XX(H261, TrackVideo, 31, 90000, 1, CodecInvalid) \
     XX(MPV, TrackVideo, 32, 90000, 1, CodecInvalid) \
@@ -312,30 +311,7 @@ public:
      */
     TitleSdp(float dur_sec = 0,
              const std::map<std::string, std::string> &header = std::map<std::string, std::string>(),
-             int version = 0) : Sdp(0, 0) {
-        _printer << "v=" << version << "\r\n";
-
-        if (!header.empty()) {
-            for (auto &pr : header) {
-                _printer << pr.first << "=" << pr.second << "\r\n";
-            }
-        } else {
-            _printer << "o=- 0 0 IN IP4 0.0.0.0\r\n";
-            _printer << "s=Streamed by " << kServerName << "\r\n";
-            _printer << "c=IN IP4 0.0.0.0\r\n";
-            _printer << "t=0 0\r\n";
-        }
-
-        if (dur_sec <= 0) {
-            //直播
-            _printer << "a=range:npt=now-\r\n";
-        } else {
-            //点播
-            _dur_sec = dur_sec;
-            _printer << "a=range:npt=0-" << dur_sec << "\r\n";
-        }
-        _printer << "a=control:*\r\n";
-    }
+             int version = 0);
 
     std::string getSdp() const override {
         return _printer;

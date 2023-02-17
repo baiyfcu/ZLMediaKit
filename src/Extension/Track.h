@@ -14,7 +14,6 @@
 #include <memory>
 #include <string>
 #include "Frame.h"
-#include "Util/RingBuffer.h"
 #include "Rtsp/Rtsp.h"
 
 namespace mediakit{
@@ -24,7 +23,7 @@ namespace mediakit{
  */
 class Track : public FrameDispatcher , public CodecInfo{
 public:
-    typedef std::shared_ptr<Track> Ptr;
+    using Ptr = std::shared_ptr<Track>;
     Track(){}
 
     virtual ~Track(){}
@@ -76,22 +75,22 @@ private:
  */
 class VideoTrack : public Track {
 public:
-    typedef std::shared_ptr<VideoTrack> Ptr;
+    using Ptr = std::shared_ptr<VideoTrack>;
 
     /**
      * 返回视频高度
      */
-    virtual int getVideoHeight() const {return 0;};
+    virtual int getVideoHeight() const { return 0; }
 
     /**
      * 返回视频宽度
      */
-    virtual int getVideoWidth() const {return 0;};
+    virtual int getVideoWidth() const { return 0; }
 
     /**
      * 返回视频fps
      */
-    virtual float getVideoFps() const {return 0;};
+    virtual float getVideoFps() const { return 0; }
 };
 
 /**
@@ -99,7 +98,7 @@ public:
  */
 class AudioTrack : public Track {
 public:
-    typedef std::shared_ptr<AudioTrack> Ptr;
+    using Ptr = std::shared_ptr<AudioTrack>;
 
     /**
      * 返回音频采样率
@@ -119,7 +118,7 @@ public:
 
 class AudioTrackImp : public AudioTrack{
 public:
-    typedef std::shared_ptr<AudioTrackImp> Ptr;
+    using Ptr = std::shared_ptr<AudioTrackImp>;
 
     /**
      * 构造函数

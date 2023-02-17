@@ -13,7 +13,6 @@
 
 #include "Rtmp/RtmpCodec.h"
 #include "Extension/Track.h"
-#include "Util/ResourcePool.h"
 #include "Extension/H264.h"
 
 namespace mediakit{
@@ -23,7 +22,7 @@ namespace mediakit{
  */
 class H264RtmpDecoder : public RtmpCodec {
 public:
-    typedef std::shared_ptr<H264RtmpDecoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtmpDecoder>;
 
     H264RtmpDecoder();
     ~H264RtmpDecoder() {}
@@ -53,7 +52,7 @@ protected:
  */
 class H264RtmpEncoder : public H264RtmpDecoder{
 public:
-    typedef std::shared_ptr<H264RtmpEncoder> Ptr;
+    using Ptr = std::shared_ptr<H264RtmpEncoder>;
 
     /**
      * 构造函数，track可以为空，此时则在inputFrame时输入sps pps
@@ -62,13 +61,18 @@ public:
      * @param track
      */
     H264RtmpEncoder(const Track::Ptr &track);
-    ~H264RtmpEncoder() {}
+    ~H264RtmpEncoder() = default;
 
     /**
      * 输入264帧，可以不带sps pps
      * @param frame 帧数据
      */
     bool inputFrame(const Frame::Ptr &frame) override;
+
+    /**
+     * 刷新输出所有frame缓存
+     */
+    void flush() override;
 
     /**
      * 生成config包

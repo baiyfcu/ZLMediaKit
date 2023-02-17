@@ -50,9 +50,10 @@ option(ENABLE_SERVER "Enable Server" ON)
 option(ENABLE_SERVER_LIB "Enable server as android static library" OFF)
 option(ENABLE_SRT "Enable SRT" ON)
 option(ENABLE_TESTS "Enable Tests" ON)
+option(ENABLE_SCTP "Enable SCTP" ON)
 option(ENABLE_WEBRTC "Enable WebRTC" ON)
 option(ENABLE_X264 "Enable x264" OFF)
-option(ENABLE_WEPOLL "Enable wepoll" OFF)
+option(ENABLE_WEPOLL "Enable wepoll" ON)
 
 option(USE_SOLUTION_FOLDERS "Enable solution dir supported" ON)
 
@@ -97,11 +98,12 @@ set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
 
 # 添加 git 版本信息
-set(COMMIT_HASH "Git_NotFound_Unkown_commit")
-set(BRANCH_NAME "Git_NotFound_Unkown_branch")
+set(COMMIT_HASH "Git_Unkown_commit")
+set(COMMIT_TIME "Git_Unkown_time")
+set(BRANCH_NAME "Git_Unkown_branch")
 set(BUILD_TIME "")
 
-string(TIMESTAMP BUILD_TIME "%Y-%m-%d %H:%M:%S")
+string(TIMESTAMP BUILD_TIME "%Y-%m-%dT%H:%M:%S")
 
 find_package(Git QUIET)
 if(GIT_FOUND)
@@ -117,6 +119,13 @@ if(GIT_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} log --format=format:%aI -1
+    OUTPUT_VARIABLE COMMIT_TIME
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 configure_file(
@@ -124,7 +133,7 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/version.h
   @ONLY)
 
-message(STATUS "Git version is ${BRANCH_NAME}:${COMMIT_HASH}:${BUILD_TIME}")
+message(STATUS "Git version is ${BRANCH_NAME} ${COMMIT_HASH}/${COMMIT_TIME} ${BUILD_TIME}")
 
 ##############################################################################
 
@@ -172,12 +181,12 @@ if(UNIX)
     "-Wno-unused-function;-Wno-unused-parameter;-Wno-unused-variable"
     "-Wno-error=extra;-Wno-error=missing-field-initializers;-Wno-error=type-limits")
 elseif(WIN32)
-  set(COMPILE_OPTIONS_DEFAULT
-    # TODO: /wd4819 应该是不会生效
-    "/wd4566;/wd4819"
-    # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
-    "/EHsc")
   if (MSVC)
+    set(COMPILE_OPTIONS_DEFAULT
+            # TODO: /wd4819 应该是不会生效
+            "/wd4566;/wd4819"
+            # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
+            "/EHsc")
     # disable Windows logo
     list(APPEND COMPILE_OPTIONS_DEFAULT "/nologo")
     list(APPEND CMAKE_STATIC_LINKER_FLAGS "/nologo")
@@ -299,7 +308,7 @@ if(ENABLE_FFMPEG)
 endif()
 
 if(ENABLE_MEM_DEBUG)
-  list(APPEND COMPILE_OPTIONS_DEFAULT
+  update_cached_list(MK_LINK_LIBRARIES
     "-Wl,-wrap,free;-Wl,-wrap,malloc;-Wl,-wrap,realloc;-Wl,-wrap,calloc")
   update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_MEM_DEBUG)
   message(STATUS "已启用内存调试功能")
@@ -308,6 +317,10 @@ endif()
 if(ENABLE_ASAN)
   list(APPEND COMPILE_OPTIONS_DEFAULT
     "-fsanitize=address;-fno-omit-frame-pointer")
+  # https://github.com/google/sanitizers/wiki/AddressSanitizer#using-addresssanitizer
+  # > In order to use AddressSanitizer you will need to
+  # > compile and link your program using clang with the -fsanitize=address switch.
+  update_cached_list(MK_LINK_LIBRARIES "-fsanitize=address")
   message(STATUS "已启用 Address Sanitize")
 endif()
 
@@ -412,6 +425,9 @@ endif()
 
 # for version.h
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+# for assert.h
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdpart)
 
 add_subdirectory(3rdpart)
 

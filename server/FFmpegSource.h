@@ -16,7 +16,6 @@
 #include <functional>
 #include "Process.h"
 #include "Util/TimeTicker.h"
-#include "Network/Socket.h"
 #include "Common/MediaSource.h"
 
 namespace FFmpeg {
@@ -75,7 +74,7 @@ private:
 
     ///////MediaSourceEvent override///////
     // 关闭
-    bool close(mediakit::MediaSource &sender,bool force) override;
+    bool close(mediakit::MediaSource &sender) override;
     // 获取媒体源类型
     mediakit::MediaOriginType getOriginType(mediakit::MediaSource &sender) const override;
     //获取媒体源url或者文件路径

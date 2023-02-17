@@ -14,8 +14,7 @@
 #if defined(ENABLE_RTPPROXY)
 
 #include "Common/MediaSink.h"
-#include "Common/Stamp.h"
-#include "Extension/CommonRtp.h"
+#include "Rtsp/RtpCodec.h"
 
 namespace mediakit {
 
@@ -44,7 +43,7 @@ protected:
     virtual void onRTP(toolkit::Buffer::Ptr rtp, bool is_key = false) = 0;
 
 private:
-    RtpCodec::Ptr createRtpEncoder(const Track::Ptr &track);
+    std::shared_ptr<RtpCodec> createRtpEncoder(const Track::Ptr &track);
 
 private:
     bool _send_audio;
