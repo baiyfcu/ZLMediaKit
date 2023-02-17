@@ -92,7 +92,18 @@ endif()
 string(TOLOWER ${CMAKE_SYSTEM_NAME} SYSTEM_NAME_LOWER)
 # 设置输出目录, 包括 bin, lib 以及其他文件
 # Windows 也不再区分 32/64
-set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
+if (CMAKE_SYSTEM_NAME MATCHES "Windows")
+    if (CMAKE_CL_64)
+        set(CL_32_64 64)
+    else ()
+        set(CL_32_64 32)
+    endif ()
+    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}${CL_32_64})
+    set(OUTPUT_FULL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}${CL_32_64}/${CMAKE_BUILD_TYPE})
+    message(WARNING "++++++++++++++:${OUTPUT_DIR}/${CMAKE_BUILD_TYPE}")
+else()
+    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
+endif()
 set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
 
@@ -411,6 +422,7 @@ endif()
 ##############################################################################
 
 # for version.h
+update_cached_list(ZLM_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 add_subdirectory(3rdpart)
