@@ -9,16 +9,19 @@
  */
 
 #include "WebRtcPusher.h"
+#include "Common/config.h"
 
 using namespace std;
-using namespace mediakit;
+
+namespace mediakit {
 
 WebRtcPusher::Ptr WebRtcPusher::create(const EventPoller::Ptr &poller,
                                        const RtspMediaSourceImp::Ptr &src,
                                        const std::shared_ptr<void> &ownership,
                                        const MediaInfo &info,
-                                       const mediakit::ProtocolOption &option) {
-    WebRtcPusher::Ptr ret(new WebRtcPusher(poller, src, ownership, info, option), [](WebRtcPusher *ptr) {
+                                       const ProtocolOption &option,
+                                       bool preferred_tcp) {
+    WebRtcPusher::Ptr ret(new WebRtcPusher(poller, src, ownership, info, option,preferred_tcp), [](WebRtcPusher *ptr) {
         ptr->onDestory();
         delete ptr;
     });
@@ -30,7 +33,8 @@ WebRtcPusher::WebRtcPusher(const EventPoller::Ptr &poller,
                            const RtspMediaSourceImp::Ptr &src,
                            const std::shared_ptr<void> &ownership,
                            const MediaInfo &info,
-                           const mediakit::ProtocolOption &option) : WebRtcTransportImp(poller) {
+                           const ProtocolOption &option,
+                           bool preferred_tcp) : WebRtcTransportImp(poller,preferred_tcp) {
     _media_info = info;
     _push_src = src;
     _push_src_ownership = ownership;
@@ -38,13 +42,9 @@ WebRtcPusher::WebRtcPusher(const EventPoller::Ptr &poller,
     CHECK(_push_src);
 }
 
-bool WebRtcPusher::close(MediaSource &sender, bool force) {
+bool WebRtcPusher::close(MediaSource &sender) {
     //此回调在其他线程触发
-    if (!force && totalReaderCount(sender)) {
-        return false;
-    }
-    string err = StrPrinter << "close media:" << sender.getSchema() << "/" << sender.getVhost() << "/"
-                            << sender.getApp() << "/" << sender.getId() << " " << force;
+    string err = StrPrinter << "close media: " << sender.getUrl();
     weak_ptr<WebRtcPusher> weak_self = static_pointer_cast<WebRtcPusher>(shared_from_this());
     getPoller()->async([weak_self, err]() {
         auto strong_self = weak_self.lock();
@@ -75,6 +75,10 @@ string WebRtcPusher::getOriginUrl(MediaSource &sender) const {
 
 std::shared_ptr<SockInfo> WebRtcPusher::getOriginSock(MediaSource &sender) const {
     return static_pointer_cast<SockInfo>(getSession());
+}
+
+toolkit::EventPoller::Ptr WebRtcPusher::getOwnerPoller(MediaSource &sender) {
+    return getPoller();
 }
 
 void WebRtcPusher::onRecvRtp(MediaTrack &track, const string &rid, RtpPacket::Ptr rtp) {
@@ -123,9 +127,7 @@ void WebRtcPusher::onDestory() {
 
     if (getSession()) {
         WarnL << "RTC推流器("
-              << _media_info._vhost << "/"
-              << _media_info._app << "/"
-              << _media_info._streamid
+              << _media_info.shortUrl()
               << ")结束推流,耗时(s):" << duration;
         if (bytes_usage >= iFlowThreshold * 1024) {
             NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastFlowReport, _media_info, bytes_usage, duration,
@@ -148,10 +150,18 @@ void WebRtcPusher::onRtcConfigure(RtcConfigure &configure) const {
     configure.audio.direction = configure.video.direction = RtpDirection::recvonly;
 }
 
-int WebRtcPusher::getLossRate(MediaSource &sender,mediakit::TrackType type){
+float WebRtcPusher::getLossRate(MediaSource &sender,TrackType type){
     return WebRtcTransportImp::getLossRate(type);
 }
 
-toolkit::EventPoller::Ptr WebRtcPusher::getOwnerPoller(mediakit::MediaSource &sender) {
-    return getPoller();
+void WebRtcPusher::OnDtlsTransportClosed(const RTC::DtlsTransport *dtlsTransport) {
+   //主动关闭推流，那么不等待重推
+    _push_src = nullptr;
+    WebRtcTransportImp::OnDtlsTransportClosed(dtlsTransport);
 }
+
+void WebRtcPusher::onRtcpBye(){
+     WebRtcTransportImp::onRtcpBye();
+}
+
+}// namespace mediakit

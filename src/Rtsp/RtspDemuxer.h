@@ -12,15 +12,14 @@
 #define SRC_RTP_RTSPDEMUXER_H_
 
 #include <unordered_map>
-#include "Player/PlayerBase.h"
-#include "Util/TimeTicker.h"
-#include "RtpCodec.h"
+#include "Rtsp/RtpCodec.h"
+#include "Common/MediaSink.h"
 
 namespace mediakit {
 
 class RtspDemuxer : public Demuxer {
 public:
-    typedef std::shared_ptr<RtspDemuxer> Ptr;
+    using Ptr = std::shared_ptr<RtspDemuxer>;
     RtspDemuxer() = default;
     virtual ~RtspDemuxer() = default;
 

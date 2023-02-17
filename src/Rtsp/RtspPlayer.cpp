@@ -17,6 +17,11 @@
 #include "Util/MD5.h"
 #include "Util/base64.h"
 #include "Rtcp/Rtcp.h"
+#include "Rtcp/RtcpContext.h"
+#include "RtspMediaSource.h"
+#include "RtspDemuxer.h"
+#include "RtspPlayerImp.h"
+
 using namespace toolkit;
 using namespace std;
 
@@ -197,13 +202,24 @@ void RtspPlayer::handleResDESCRIBE(const Parser& parser) {
         _content_base.pop_back();
     }
 
-    SdpParser sdpParser(parser.Content());
     //解析sdp
-    _sdp_track = sdpParser.getAvailableTrack();
+    SdpParser sdpParser(parser.Content());
+
+    string sdp;
+    auto play_track = (TrackType)((int)(*this)[Client::kPlayTrack] - 1);
+    if (play_track != TrackInvalid) {
+        auto track = sdpParser.getTrack(play_track);
+        _sdp_track.emplace_back(track);
+        sdp = track->toString();
+    } else {
+        _sdp_track = sdpParser.getAvailableTrack();
+        sdp = sdpParser.toString();
+    }
+
     if (_sdp_track.empty()) {
         throw std::runtime_error("无有效的Sdp Track");
     }
-    if (!onCheckSDP(sdpParser.toString())) {
+    if (!onCheckSDP(sdp)) {
         throw std::runtime_error("onCheckSDP faied");
     }
     _rtcp_context.clear();
@@ -569,16 +585,16 @@ void RtspPlayer::sendRtspRequest(const string &cmd, const string &url, const std
 
 void RtspPlayer::sendRtspRequest(const string &cmd, const string &url,const StrCaseMap &header_const) {
     auto header = header_const;
-    header.emplace("CSeq",StrPrinter << _cseq_send++);
-    header.emplace("User-Agent",kServerName);
+    header.emplace("CSeq", StrPrinter << _cseq_send++);
+    header.emplace("User-Agent", kServerName);
 
-    if(!_session_id.empty()){
+    if (!_session_id.empty()) {
         header.emplace("Session", _session_id);
     }
 
-    if(!_realm.empty() && !(*this)[Client::kRtspUser].empty()){
-        if(!_md5_nonce.empty()){
-            //MD5认证
+    if (!_realm.empty() && !(*this)[Client::kRtspUser].empty()) {
+        if (!_md5_nonce.empty()) {
+            // MD5认证
             /*
             response计算方法如下：
             RTSP客户端应该使用username + password并计算response如下:
@@ -588,7 +604,7 @@ void RtspPlayer::sendRtspRequest(const string &cmd, const string &url,const StrC
                 response= md5( md5(username:realm:password):nonce:md5(public_method:url) );
              */
             string encrypted_pwd = (*this)[Client::kRtspPwd];
-            if(!(*this)[Client::kRtspPwdIsMD5].as<bool>()){
+            if (!(*this)[Client::kRtspPwdIsMD5].as<bool>()) {
                 encrypted_pwd = MD5((*this)[Client::kRtspUser] + ":" + _realm + ":" + encrypted_pwd).hexdigest();
             }
             auto response = MD5(encrypted_pwd + ":" + _md5_nonce + ":" + MD5(cmd + ":" + url).hexdigest()).hexdigest();
@@ -599,13 +615,11 @@ void RtspPlayer::sendRtspRequest(const string &cmd, const string &url,const StrC
             printer << "nonce=\"" << _md5_nonce << "\", ";
             printer << "uri=\"" << url << "\", ";
             printer << "response=\"" << response << "\"";
-            header.emplace("Authorization",printer);
-        }else if(!(*this)[Client::kRtspPwdIsMD5].as<bool>()){
-            //base64认证
-            string authStr = StrPrinter << (*this)[Client::kRtspUser] << ":" << (*this)[Client::kRtspPwd];
-            char authStrBase64[1024] = {0};
-            av_base64_encode(authStrBase64, sizeof(authStrBase64), (uint8_t *) authStr.data(), (int) authStr.size());
-            header.emplace("Authorization",StrPrinter << "Basic " << authStrBase64 );
+            header.emplace("Authorization", printer);
+        } else if (!(*this)[Client::kRtspPwdIsMD5].as<bool>()) {
+            // base64认证
+            auto authStrBase64 = encodeBase64((*this)[Client::kRtspUser] + ":" + (*this)[Client::kRtspPwd]);
+            header.emplace("Authorization", StrPrinter << "Basic " << authStrBase64);
         }
     }
 
@@ -734,6 +748,51 @@ int RtspPlayer::getTrackIndexByTrackType(TrackType track_type) const {
         return 0;
     }
     throw SockException(Err_shutdown, StrPrinter << "no such track with type:" << getTrackString(track_type));
+}
+
+///////////////////////////////////////////////////
+// RtspPlayerImp
+float RtspPlayerImp::getDuration() const
+{
+    return _demuxer ? _demuxer->getDuration() : 0;
+}
+
+void RtspPlayerImp::onPlayResult(const toolkit::SockException &ex) {
+    if (!(*this)[Client::kWaitTrackReady].as<bool>() || ex) {
+        Super::onPlayResult(ex);
+        return;
+    }
+}
+
+void RtspPlayerImp::addTrackCompleted() {
+    if ((*this)[Client::kWaitTrackReady].as<bool>()) {
+        Super::onPlayResult(toolkit::SockException(toolkit::Err_success, "play success"));
+    }
+}
+
+std::vector<Track::Ptr> RtspPlayerImp::getTracks(bool ready /*= true*/) const
+{
+    return _demuxer ? _demuxer->getTracks(ready) : Super::getTracks(ready);
+}
+
+bool RtspPlayerImp::onCheckSDP(const std::string &sdp)
+{
+    _rtsp_media_src = std::dynamic_pointer_cast<RtspMediaSource>(_media_src);
+    if (_rtsp_media_src) {
+        _rtsp_media_src->setSdp(sdp);
+    }
+    _demuxer = std::make_shared<RtspDemuxer>();
+    _demuxer->setTrackListener(this, (*this)[Client::kWaitTrackReady].as<bool>());
+    _demuxer->loadSdp(sdp);
+    return true;
+}
+
+void RtspPlayerImp::onRecvRTP(RtpPacket::Ptr rtp, const SdpTrack::Ptr &track) {
+    //rtp解复用时可以判断是否为关键帧起始位置
+    auto key_pos = _demuxer->inputRtp(rtp);
+    if (_rtsp_media_src) {
+        _rtsp_media_src->onWrite(std::move(rtp), key_pos);
+    }
 }
 
 } /* namespace mediakit */

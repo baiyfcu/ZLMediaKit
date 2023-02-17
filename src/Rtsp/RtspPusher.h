@@ -14,8 +14,6 @@
 #include <string>
 #include <memory>
 #include "RtspMediaSource.h"
-#include "Util/util.h"
-#include "Util/logger.h"
 #include "Poller/Timer.h"
 #include "Network/Socket.h"
 #include "Network/TcpClient.h"
@@ -27,7 +25,7 @@ namespace mediakit {
 
 class RtspPusher : public toolkit::TcpClient, public RtspSplitter, public PusherBase {
 public:
-    typedef std::shared_ptr<RtspPusher> Ptr;
+    using Ptr = std::shared_ptr<RtspPusher>;
     RtspPusher(const toolkit::EventPoller::Ptr &poller,const RtspMediaSource::Ptr &src);
     ~RtspPusher() override;
     void publish(const std::string &url) override;
@@ -86,9 +84,9 @@ private:
     //RTCP端口,trackid idx 为数组下标
     toolkit::Socket::Ptr _rtcp_sock[2];
     //超时功能实现
-    std::shared_ptr<toolkit::Timer> _publish_timer;
+    toolkit::Timer::Ptr _publish_timer;
     //心跳定时器
-    std::shared_ptr<toolkit::Timer> _beat_timer;
+    toolkit::Timer::Ptr _beat_timer;
     std::weak_ptr<RtspMediaSource> _push_src;
     RtspMediaSource::RingType::RingReader::Ptr _rtsp_reader;
     std::function<void(const Parser&)> _on_res_func;

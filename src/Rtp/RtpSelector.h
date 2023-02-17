@@ -23,7 +23,7 @@ namespace mediakit{
 class RtpSelector;
 class RtpProcessHelper : public MediaSourceEvent , public std::enable_shared_from_this<RtpProcessHelper> {
 public:
-    typedef std::shared_ptr<RtpProcessHelper> Ptr;
+    using Ptr = std::shared_ptr<RtpProcessHelper>;
     RtpProcessHelper(const std::string &stream_id, const std::weak_ptr<RtpSelector > &parent);
     ~RtpProcessHelper();
     void attachEvent();
@@ -31,20 +31,18 @@ public:
 
 protected:
     // 通知其停止推流
-    bool close(MediaSource &sender,bool force) override;
-    // 观看总人数
-    int totalReaderCount(MediaSource &sender) override;
+    bool close(MediaSource &sender) override;
 
 private:
-    std::weak_ptr<RtpSelector > _parent;
-    RtpProcess::Ptr _process;
     std::string _stream_id;
+    RtpProcess::Ptr _process;
+    std::weak_ptr<RtpSelector> _parent;
 };
 
 class RtpSelector : public std::enable_shared_from_this<RtpSelector>{
 public:
-    RtpSelector();
-    ~RtpSelector();
+    RtpSelector() = default;
+    ~RtpSelector() = default;
 
     static bool getSSRC(const char *data,size_t data_len, uint32_t &ssrc);
     static RtpSelector &Instance();
@@ -55,21 +53,9 @@ public:
     void clear();
 
     /**
-     * 输入多个rtp流，根据ssrc分流
-     * @param sock 本地socket
-     * @param data 收到的数据
-     * @param data_len 收到的数据长度
-     * @param addr rtp流源地址
-     * @param dts_out 解析出最新的dts
-     * @return 是否成功
-     */
-    bool inputRtp(const toolkit::Socket::Ptr &sock, const char *data, size_t data_len,
-                  const struct sockaddr *addr, uint64_t *dts_out = nullptr);
-
-    /**
      * 获取一个rtp处理器
      * @param stream_id 流id
-     * @param makeNew 不存在时是否新建
+     * @param makeNew 不存在时是否新建, 该参数为true时，必须确保之前未创建同名对象
      * @return rtp处理器
      */
     RtpProcess::Ptr getProcess(const std::string &stream_id, bool makeNew);

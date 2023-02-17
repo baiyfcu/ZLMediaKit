@@ -8,7 +8,7 @@ namespace SRT {
 using namespace mediakit;
 
 SrtSession::SrtSession(const Socket::Ptr &sock)
-    : UdpSession(sock) {
+    : Session(sock) {
     socklen_t addr_len = sizeof(_peer_addr);
     memset(&_peer_addr, 0, addr_len);
     // TraceL<<"before addr len "<<addr_len;
@@ -128,9 +128,9 @@ void SrtSession::onError(const SockException &err) {
     // 防止互相引用导致不释放
     auto transport = std::move(_transport);
     getPoller()->async(
-        [transport, err] {
+        [transport] {
             //延时减引用，防止使用transport对象时，销毁对象
-            transport->onShutdown(err);
+            //transport->onShutdown(err);
         },
         false);
 }

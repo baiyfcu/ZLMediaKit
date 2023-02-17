@@ -12,7 +12,7 @@
 #define SRC_DEVICE_PLAYERPROXY_H_
 
 #include <memory>
-#include "Common/Device.h"
+#include "Common/MultiMediaSourceMuxer.h"
 #include "Player/MediaPlayer.h"
 #include "Util/TimeTicker.h"
 
@@ -20,7 +20,7 @@ namespace mediakit {
 
 class PlayerProxy : public MediaPlayer, public MediaSourceEvent, public std::enable_shared_from_this<PlayerProxy> {
 public:
-    typedef std::shared_ptr<PlayerProxy> Ptr;
+    using Ptr = std::shared_ptr<PlayerProxy>;
 
     //如果retry_count<0,则一直重试播放；否则重试retry_count次数
     //默认一直重试
@@ -54,12 +54,12 @@ public:
 
 private:
     //MediaSourceEvent override
-    bool close(MediaSource &sender,bool force) override;
+    bool close(MediaSource &sender) override;
     int totalReaderCount(MediaSource &sender) override;
     MediaOriginType getOriginType(MediaSource &sender) const override;
     std::string getOriginUrl(MediaSource &sender) const override;
     std::shared_ptr<toolkit::SockInfo> getOriginSock(MediaSource &sender) const override;
-    toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
+    float getLossRate(MediaSource &sender, TrackType type) override;
 
     void rePlay(const std::string &strUrl,int iFailedCnt);
     void onPlaySuccess();

@@ -9,6 +9,7 @@
  */
 
 #include "H264Rtp.h"
+#include "Common/config.h"
 
 namespace mediakit{
 
@@ -283,12 +284,28 @@ bool H264RtpEncoder::inputFrame(const Frame::Ptr &frame) {
         default: break;
     }
 
-    if (_last_frame) {
-        //如果时间戳发生了变化，那么markbit才置true
-        inputFrame_l(_last_frame, _last_frame->pts() != frame->pts());
+    GET_CONFIG(int,lowLatency,Rtp::kLowLatency);
+    if (lowLatency) { // 低延迟模式
+        if (_last_frame) {
+            flush();
+        }
+        inputFrame_l(frame, true);
+    } else {
+        if (_last_frame) {
+            //如果时间戳发生了变化，那么markbit才置true
+            inputFrame_l(_last_frame, _last_frame->pts() != frame->pts());
+        }
+        _last_frame = Frame::getCacheAbleFrame(frame);
     }
-    _last_frame = Frame::getCacheAbleFrame(frame);
     return true;
+}
+
+void H264RtpEncoder::flush() {
+    if (_last_frame) {
+        // 如果时间戳发生了变化，那么markbit才置true
+        inputFrame_l(_last_frame, true);
+        _last_frame = nullptr;
+    }
 }
 
 bool H264RtpEncoder::inputFrame_l(const Frame::Ptr &frame, bool is_mark){

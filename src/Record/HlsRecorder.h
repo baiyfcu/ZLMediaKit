@@ -13,24 +13,27 @@
 
 #include "HlsMakerImp.h"
 #include "MPEG.h"
+#include "Common/config.h"
 
 namespace mediakit {
 
-class HlsRecorder : public MediaSourceEventInterceptor, public MpegMuxer, public std::enable_shared_from_this<HlsRecorder> {
+class HlsRecorder final : public MediaSourceEventInterceptor, public MpegMuxer, public std::enable_shared_from_this<HlsRecorder> {
 public:
     using Ptr = std::shared_ptr<HlsRecorder>;
 
-    HlsRecorder(const std::string &m3u8_file, const std::string &params) : MpegMuxer(false) {
+    HlsRecorder(const std::string &m3u8_file, const std::string &params, const ProtocolOption &option) : MpegMuxer(false) {
         GET_CONFIG(uint32_t, hlsNum, Hls::kSegmentNum);
         GET_CONFIG(bool, hlsKeep, Hls::kSegmentKeep);
         GET_CONFIG(uint32_t, hlsBufSize, Hls::kFileBufSize);
         GET_CONFIG(float, hlsDuration, Hls::kSegmentDuration);
+
+        _option = option;
         _hls = std::make_shared<HlsMakerImp>(m3u8_file, params, hlsBufSize, hlsDuration, hlsNum, hlsKeep);
         //清空上次的残余文件
         _hls->clearCache();
     }
 
-    ~HlsRecorder() = default;
+    ~HlsRecorder() { MpegMuxer::flush(); };
 
     void setMediaSource(const std::string &vhost, const std::string &app, const std::string &stream_id) {
         _hls->setMediaSource(vhost, app, stream_id);
@@ -44,10 +47,9 @@ public:
     int readerCount() { return _hls->getMediaSource()->readerCount(); }
 
     void onReaderChanged(MediaSource &sender, int size) override {
-        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
         // hls保留切片个数为0时代表为hls录制(不删除切片)，那么不管有无观看者都一直生成hls
-        _enabled = hls_demand ? (_hls->isLive() ? size : true) : true;
-        if (!size && _hls->isLive() && hls_demand) {
+        _enabled = _option.hls_demand ? (_hls->isLive() ? size : true) : true;
+        if (!size && _hls->isLive() && _option.hls_demand) {
             // hls直播时，如果无人观看就删除视频缓存，目的是为了防止视频跳跃
             _clear_cache = true;
         }
@@ -55,23 +57,21 @@ public:
     }
 
     bool inputFrame(const Frame::Ptr &frame) override {
-        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
-        if (_clear_cache && hls_demand) {
+        if (_clear_cache && _option.hls_demand) {
             _clear_cache = false;
             //清空旧的m3u8索引文件于ts切片
             _hls->clearCache();
             _hls->getMediaSource()->setIndexFile("");
         }
-        if (_enabled || !hls_demand) {
+        if (_enabled || !_option.hls_demand) {
             return MpegMuxer::inputFrame(frame);
         }
         return false;
     }
 
     bool isEnabled() {
-        GET_CONFIG(bool, hls_demand, General::kHlsDemand);
         //缓存尚未清空时，还允许触发inputFrame函数，以便及时清空缓存
-        return hls_demand ? (_clear_cache ? true : _enabled) : true;
+        return _option.hls_demand ? (_clear_cache ? true : _enabled) : true;
     }
 
 private:
@@ -86,6 +86,7 @@ private:
 private:
     bool _enabled = true;
     bool _clear_cache = false;
+    ProtocolOption _option;
     std::shared_ptr<HlsMakerImp> _hls;
 };
 }//namespace mediakit

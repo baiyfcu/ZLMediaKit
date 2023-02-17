@@ -9,14 +9,17 @@
  */
 
 #include "WebRtcPlayer.h"
+#include "Common/config.h"
 
 using namespace std;
-using namespace mediakit;
+
+namespace mediakit {
 
 WebRtcPlayer::Ptr WebRtcPlayer::create(const EventPoller::Ptr &poller,
                                        const RtspMediaSource::Ptr &src,
-                                       const MediaInfo &info) {
-    WebRtcPlayer::Ptr ret(new WebRtcPlayer(poller, src, info), [](WebRtcPlayer *ptr) {
+                                       const MediaInfo &info,
+                                       bool preferred_tcp) {
+    WebRtcPlayer::Ptr ret(new WebRtcPlayer(poller, src, info, preferred_tcp), [](WebRtcPlayer *ptr) {
         ptr->onDestory();
         delete ptr;
     });
@@ -26,7 +29,8 @@ WebRtcPlayer::Ptr WebRtcPlayer::create(const EventPoller::Ptr &poller,
 
 WebRtcPlayer::WebRtcPlayer(const EventPoller::Ptr &poller,
                            const RtspMediaSource::Ptr &src,
-                           const MediaInfo &info) : WebRtcTransportImp(poller) {
+                           const MediaInfo &info,
+                           bool preferred_tcp) : WebRtcTransportImp(poller,preferred_tcp) {
     _media_info = info;
     _play_src = src;
     CHECK(_play_src);
@@ -39,23 +43,25 @@ void WebRtcPlayer::onStartWebRTC() {
         _play_src->pause(false);
         _reader = _play_src->getRing()->attach(getPoller(), true);
         weak_ptr<WebRtcPlayer> weak_self = static_pointer_cast<WebRtcPlayer>(shared_from_this());
+        weak_ptr<Session> weak_session = getSession();
+        _reader->setGetInfoCB([weak_session]() { return weak_session.lock(); });
         _reader->setReadCB([weak_self](const RtspMediaSource::RingDataType &pkt) {
-            auto strongSelf = weak_self.lock();
-            if (!strongSelf) {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
                 return;
             }
             size_t i = 0;
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 //TraceL<<"send track type:"<<rtp->type<<" ts:"<<rtp->getStamp()<<" ntp:"<<rtp->ntp_stamp<<" size:"<<rtp->getPayloadSize()<<" i:"<<i;
-                strongSelf->onSendRtp(rtp, ++i == pkt->size());
+                strong_self->onSendRtp(rtp, ++i == pkt->size());
             });
         });
         _reader->setDetachCB([weak_self]() {
-            auto strongSelf = weak_self.lock();
-            if (!strongSelf) {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
                 return;
             }
-            strongSelf->onShutdown(SockException(Err_shutdown, "rtsp ring buffer detached"));
+            strong_self->onShutdown(SockException(Err_shutdown, "rtsp ring buffer detached"));
         });
     }
     //使用完毕后，释放强引用，这样确保推流器断开后能及时注销媒体
@@ -70,9 +76,7 @@ void WebRtcPlayer::onDestory() {
     GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
     if (_reader && getSession()) {
         WarnL << "RTC播放器("
-              << _media_info._vhost << "/"
-              << _media_info._app << "/"
-              << _media_info._streamid
+              << _media_info.shortUrl()
               << ")结束播放,耗时(s):" << duration;
         if (bytes_usage >= iFlowThreshold * 1024) {
             NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastFlowReport, _media_info, bytes_usage, duration,
@@ -88,3 +92,5 @@ void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
     configure.audio.direction = configure.video.direction = RtpDirection::sendonly;
     configure.setPlayRtspInfo(_play_src->getSdp());
 }
+
+}// namespace mediakit

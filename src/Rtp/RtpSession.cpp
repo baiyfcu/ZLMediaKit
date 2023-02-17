@@ -13,6 +13,7 @@
 #include "RtpSelector.h"
 #include "Network/TcpServer.h"
 #include "Rtsp/RtpReceiver.h"
+#include "Common/config.h"
 
 using namespace std;
 using namespace toolkit;
@@ -20,27 +21,28 @@ using namespace toolkit;
 namespace mediakit{
 
 const string RtpSession::kStreamID = "stream_id";
-const string RtpSession::kIsUDP = "is_udp";
 const string RtpSession::kSSRC = "ssrc";
+const string RtpSession::kOnlyAudio = "only_audio";
 
 void RtpSession::attachServer(const Server &server) {
-    _stream_id = const_cast<Server &>(server)[kStreamID];
-    _is_udp = const_cast<Server &>(server)[kIsUDP];
-    _ssrc = const_cast<Server &>(server)[kSSRC];
+    setParams(const_cast<Server &>(server));
+}
 
-    if (_is_udp) {
-        //设置udp socket读缓存
-        SockUtil::setRecvBuf(getSock()->rawFD(), 4 * 1024 * 1024);
-        _statistic_udp = std::make_shared<ObjectStatistic<UdpSession> >();
-    } else {
-        _statistic_tcp = std::make_shared<ObjectStatistic<TcpSession> >();
-    }
+void RtpSession::setParams(mINI &ini) {
+    _stream_id = ini[kStreamID];
+    _ssrc = ini[kSSRC];
+    _only_audio = ini[kOnlyAudio];
 }
 
 RtpSession::RtpSession(const Socket::Ptr &sock) : Session(sock) {
     DebugP(this);
     socklen_t addr_len = sizeof(_addr);
     getpeername(sock->rawFD(), (struct sockaddr *)&_addr, &addr_len);
+    _is_udp = sock->sockType() == SockNum::Sock_UDP;
+    if (_is_udp) {
+        // 设置udp socket读缓存
+        SockUtil::setRecvBuf(getSock()->rawFD(), 4 * 1024 * 1024);
+    }
 }
 
 RtpSession::~RtpSession() {
@@ -101,7 +103,8 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
         }
         //tcp情况下，一个tcp链接只可能是一路流，不需要通过多个ssrc来区分，所以不需要频繁getProcess
         _process = RtpSelector::Instance().getProcess(_stream_id, true);
-        _process->setListener(dynamic_pointer_cast<RtpSession>(shared_from_this()));
+        _process->setOnlyAudio(_only_audio);
+        _process->setDelegate(dynamic_pointer_cast<RtpSession>(shared_from_this()));
     }
     try {
         uint32_t rtp_ssrc = 0;
@@ -124,19 +127,11 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
     _ticker.resetTime();
 }
 
-bool RtpSession::close(MediaSource &sender, bool force) {
+bool RtpSession::close(MediaSource &sender) {
     //此回调在其他线程触发
-    if(!_process || (!force && _process->getTotalReaderCount())){
-        return false;
-    }
-    string err = StrPrinter << "close media:" << sender.getSchema() << "/" << sender.getVhost() << "/" << sender.getApp() << "/" << sender.getId() << " " << force;
-    safeShutdown(SockException(Err_shutdown,err));
+    string err = StrPrinter << "close media: " << sender.getUrl();
+    safeShutdown(SockException(Err_shutdown, err));
     return true;
-}
-
-int RtpSession::totalReaderCount(MediaSource &sender) {
-    //此回调在其他线程触发
-    return _process ? _process->getTotalReaderCount() : sender.totalReaderCount();
 }
 
 static const char *findSSRC(const char *data, ssize_t len, uint32_t ssrc) {

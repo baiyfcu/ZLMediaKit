@@ -10,19 +10,21 @@
 
 #include "Sdp.h"
 #include "Rtsp/Rtsp.h"
+#include "Common/config.h"
 #include <cinttypes>
 
 using namespace std;
 using namespace toolkit;
-using namespace mediakit;
 
-namespace RTC {
+namespace mediakit {
+
+namespace Rtc {
 #define RTC_FIELD "rtc."
 const string kPreferredCodecA = RTC_FIELD"preferredCodecA";
 const string kPreferredCodecV = RTC_FIELD"preferredCodecV";
 static onceToken token([]() {
     mINI::Instance()[kPreferredCodecA] = "PCMU,PCMA,opus,mpeg4-generic";
-    mINI::Instance()[kPreferredCodecV] = "H264,H265,AV1X,VP9,VP8";
+    mINI::Instance()[kPreferredCodecV] = "H264,H265,AV1,VP9,VP8";
 });
 }
 
@@ -556,7 +558,7 @@ void SdpAttrRtpMap::parse(const string &str)  {
 
 string SdpAttrRtpMap::toString() const  {
     if (value.empty()) {
-        value = to_string(pt) + " " + codec + "/" + to_string(sample_rate);
+        value = to_string((int)pt) + " " + codec + "/" + to_string(sample_rate);
         if (channel) {
             value += '/';
             value += to_string(channel);
@@ -574,7 +576,7 @@ void SdpAttrRtcpFb::parse(const string &str_in)  {
 
 string SdpAttrRtcpFb::toString() const  {
     if (value.empty()) {
-        value = to_string(pt) + " " + rtcp_type;
+        value = to_string((int)pt) + " " + rtcp_type;
     }
     return SdpItem::toString();
 }
@@ -598,7 +600,7 @@ void SdpAttrFmtp::parse(const string &str)  {
 
 string SdpAttrFmtp::toString() const  {
     if (value.empty()) {
-        value = to_string(pt);
+        value = to_string((int)pt);
         int i = 0;
         for (auto &pr : fmtp) {
             value += (i++  ? ';' : ' ');
@@ -1070,7 +1072,7 @@ RtcSessionSdp::Ptr RtcSession::toRtcSessionSdp() const{
         mline->port = m.port;
         mline->proto = m.proto;
         for (auto &p : m.plan) {
-            mline->fmts.emplace_back(to_string(p.pt));
+            mline->fmts.emplace_back(to_string((int)p.pt));
         }
         if (m.type == TrackApplication) {
             mline->fmts.emplace_back("webrtc-datachannel");
@@ -1203,7 +1205,9 @@ RtcSessionSdp::Ptr RtcSession::toRtcSessionSdp() const{
         }
 
         for (auto &cand : m.candidate) {
-            sdp_media.addAttr(std::make_shared<SdpAttrCandidate>(cand));
+            if (cand.port) {
+                sdp_media.addAttr(std::make_shared<SdpAttrCandidate>(cand));
+            }
         }
     }
     return ret;
@@ -1311,6 +1315,10 @@ void RtcSession::checkValid() const{
     bool have_active_media = false;
     for (auto &item : media) {
         item.checkValid();
+
+        if (TrackApplication == item.type) {
+            have_active_media = true;
+        }
         switch (item.direction) {
             case RtpDirection::sendrecv:
             case RtpDirection::sendonly:
@@ -1346,6 +1354,10 @@ bool RtcSession::supportSimulcast() const {
         }
     }
     return false;
+}
+
+bool RtcSession::isOnlyDatachannel() const {
+    return 1 == media.size() && TrackApplication == media[0].type;
 }
 
 string const SdpConst::kTWCCRtcpFb = "transport-cc";
@@ -1396,7 +1408,7 @@ void RtcConfigure::RtcTrackConfigure::setDefaultSetting(TrackType type){
     switch (type) {
         case TrackAudio: {
             //此处调整偏好的编码格式优先级
-            GET_CONFIG_FUNC(vector<CodecId>, s_preferred_codec, RTC::kPreferredCodecA, toCodecArray);
+            GET_CONFIG_FUNC(vector<CodecId>, s_preferred_codec, Rtc::kPreferredCodecA, toCodecArray);
             CHECK(!s_preferred_codec.empty(), "rtc音频偏好codec不能为空");
             preferred_codec = s_preferred_codec;
 
@@ -1415,7 +1427,7 @@ void RtcConfigure::RtcTrackConfigure::setDefaultSetting(TrackType type){
         }
         case TrackVideo: {
             //此处调整偏好的编码格式优先级
-            GET_CONFIG_FUNC(vector<CodecId>, s_preferred_codec, RTC::kPreferredCodecV, toCodecArray);
+            GET_CONFIG_FUNC(vector<CodecId>, s_preferred_codec, Rtc::kPreferredCodecV, toCodecArray);
             CHECK(!s_preferred_codec.empty(), "rtc视频偏好codec不能为空");
             preferred_codec = s_preferred_codec;
 
@@ -1431,7 +1443,8 @@ void RtcConfigure::RtcTrackConfigure::setDefaultSetting(TrackType type){
                     {RtpExtType::color_space,                 RtpDirection::sendrecv},
                     {RtpExtType::video_content_type,          RtpDirection::sendrecv},
                     {RtpExtType::playout_delay,               RtpDirection::sendrecv},
-                    {RtpExtType::video_orientation,           RtpDirection::sendrecv},
+                    //手机端推webrtc 会带有旋转角度，rtc协议能正常播放 其他协议拉流画面旋转
+                    //{RtpExtType::video_orientation,           RtpDirection::sendrecv},
                     {RtpExtType::toffset,                     RtpDirection::sendrecv},
                     {RtpExtType::framemarking,                RtpDirection::sendrecv}
             };
@@ -1596,6 +1609,10 @@ RETRY:
 #ifdef ENABLE_SCTP
         answer_media.direction = matchDirection(offer_media.direction, configure.direction);
         answer_media.candidate = configure.candidate;
+        answer_media.ice_ufrag = configure.ice_ufrag;
+        answer_media.ice_pwd = configure.ice_pwd;
+        answer_media.fingerprint = configure.fingerprint;
+        answer_media.ice_lite = configure.ice_lite;
 #else
         answer_media.direction = RtpDirection::inactive;
 #endif
@@ -1799,3 +1816,5 @@ void RtcConfigure::onSelectPlan(RtcCodecPlan &plan, CodecId codec) const {
         plan.fmtp[kMode] = mode.empty() ? "0" : mode;
     }
 }
+
+} // namespace mediakit

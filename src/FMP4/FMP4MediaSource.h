@@ -12,6 +12,8 @@
 #define ZLMEDIAKIT_FMP4MEDIASOURCE_H
 
 #include "Common/MediaSource.h"
+#include "Common/PacketCache.h"
+#include "Util/RingBuffer.h"
 
 #define FMP4_GOP_SIZE 512
 
@@ -31,7 +33,7 @@ public:
 };
 
 //FMP4直播源
-class FMP4MediaSource : public MediaSource, public toolkit::RingDelegate<FMP4Packet::Ptr>, private PacketCache<FMP4Packet>{
+class FMP4MediaSource final : public MediaSource, public toolkit::RingDelegate<FMP4Packet::Ptr>, private PacketCache<FMP4Packet>{
 public:
     using Ptr = std::shared_ptr<FMP4MediaSource>;
     using RingDataType = std::shared_ptr<toolkit::List<FMP4Packet::Ptr> >;
@@ -42,13 +44,18 @@ public:
                     const std::string &stream_id,
                     int ring_size = FMP4_GOP_SIZE) : MediaSource(FMP4_SCHEMA, vhost, app, stream_id), _ring_size(ring_size) {}
 
-    ~FMP4MediaSource() override = default;
+    ~FMP4MediaSource() override { flush(); }
 
     /**
      * 获取媒体源的环形缓冲
      */
     const RingType::Ptr &getRing() const {
         return _ring;
+    }
+
+    void getPlayerList(const std::function<void(const std::list<std::shared_ptr<void>> &info_list)> &cb,
+                       const std::function<std::shared_ptr<void>(std::shared_ptr<void> &&info)> &on_change) override {
+        _ring->getInfoList(cb, on_change);
     }
 
     /**
@@ -109,7 +116,6 @@ private:
             }
             strong_self->onReaderChanged(size);
         });
-        onReaderChanged(0);
         if (!_init_segment.empty()) {
             regist();
         }

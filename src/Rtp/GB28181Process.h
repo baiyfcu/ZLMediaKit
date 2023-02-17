@@ -15,18 +15,19 @@
 
 #include "Decoder.h"
 #include "ProcessInterface.h"
-#include "Rtsp/RtpCodec.h"
-#include "Rtsp/RtpReceiver.h"
 #include "Http/HttpRequestSplitter.h"
+#include "Rtsp/RtpCodec.h"
+#include "Common/MediaSource.h"
 
 namespace mediakit{
 
 class RtpReceiverImp;
 class GB28181Process : public ProcessInterface {
 public:
-    typedef std::shared_ptr<GB28181Process> Ptr;
+    using Ptr = std::shared_ptr<GB28181Process>;
+
     GB28181Process(const MediaInfo &media_info, MediaSinkInterface *sink);
-    ~GB28181Process() override;
+    ~GB28181Process() override = default;
 
     /**
      * 输入rtp
@@ -35,6 +36,11 @@ public:
      * @return 是否解析成功
      */
     bool inputRtp(bool, const char *data, size_t data_len) override;
+
+    /**
+     * 刷新输出所有缓存
+     */
+    void flush() override;
 
 protected:
     void onRtpSorted(RtpPacket::Ptr rtp);
@@ -47,7 +53,7 @@ private:
     DecoderImp::Ptr _decoder;
     MediaSinkInterface *_interface;
     std::shared_ptr<FILE> _save_file_ps;
-    std::unordered_map<uint8_t, std::shared_ptr<RtpCodec> > _rtp_decoder;
+    std::unordered_map<uint8_t, RtpCodec::Ptr> _rtp_decoder;
     std::unordered_map<uint8_t, std::shared_ptr<RtpReceiverImp> > _rtp_receiver;
 };
 
