@@ -367,7 +367,7 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
         replace(const_cast<string &>(media_info._streamid), kHlsSuffix, "");
     }
 
-    weak_ptr<Session> weakSession = sender.shared_from_this();
+    weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
     //判断是否有权限访问该文件
     canAccessPath(sender, parser, media_info, false, [cb, file_path, parser, is_hls, media_info, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
         auto strongSession = weakSession.lock();
@@ -496,6 +496,10 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
     auto fullUrl = string(HTTP_SCHEMA) + "://" + parser["Host"] + parser.FullUrl();
     MediaInfo media_info(fullUrl);
     auto file_path = getFilePath(parser, media_info, sender);
+    if (file_path.size() == 0) {
+        sendNotFound(cb);
+        return;
+    }
     //访问的是文件夹
     if (File::is_dir(file_path.data())) {
         auto indexFile = searchIndexFile(file_path);

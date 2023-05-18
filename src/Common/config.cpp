@@ -159,6 +159,7 @@ const string kNotFound = HTTP_FIELD "notFound";
 const string kDirMenu = HTTP_FIELD "dirMenu";
 const string kForbidCacheSuffix = HTTP_FIELD "forbidCacheSuffix";
 const string kForwardedIpHeader = HTTP_FIELD "forwarded_ip_header";
+const string kAllowCrossDomains = HTTP_FIELD "allow_cross_domains";
 
 static onceToken token([]() {
     mINI::Instance()[kSendBufSize] = 64 * 1024;
@@ -186,6 +187,7 @@ static onceToken token([]() {
                                              << endl;
     mINI::Instance()[kForbidCacheSuffix] = "";
     mINI::Instance()[kForwardedIpHeader] = "";
+    mINI::Instance()[kAllowCrossDomains] = 1;
 });
 
 } // namespace Http
@@ -318,6 +320,7 @@ const string kH264PT = RTP_PROXY_FIELD "h264_pt";
 const string kH265PT = RTP_PROXY_FIELD "h265_pt";
 const string kPSPT = RTP_PROXY_FIELD "ps_pt";
 const string kOpusPT = RTP_PROXY_FIELD "opus_pt";
+const string kGopCache = RTP_PROXY_FIELD "gop_cache";
 
 static onceToken token([]() {
     mINI::Instance()[kDumpDir] = "";
@@ -327,6 +330,7 @@ static onceToken token([]() {
     mINI::Instance()[kH265PT] = 99;
     mINI::Instance()[kPSPT] = 96;
     mINI::Instance()[kOpusPT] = 100;
+    mINI::Instance()[kGopCache] = 1;
 });
 } // namespace RtpProxy
 

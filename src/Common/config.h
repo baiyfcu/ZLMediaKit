@@ -246,6 +246,8 @@ extern const std::string kDirMenu;
 extern const std::string kForbidCacheSuffix;
 // 可以把http代理前真实客户端ip放在http头中：https://github.com/ZLMediaKit/ZLMediaKit/issues/1388
 extern const std::string kForwardedIpHeader;
+// 是否允许所有跨域请求
+extern const std::string kAllowCrossDomains;
 } // namespace Http
 
 ////////////SHELL配置///////////
@@ -352,6 +354,8 @@ extern const std::string kH265PT;
 extern const std::string kPSPT;
 // rtp server opus 的pt
 extern const std::string kOpusPT;
+// RtpSender相关功能是否提前开启gop缓存优化级联秒开体验，默认开启
+extern const std::string kGopCache;
 } // namespace RtpProxy
 
 /**

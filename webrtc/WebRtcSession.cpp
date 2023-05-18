@@ -48,17 +48,13 @@ EventPoller::Ptr WebRtcSession::queryPoller(const Buffer::Ptr &buffer) {
 ////////////////////////////////////////////////////////////////////////////////
 
 WebRtcSession::WebRtcSession(const Socket::Ptr &sock) : Session(sock) {
-    socklen_t addr_len = sizeof(_peer_addr);
-    getpeername(sock->rawFD(), (struct sockaddr *)&_peer_addr, &addr_len);
     _over_tcp = sock->sockType() == SockNum::Sock_TCP;
 }
 
-WebRtcSession::~WebRtcSession() {
-    InfoP(this);
-}
+WebRtcSession::~WebRtcSession() = default;
 
 void WebRtcSession::attachServer(const Server &server) {
-    _server = std::dynamic_pointer_cast<toolkit::TcpServer>(const_cast<Server &>(server).shared_from_this());
+    _server = std::static_pointer_cast<toolkit::TcpServer>(const_cast<Server &>(server).shared_from_this());
 }
 
 void WebRtcSession::onRecv_l(const char *data, size_t len) {
@@ -73,7 +69,7 @@ void WebRtcSession::onRecv_l(const char *data, size_t len) {
         if (!transport->getPoller()->isCurrentThread()) {
             auto sock = Socket::createSocket(transport->getPoller(), false);
             //1、克隆socket(fd不变)，切换poller线程到WebRtcTransport所在线程
-            sock->cloneFromPeerSocket(*(getSock()));
+            sock->cloneSocket(*(getSock()));
             auto server = _server;
             std::string str(data, len);
             sock->getPoller()->async([sock, server, str](){
@@ -87,14 +83,12 @@ void WebRtcSession::onRecv_l(const char *data, size_t len) {
             //3、销毁原先的socket和WebRtcSession(原先的对象跟WebRtcTransport不在同一条线程)
             throw std::runtime_error("webrtc over tcp change poller: " + getPoller()->getThreadName() + " -> " + sock->getPoller()->getThreadName());
         }
-
-        transport->setSession(shared_from_this());
         _transport = std::move(transport);
         InfoP(this);
     }
     _ticker.resetTime();
     CHECK(_transport);
-    _transport->inputSockData((char *)data, len, (struct sockaddr *)&_peer_addr);
+    _transport->inputSockData((char *)data, len, this);
 }
 
 void WebRtcSession::onRecv(const Buffer::Ptr &buffer) {
@@ -109,14 +103,18 @@ void WebRtcSession::onError(const SockException &err) {
     //udp链接超时，但是rtc链接不一定超时，因为可能存在链接迁移的情况
     //在udp链接迁移时，新的WebRtcSession对象将接管WebRtcTransport对象的生命周期
     //本WebRtcSession对象将在超时后自动销毁
-    WarnP(this) << err.what();
+    WarnP(this) << err;
 
     if (!_transport) {
         return;
     }
+    auto self = static_pointer_cast<WebRtcSession>(shared_from_this());
     auto transport = std::move(_transport);
-    getPoller()->async([transport] {
+    getPoller()->async([transport, self]() mutable {
         //延时减引用，防止使用transport对象时，销毁对象
+        transport->removeTuple(self.get());
+        //确保transport在Session对象前销毁，防止WebRtcTransport::onDestory()时获取不到Session对象
+        transport = nullptr;
     }, false);
 }
 

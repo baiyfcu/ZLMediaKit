@@ -33,17 +33,21 @@ WebRtcPlayer::WebRtcPlayer(const EventPoller::Ptr &poller,
                            bool preferred_tcp) : WebRtcTransportImp(poller,preferred_tcp) {
     _media_info = info;
     _play_src = src;
-    CHECK(_play_src);
+    CHECK(src);
 }
 
 void WebRtcPlayer::onStartWebRTC() {
-    CHECK(_play_src);
+    auto playSrc = _play_src.lock();
+    if(!playSrc){
+        onShutdown(SockException(Err_shutdown, "rtsp media source was shutdown"));
+        return ;
+    }
     WebRtcTransportImp::onStartWebRTC();
     if (canSendRtp()) {
-        _play_src->pause(false);
-        _reader = _play_src->getRing()->attach(getPoller(), true);
+        playSrc->pause(false);
+        _reader = playSrc->getRing()->attach(getPoller(), true);
         weak_ptr<WebRtcPlayer> weak_self = static_pointer_cast<WebRtcPlayer>(shared_from_this());
-        weak_ptr<Session> weak_session = getSession();
+        weak_ptr<Session> weak_session = static_pointer_cast<Session>(getSession());
         _reader->setGetInfoCB([weak_session]() { return weak_session.lock(); });
         _reader->setReadCB([weak_self](const RtspMediaSource::RingDataType &pkt) {
             auto strong_self = weak_self.lock();
@@ -64,33 +68,30 @@ void WebRtcPlayer::onStartWebRTC() {
             strong_self->onShutdown(SockException(Err_shutdown, "rtsp ring buffer detached"));
         });
     }
-    //使用完毕后，释放强引用，这样确保推流器断开后能及时注销媒体
-    _play_src = nullptr;
 }
 void WebRtcPlayer::onDestory() {
-    WebRtcTransportImp::onDestory();
-
     auto duration = getDuration();
     auto bytes_usage = getBytesUsage();
     //流量统计事件广播
     GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
     if (_reader && getSession()) {
-        WarnL << "RTC播放器("
-              << _media_info.shortUrl()
-              << ")结束播放,耗时(s):" << duration;
+        WarnL << "RTC播放器(" << _media_info.shortUrl() << ")结束播放,耗时(s):" << duration;
         if (bytes_usage >= iFlowThreshold * 1024) {
-            NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastFlowReport, _media_info, bytes_usage, duration,
-                                               true, static_cast<SockInfo &>(*getSession()));
+            NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastFlowReport, _media_info, bytes_usage, duration, true, static_cast<SockInfo &>(*getSession()));
         }
     }
+    WebRtcTransportImp::onDestory();
 }
 
 void WebRtcPlayer::onRtcConfigure(RtcConfigure &configure) const {
-    CHECK(_play_src);
+    auto playSrc = _play_src.lock();
+    if(!playSrc){
+        return ;
+    }
     WebRtcTransportImp::onRtcConfigure(configure);
     //这是播放
     configure.audio.direction = configure.video.direction = RtpDirection::sendonly;
-    configure.setPlayRtspInfo(_play_src->getSdp());
+    configure.setPlayRtspInfo(playSrc->getSdp());
 }
 
 }// namespace mediakit

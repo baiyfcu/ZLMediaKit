@@ -237,9 +237,9 @@ class SdpParser {
 public:
     using Ptr = std::shared_ptr<SdpParser>;
 
-    SdpParser() {}
+    SdpParser() = default;
     SdpParser(const std::string &sdp) { load(sdp); }
-    ~SdpParser() {}
+    ~SdpParser() = default;
 
     void load(const std::string &sdp);
     bool available() const;
@@ -268,7 +268,7 @@ public:
         _payload_type = payload_type;
     }
 
-    virtual ~Sdp(){}
+    virtual ~Sdp() = default;
 
     /**
      * 获取sdp字符串
@@ -336,6 +336,9 @@ toolkit::Buffer::Ptr makeRtpOverTcpPrefix(uint16_t size, uint8_t interleaved);
 void makeSockPair(std::pair<toolkit::Socket::Ptr, toolkit::Socket::Ptr> &pair, const std::string &local_ip, bool re_use_port = false, bool is_udp = true);
 //十六进制方式打印ssrc
 std::string printSSRC(uint32_t ui32Ssrc);
+
+bool isRtp(const char *buf, size_t size);
+bool isRtcp(const char *buf,  size_t size);
 
 } //namespace mediakit
 #endif //RTSP_RTSP_H_

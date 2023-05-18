@@ -28,6 +28,7 @@ void Assert_Throw(int failed, const char *exp, const char *func, const char *fil
         printer << "), function " << func << ", file " << file << ", line " << line << ".";
         //throw std::runtime_error(printer);
         ErrorL << printer;
+
     }
 }
 }

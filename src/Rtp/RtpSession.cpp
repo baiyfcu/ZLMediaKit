@@ -12,6 +12,7 @@
 #include "RtpSession.h"
 #include "RtpSelector.h"
 #include "Network/TcpServer.h"
+#include "Rtsp/Rtsp.h"
 #include "Rtsp/RtpReceiver.h"
 #include "Common/config.h"
 
@@ -35,7 +36,6 @@ void RtpSession::setParams(mINI &ini) {
 }
 
 RtpSession::RtpSession(const Socket::Ptr &sock) : Session(sock) {
-    DebugP(this);
     socklen_t addr_len = sizeof(_addr);
     getpeername(sock->rawFD(), (struct sockaddr *)&_addr, &addr_len);
     _is_udp = sock->sockType() == SockNum::Sock_UDP;
@@ -46,7 +46,6 @@ RtpSession::RtpSession(const Socket::Ptr &sock) : Session(sock) {
 }
 
 RtpSession::~RtpSession() {
-    DebugP(this);
     if(_process){
         RtpSelector::Instance().delProcess(_stream_id,_process.get());
     }
@@ -61,7 +60,7 @@ void RtpSession::onRecv(const Buffer::Ptr &data) {
 }
 
 void RtpSession::onError(const SockException &err) {
-    WarnP(this) << _stream_id << " " << err.what();
+    WarnP(this) << _stream_id << " " << err;
 }
 
 void RtpSession::onManager() {
@@ -75,6 +74,15 @@ void RtpSession::onManager() {
 }
 
 void RtpSession::onRtpPacket(const char *data, size_t len) {
+    if (_delay_close) {
+        // 正在延时关闭中，忽略所有数据
+        return;
+    }
+    if (!isRtp(data, len)) {
+        // 忽略非rtp数据
+        WarnP(this) << "Not rtp packet";
+        return;
+    }
     if (!_is_udp) {
         if (_search_rtp) {
             //搜索上下文期间，数据丢弃
@@ -101,16 +109,26 @@ void RtpSession::onRtpPacket(const char *data, size_t len) {
             //未指定流id就使用ssrc为流id
             _stream_id = printSSRC(_ssrc);
         }
-        //tcp情况下，一个tcp链接只可能是一路流，不需要通过多个ssrc来区分，所以不需要频繁getProcess
-        _process = RtpSelector::Instance().getProcess(_stream_id, true);
+        try {
+            _process = RtpSelector::Instance().getProcess(_stream_id, true);
+        } catch (RtpSelector::ProcessExisted &ex) {
+            if (!_is_udp) {
+                // tcp情况下立即断开连接
+                throw;
+            }
+            // udp情况下延时断开连接(等待超时自动关闭)，防止频繁创建销毁RtpSession对象
+            WarnP(this) << ex.what();
+            _delay_close = true;
+            return;
+        }
         _process->setOnlyAudio(_only_audio);
-        _process->setDelegate(dynamic_pointer_cast<RtpSession>(shared_from_this()));
+        _process->setDelegate(static_pointer_cast<RtpSession>(shared_from_this()));
     }
     try {
         uint32_t rtp_ssrc = 0;
         RtpSelector::getSSRC(data, len, rtp_ssrc);
         if (rtp_ssrc != _ssrc) {
-            WarnP(this) << "ssrc不匹配,rtp已丢弃:" << rtp_ssrc << " != " << _ssrc;
+            WarnP(this) << "ssrc mismatched, rtp dropped: " << rtp_ssrc << " != " << _ssrc;
             return;
         }
         _process->inputRtp(false, getSock(), data, len, (struct sockaddr *)&_addr);
