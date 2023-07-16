@@ -41,6 +41,7 @@ option(ENABLE_HLS "Enable HLS" ON)
 option(ENABLE_JEMALLOC_STATIC "Enable static linking to the jemalloc library" OFF)
 option(ENABLE_MEM_DEBUG "Enable Memory Debug" OFF)
 option(ENABLE_MP4 "Enable MP4" ON)
+option(ENABLE_HLS_FMP4 "Enable HLS-FMP4" ON)
 option(ENABLE_MSVC_MT "Enable MSVC Mt/Mtd lib" ON)
 option(ENABLE_MYSQL "Enable MySQL" OFF)
 option(ENABLE_OPENSSL "Enable OpenSSL" ON)
@@ -211,8 +212,8 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 # mediakit 以及各个 runtime 依赖
-update_cached_list(MK_LINK_LIBRARIES "")
-update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_VERSION)
+update_cached(MK_LINK_LIBRARIES "")
+update_cached(MK_COMPILE_DEFINITIONS ENABLE_VERSION)
 
 if (DISABLE_REPORT)
   update_cached_list(MK_COMPILE_DEFINITIONS DISABLE_REPORT)
@@ -461,11 +462,6 @@ if(ENABLE_API)
   add_subdirectory(api)
 endif()
 
-# IOS 不编译可执行程序
-if(IOS)
-  return()
-endif()
-
 ##############################################################################
 
 if(ENABLE_PLAYER AND ENABLE_FFMPEG)
@@ -473,11 +469,18 @@ if(ENABLE_PLAYER AND ENABLE_FFMPEG)
 endif()
 
 #MediaServer主程序
-add_subdirectory(server)
+if(ENABLE_SERVER)
+  add_subdirectory(server)
+endif()
 
 # Android 会 add_subdirectory 并依赖该变量
 if(ENABLE_SERVER_LIB)
   set(MK_LINK_LIBRARIES ${MK_LINK_LIBRARIES} PARENT_SCOPE)
+endif()
+
+# IOS 不编译可执行程序
+if(IOS)
+  return()
 endif()
 
 #cpp测试demo程序

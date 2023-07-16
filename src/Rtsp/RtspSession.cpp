@@ -128,12 +128,12 @@ void RtspSession::onRecv(const Buffer::Ptr &buf) {
 }
 
 void RtspSession::onWholeRtspPacket(Parser &parser) {
-    string method = parser.Method(); //提取出请求命令字
+    string method = parser.method(); //提取出请求命令字
     _cseq = atoi(parser["CSeq"].data());
     if (_content_base.empty() && method != "GET") {
-        _content_base = parser.Url();
-        _media_info.parse(parser.FullUrl());
-        _media_info._schema = RTSP_SCHEMA;
+        _content_base = parser.url();
+        _media_info.parse(parser.fullUrl());
+        _media_info.schema = RTSP_SCHEMA;
     }
 
     using rtsp_request_handler = void (RtspSession::*)(const Parser &parser);
@@ -160,7 +160,7 @@ void RtspSession::onWholeRtspPacket(Parser &parser) {
     }
 
     (this->*(it->second))(parser);
-    parser.Clear();
+    parser.clear();
 }
 
 void RtspSession::onRtpPacket(const char *data, size_t len) {
@@ -187,7 +187,7 @@ void RtspSession::onRtcpPacket(int track_idx, SdpTrack::Ptr &track, const char *
 }
 
 ssize_t RtspSession::getContentLength(Parser &parser) {
-    if(parser.Method() == "POST"){
+    if(parser.method() == "POST"){
         //http post请求的content数据部分是base64编码后的rtsp请求信令包
         return remainDataSize();
     }
@@ -200,7 +200,7 @@ void RtspSession::handleReq_Options(const Parser &parser) {
 }
 
 void RtspSession::handleReq_ANNOUNCE(const Parser &parser) {
-    auto full_url = parser.FullUrl();
+    auto full_url = parser.fullUrl();
     _content_base = full_url;
     if (end_with(full_url, ".sdp")) {
         //去除.sdp后缀，防止EasyDarwin推流器强制添加.sdp后缀
@@ -208,7 +208,7 @@ void RtspSession::handleReq_ANNOUNCE(const Parser &parser) {
         _media_info.parse(full_url);
     }
 
-    if (_media_info._app.empty() || _media_info._streamid.empty()) {
+    if (_media_info.app.empty() || _media_info.stream.empty()) {
         //推流rtsp url必须最少两级(rtsp://host/app/stream_id)，不允许莫名其妙的推流url
         static constexpr auto err = "rtsp推流url非法,最少确保两级rtsp url";
         sendRtspResponse("403 Forbidden", {"Content-Type", "text/plain"}, err);
@@ -223,7 +223,7 @@ void RtspSession::handleReq_ANNOUNCE(const Parser &parser) {
         }
 
         assert(!_push_src);
-        auto src = MediaSource::find(RTSP_SCHEMA, _media_info._vhost, _media_info._app, _media_info._streamid);
+        auto src = MediaSource::find(RTSP_SCHEMA, _media_info.vhost, _media_info.app, _media_info.stream);
         auto push_failed = (bool)src;
 
         while (src) {
@@ -250,7 +250,7 @@ void RtspSession::handleReq_ANNOUNCE(const Parser &parser) {
             throw SockException(Err_shutdown, err);
         }
 
-        SdpParser sdpParser(parser.Content());
+        SdpParser sdpParser(parser.content());
         _sessionid = makeRandStr(12);
         _sdp_track = sdpParser.getAvailableTrack();
         if (_sdp_track.empty()) {
@@ -266,11 +266,11 @@ void RtspSession::handleReq_ANNOUNCE(const Parser &parser) {
         }
 
         if (!_push_src) {
-            _push_src = std::make_shared<RtspMediaSourceImp>(_media_info._vhost, _media_info._app, _media_info._streamid);
+            _push_src = std::make_shared<RtspMediaSourceImp>(_media_info);
             //获取所有权
             _push_src_ownership = _push_src->getOwnership();
             _push_src->setProtocolOption(option);
-            _push_src->setSdp(parser.Content());
+            _push_src->setSdp(parser.content());
         }
 
         _push_src->setListener(static_pointer_cast<RtspSession>(shared_from_this()));
@@ -595,8 +595,8 @@ void RtspSession::onAuthUser(const string &realm,const string &authorization){
         return;
     }
     //请求中包含认证信息
-    auto authType = FindField(authorization.data(),NULL," ");
-    auto authStr = FindField(authorization.data()," ",NULL);
+    auto authType = findSubString(authorization.data(), NULL, " ");
+    auto authStr = findSubString(authorization.data(), " ", NULL);
     if(authType.empty() || authStr.empty()){
         //认证信息格式不合法，回复401 Unauthorized
         onAuthFailed(realm,"can not find auth type or auth string");
@@ -628,24 +628,49 @@ void RtspSession::send_SessionNotFound() {
 
 void RtspSession::handleReq_Setup(const Parser &parser) {
     //处理setup命令，该函数可能进入多次
-    int trackIdx = getTrackIndexByControlUrl(parser.FullUrl());
+    int trackIdx = getTrackIndexByControlUrl(parser.fullUrl());
     SdpTrack::Ptr &trackRef = _sdp_track[trackIdx];
     if (trackRef->_inited) {
         //已经初始化过该Track
         throw SockException(Err_shutdown, "can not setup one track twice");
     }
-    trackRef->_inited = true; //现在初始化
 
-    if(_rtp_type == Rtsp::RTP_Invalid){
-        auto &strTransport = parser["Transport"];
-        if(strTransport.find("TCP") != string::npos){
-            _rtp_type = Rtsp::RTP_TCP;
-        }else if(strTransport.find("multicast") != string::npos){
-            _rtp_type = Rtsp::RTP_MULTICAST;
-        }else{
-            _rtp_type = Rtsp::RTP_UDP;
+    static auto getRtpTypeStr = [](const int type) {
+        switch (type)
+        {
+        case Rtsp::RTP_TCP:
+            return "TCP";
+        case Rtsp::RTP_UDP:
+            return "UDP";
+        case Rtsp::RTP_MULTICAST:
+            return "MULTICAST";
+        default:
+            return "Invalid";
         }
+    };
+
+    if (_rtp_type == Rtsp::RTP_Invalid) {
+        auto &strTransport = parser["Transport"];
+        auto rtpType = Rtsp::RTP_Invalid;
+        if (strTransport.find("TCP") != string::npos) {
+            rtpType = Rtsp::RTP_TCP;
+        } else if (strTransport.find("multicast") != string::npos) {
+            rtpType = Rtsp::RTP_MULTICAST;
+        } else {
+            rtpType = Rtsp::RTP_UDP;
+        }
+        //检查RTP传输类型限制
+        GET_CONFIG(int, transport, Rtsp::kRtpTransportType);
+        if (transport != Rtsp::RTP_Invalid && transport != rtpType) {
+            WarnL << "rtsp client setup transport " << getRtpTypeStr(rtpType) << " but config force transport " << getRtpTypeStr(transport);
+            //配置限定RTSP传输方式，但是客户端握手方式不一致，返回461
+            sendRtspResponse("461 Unsupported transport");
+            return;
+        }
+        _rtp_type = rtpType;
     }
+
+    trackRef->_inited = true; //现在初始化
 
     //允许接收rtp、rtcp包
     RtspSplitter::enableRecvRtp(_rtp_type == Rtsp::RTP_TCP);
@@ -690,9 +715,9 @@ void RtspSession::handleReq_Setup(const Parser &parser) {
         _rtcp_socks[trackIdx] = pr.second;
 
         //设置客户端内网端口信息
-        string strClientPort = FindField(parser["Transport"].data(), "client_port=", NULL);
-        uint16_t ui16RtpPort = atoi(FindField(strClientPort.data(), NULL, "-").data());
-        uint16_t ui16RtcpPort = atoi(FindField(strClientPort.data(), "-", NULL).data());
+        string strClientPort = findSubString(parser["Transport"].data(), "client_port=", NULL);
+        uint16_t ui16RtpPort = atoi(findSubString(strClientPort.data(), NULL, "-").data());
+        uint16_t ui16RtcpPort = atoi(findSubString(strClientPort.data(), "-", NULL).data());
 
         auto peerAddr = SockUtil::make_sockaddr(get_peer_ip().data(), ui16RtpPort);
         //设置rtp发送目标地址
@@ -717,7 +742,7 @@ void RtspSession::handleReq_Setup(const Parser &parser) {
         break;
     case Rtsp::RTP_MULTICAST: {
         if(!_multicaster){
-            _multicaster = RtpMultiCaster::get(*this, get_local_ip(), _media_info._vhost, _media_info._app, _media_info._streamid, _multicast_ip, _multicast_video_port, _multicast_audio_port);
+            _multicaster = RtpMultiCaster::get(*this, get_local_ip(), _media_info.vhost, _media_info.app, _media_info.stream, _multicast_ip, _multicast_video_port, _multicast_audio_port);
             if (!_multicaster) {
                 send_NotAcceptable();
                 throw SockException(Err_shutdown, "can not get a available udp multicast socket");
@@ -785,7 +810,7 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     if (!strRange.empty()) {
         //这是seek操作
         res_header.emplace("Range", strRange);
-        auto strStart = FindField(strRange.data(), "npt=", "-");
+        auto strStart = findSubString(strRange.data(), "npt=", "-");
         if (strStart == "now") {
             strStart = "0";
         }
@@ -915,9 +940,9 @@ void RtspSession::handleReq_Post(const Parser &parser) {
         });
     };
 
-    if(!parser.Content().empty()){
+    if(!parser.content().empty()){
         //http poster后面的粘包
-        _on_recv(std::make_shared<BufferString>(parser.Content()));
+        _on_recv(std::make_shared<BufferString>(parser.content()));
     }
 
     sendRtspResponse("200 OK",
@@ -1145,7 +1170,7 @@ MediaOriginType RtspSession::getOriginType(MediaSource &sender) const{
 }
 
 string RtspSession::getOriginUrl(MediaSource &sender) const {
-    return _media_info._full_url;
+    return _media_info.full_url;
 }
 
 std::shared_ptr<SockInfo> RtspSession::getOriginSock(MediaSource &sender) const {

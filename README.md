@@ -46,7 +46,7 @@
 
 ## 功能清单
 ### 功能一览
-<img width="800" alt="功能一览" src="https://user-images.githubusercontent.com/11495632/190864440-91c45f8f-480f-43db-8110-5bb44e6300ff.png">
+<img width="800" alt="功能一览" src="https://github.com/ZLMediaKit/ZLMediaKit/assets/11495632/481ea769-5b27-495e-bf7d-31191e6af9d2">
 
 - RTSP[S]
   - RTSP[S] 服务器，支持RTMP/MP4/HLS转RTSP[S],支持亚马逊echo show这样的设备
@@ -63,14 +63,15 @@
   - RTMP[S] 发布服务器，支持录制发布流
   - RTMP[S] 播放器，支持RTMP代理，支持生成静音音频
   - RTMP[S] 推流客户端
-  - 支持http[s]-flv直播
+  - 支持http[s]-flv直播服务器
+  - 支持http[s]-flv直播播放器
   - 支持websocket-flv直播
   - 支持H264/H265/AAC/G711/OPUS编码，其他编码能转发但不能转协议
   - 支持[RTMP-H265](https://github.com/ksvc/FFmpeg/wiki)
   - 支持[RTMP-OPUS](https://github.com/ZLMediaKit/ZLMediaKit/wiki/RTMP%E5%AF%B9H265%E5%92%8COPUS%E7%9A%84%E6%94%AF%E6%8C%81)
 
 - HLS
-  - 支持HLS文件生成，自带HTTP文件服务器
+  - 支持HLS文件(mpegts/fmp4)生成，自带HTTP文件服务器
   - 通过cookie追踪技术，可以模拟HLS播放为长连接，可以实现HLS按需拉流、播放统计等业务
   - 支持HLS播发器，支持拉流HLS转rtsp/rtmp/mp4
   - 支持H264/H265/AAC/G711/OPUS编码
@@ -309,6 +310,15 @@ bash build_docker_images.sh
 [朱如洪 ](https://github.com/zhu410289616)
 [lijin](https://github.com/1461521844lijin)
 [PioLing](https://github.com/PioLing)
+[BackT0TheFuture](https://github.com/BackT0TheFuture)
+[perara](https://github.com/perara)
+[codeRATny](https://github.com/codeRATny)
+[dengjfzh](https://github.com/dengjfzh)
+[百鸣](https://github.com/ixingqiao)
+[fruit Juice](https://github.com/xuandu)
+[tbago](https://github.com/tbago)
+[Luosh](https://github.com/Luosh)
+[linxiaoyan87](https://github.com/linxiaoyan)
 
 ## 使用案例
 

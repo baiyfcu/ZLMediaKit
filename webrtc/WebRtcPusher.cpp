@@ -10,13 +10,14 @@
 
 #include "WebRtcPusher.h"
 #include "Common/config.h"
+#include "Rtsp/RtspMediaSourceImp.h"
 
 using namespace std;
 
 namespace mediakit {
 
 WebRtcPusher::Ptr WebRtcPusher::create(const EventPoller::Ptr &poller,
-                                       const RtspMediaSourceImp::Ptr &src,
+                                       const RtspMediaSource::Ptr &src,
                                        const std::shared_ptr<void> &ownership,
                                        const MediaInfo &info,
                                        const ProtocolOption &option,
@@ -30,7 +31,7 @@ WebRtcPusher::Ptr WebRtcPusher::create(const EventPoller::Ptr &poller,
 }
 
 WebRtcPusher::WebRtcPusher(const EventPoller::Ptr &poller,
-                           const RtspMediaSourceImp::Ptr &src,
+                           const RtspMediaSource::Ptr &src,
                            const std::shared_ptr<void> &ownership,
                            const MediaInfo &info,
                            const ProtocolOption &option,
@@ -58,11 +59,14 @@ bool WebRtcPusher::close(MediaSource &sender) {
 }
 
 int WebRtcPusher::totalReaderCount(MediaSource &sender) {
-    auto total_count = 0;
-    for (auto &src : _push_src_sim) {
-        total_count += src.second->totalReaderCount();
+    auto total_count = _push_src ? _push_src->totalReaderCount() : 0;
+    if (_simulcast) {
+        std::lock_guard<std::mutex> lock(_mtx);
+        for (auto &src : _push_src_sim) {
+            total_count += src.second->totalReaderCount();
+        }
     }
-    return total_count + _push_src->totalReaderCount();
+    return total_count;
 }
 
 MediaOriginType WebRtcPusher::getOriginType(MediaSource &sender) const {
@@ -70,7 +74,7 @@ MediaOriginType WebRtcPusher::getOriginType(MediaSource &sender) const {
 }
 
 string WebRtcPusher::getOriginUrl(MediaSource &sender) const {
-    return _media_info._full_url;
+    return _media_info.full_url;
 }
 
 std::shared_ptr<SockInfo> WebRtcPusher::getOriginSock(MediaSource &sender) const {
@@ -95,13 +99,12 @@ void WebRtcPusher::onRecvRtp(MediaTrack &track, const string &rid, RtpPacket::Pt
         }
     } else {
         //视频
+        std::lock_guard<std::mutex> lock(_mtx);
         auto &src = _push_src_sim[rid];
         if (!src) {
-            auto stream_id = rid.empty() ? _push_src->getId() : _push_src->getId() + "_" + rid;
-            auto src_imp = std::make_shared<RtspMediaSourceImp>(_push_src->getVhost(), _push_src->getApp(), stream_id);
+            const auto& stream = _push_src->getMediaTuple().stream;
+            auto src_imp = _push_src->clone(rid.empty() ? stream : stream + '_' + rid);
             _push_src_sim_ownership[rid] = src_imp->getOwnership();
-            src_imp->setSdp(_push_src->getSdp());
-            src_imp->setProtocolOption(_push_src->getProtocolOption());
             src_imp->setListener(static_pointer_cast<WebRtcPusher>(shared_from_this()));
             src = src_imp;
         }

@@ -21,13 +21,11 @@ class RtspMediaSourceMuxer final : public RtspMuxer, public MediaSourceEventInte
 public:
     using Ptr = std::shared_ptr<RtspMediaSourceMuxer>;
 
-    RtspMediaSourceMuxer(const std::string &vhost,
-                         const std::string &strApp,
-                         const std::string &strId,
+    RtspMediaSourceMuxer(const MediaTuple& tuple,
                          const ProtocolOption &option,
                          const TitleSdp::Ptr &title = nullptr) : RtspMuxer(title) {
         _option = option;
-        _media_src = std::make_shared<RtspMediaSource>(vhost,strApp,strId);
+        _media_src = std::make_shared<RtspMediaSource>(tuple);
         getRtpRing()->setDelegate(_media_src);
     }
 
@@ -46,7 +44,8 @@ public:
         _media_src->setTimeStamp(stamp);
     }
 
-    void onAllTrackReady(){
+    void addTrackCompleted() override {
+        RtspMuxer::addTrackCompleted();
         _media_src->setSdp(getSdp());
     }
 

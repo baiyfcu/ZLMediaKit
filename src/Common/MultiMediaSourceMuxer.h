@@ -37,7 +37,7 @@ public:
         virtual void onAllTrackReady() = 0;
     };
 
-    MultiMediaSourceMuxer(const std::string &vhost, const std::string &app, const std::string &stream, float dur_sec = 0.0,const ProtocolOption &option = ProtocolOption());
+    MultiMediaSourceMuxer(const MediaTuple& tuple, float dur_sec = 0.0,const ProtocolOption &option = ProtocolOption());
     ~MultiMediaSourceMuxer() override = default;
 
     /**
@@ -126,9 +126,13 @@ public:
      */
     toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
 
-    const std::string& getVhost() const;
-    const std::string& getApp() const;
-    const std::string& getStreamId() const;
+    /**
+     * 获取本对象
+     */
+    std::shared_ptr<MultiMediaSourceMuxer> getMuxer(MediaSource &sender) override;
+
+    const ProtocolOption &getOption() const;
+    const MediaTuple &getMediaTuple() const;
     std::string shortUrl() const;
 
 protected:
@@ -159,25 +163,19 @@ private:
     bool _is_enable = false;
     bool _create_in_poller = false;
     bool _video_key_pos = false;
-    std::string _vhost;
-    std::string _app;
-    std::string _stream_id;
+    MediaTuple _tuple;
     ProtocolOption _option;
     toolkit::Ticker _last_check;
     Stamp _stamp[2];
     std::weak_ptr<Listener> _track_listener;
-#if defined(ENABLE_RTPPROXY)
     std::unordered_map<std::string, RingType::RingReader::Ptr> _rtp_sender;
-#endif //ENABLE_RTPPROXY
-
-#if defined(ENABLE_MP4)
     FMP4MediaSourceMuxer::Ptr _fmp4;
-#endif
     RtmpMediaSourceMuxer::Ptr _rtmp;
     RtspMediaSourceMuxer::Ptr _rtsp;
     TSMediaSourceMuxer::Ptr _ts;
     MediaSinkInterface::Ptr _mp4;
     HlsRecorder::Ptr _hls;
+    HlsFMP4Recorder::Ptr _hls_fmp4;
     toolkit::EventPoller::Ptr _poller;
     RingType::Ptr _ring;
 
