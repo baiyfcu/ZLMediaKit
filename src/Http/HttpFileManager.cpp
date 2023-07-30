@@ -50,6 +50,67 @@ const string &HttpFileManager::getContentType(const char *name) {
     return HttpConst::getHttpContentType(name);
 }
 
+#ifndef ntohll
+static uint64_t ntohll(uint64_t val) {
+    return (((uint64_t)ntohl(val)) << 32) + ntohl(val >> 32);
+}
+#endif
+
+static uint64_t get_ip_uint64(const std::string &ip) {
+    try {
+        auto storage = SockUtil::make_sockaddr(ip.data(), 0);
+        if (storage.ss_family == AF_INET) {
+            return ntohl(reinterpret_cast<uint32_t &>(reinterpret_cast<struct sockaddr_in &>(storage).sin_addr));
+        }
+        if (storage.ss_family == AF_INET6) {
+            return ntohll(reinterpret_cast<uint64_t &>(reinterpret_cast<struct sockaddr_in6 &>(storage).sin6_addr));
+        }
+    } catch (std::exception &ex) {
+        WarnL << ex.what();
+    }
+    return 0;
+}
+
+bool HttpFileManager::isIPAllowed(const std::string &ip) {
+    using IPRangs = std::vector<std::pair<uint64_t /*min_ip*/, uint64_t /*max_ip*/>>;
+    GET_CONFIG_FUNC(IPRangs, allow_ip_range, Http::kAllowIPRange, [](const string &str) -> IPRangs {
+        IPRangs ret;
+        auto vec = split(str, ",");
+        for (auto &item : vec) {
+            if (trim(item).empty()) {
+                continue;
+            }
+            auto range = split(item, "-");
+            if (range.size() == 2) {
+                auto ip_min = get_ip_uint64(trim(range[0]));
+                auto ip_max = get_ip_uint64(trim(range[1]));
+                if (ip_min && ip_max) {
+                    ret.emplace_back(ip_min, ip_max);
+                }
+            } else if (range.size() == 1) {
+                auto ip = get_ip_uint64(trim(range[0]));
+                if (ip) {
+                    ret.emplace_back(ip, ip);
+                }
+            } else {
+                WarnL << "Invalid ip range: " << item;
+            }
+        }
+        return ret;
+    });
+
+    if (allow_ip_range.empty()) {
+        return true;
+    }
+    auto ip_int = get_ip_uint64(ip);
+    for (auto &range : allow_ip_range) {
+        if (ip_int >= range.first && ip_int <= range.second) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static string searchIndexFile(const string &dir){
     DIR *pDir;
     dirent *pDirent;
@@ -321,10 +382,10 @@ static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo
         return;
     }
 
-    //事件未被拦截，则认为是http下载请求
+    // 事件未被拦截，则认为是http下载请求
     bool flag = NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastHttpAccess, parser, path, is_dir, accessPathInvoker, static_cast<SockInfo &>(sender));
     if (!flag) {
-        //此事件无人监听，我们默认都有权限访问
+        // 此事件无人监听，我们默认都有权限访问
         callback("", nullptr);
     }
 }

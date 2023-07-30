@@ -291,17 +291,14 @@ void RtmpSession::sendPlayResponse(const string &err, const RtmpMediaSource::Ptr
                  "description", "Now published." ,
                  "details", _media_info.stream,
                  "clientid", "0"});
-
-    auto &metadata = src->getMetaData();
-    if(metadata){
-        //在有metadata的情况下才发送metadata
-        //其实metadata没什么用，有些推流器不产生metadata
-        // onMetaData
+    // metadata
+    src->getMetaData([&](const AMFValue &metadata) {
         invoke.clear();
         invoke << "onMetaData" << metadata;
         sendResponse(MSG_DATA, invoke.data());
-    }
+    });
 
+    // config frame
     src->getConfigFrame([&](const RtmpPacket::Ptr &pkt) {
         onSendMedia(pkt);
     });
@@ -481,6 +478,7 @@ void RtmpSession::setMetaData(AMFDecoder &dec) {
         throw std::runtime_error("can only set metadata");
     }
     _push_metadata = dec.load<AMFValue>();
+    _set_meta_data = false;
 }
 
 void RtmpSession::onProcessCmd(AMFDecoder &dec) {
@@ -528,6 +526,7 @@ void RtmpSession::onRtmpChunk(RtmpPacket::Ptr packet) {
         } else if (type == "onMetaData") {
             //兼容某些不规范的推流器
             _push_metadata = dec.load<AMFValue>();
+            _set_meta_data = false;
         } else {
             TraceP(this) << "unknown notify:" << type;
         }
@@ -537,13 +536,26 @@ void RtmpSession::onRtmpChunk(RtmpPacket::Ptr packet) {
     case MSG_AUDIO:
     case MSG_VIDEO: {
         if (!_push_src) {
-            WarnL << "Not a rtmp push!";
+            if (_ring_reader) {
+                throw std::runtime_error("Rtmp player send media packets");
+            }
+            if (packet->isConfigFrame()) {
+                auto id = packet->type_id;
+                _push_config_packets.emplace(id, std::move(packet));
+            }
+            WarnL << "Rtmp pusher send media packet before handshake completed!";
             return;
         }
 
         if (!_set_meta_data) {
             _set_meta_data = true;
             _push_src->setMetaData(_push_metadata ? _push_metadata : TitleMeta().getMetadata());
+        }
+        if (!_push_config_packets.empty()) {
+            for (auto &pr : _push_config_packets) {
+                _push_src->onWrite(std::move(pr.second));
+            }
+            _push_config_packets.clear();
         }
         _push_src->onWrite(std::move(packet));
         break;
