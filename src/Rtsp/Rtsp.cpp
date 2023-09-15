@@ -200,7 +200,7 @@ void SdpParser::load(const string &sdp) {
                         else
                             track->_attr.emplace(opt_val, "");
                     } else {
-                        if (_track_vec.size() == 1)
+                        if (_track_vec.size() == 1 && attr != "range")
                             global_infos.emplace(opt, opt_val);
                         else
                             track->_attr.emplace(attr, findSubString(opt_val.data(), ":", nullptr));

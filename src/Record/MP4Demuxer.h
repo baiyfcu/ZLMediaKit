@@ -65,6 +65,8 @@ public:
      */
     uint64_t getDurationMS() const;
 
+    void setOnTrack(const std::function<void(Track::Ptr &track)> &callback) { _on_track_callback = callback; }
+
 private:
     int getAllTracks();
     void onVideoTrack(uint32_t track_id, uint8_t object, int width, int height, const void *extra, size_t bytes);
@@ -77,6 +79,7 @@ private:
     uint64_t _duration_ms = 0;
     std::map<int, Track::Ptr> _track_to_codec;
     toolkit::ResourcePool<toolkit::BufferRaw> _buffer_pool;
+    std::function<void(Track::Ptr &track)> _on_track_callback;
 };
 
 
