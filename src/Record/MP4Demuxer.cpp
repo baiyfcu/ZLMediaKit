@@ -102,7 +102,9 @@ void MP4Demuxer::onVideoTrack(uint32_t track, uint8_t object, int width, int hei
                 uint8_t config[1024 * 10] = {0};
                 int size = mpeg4_avc_to_nalu(&avc, config, sizeof(config));
                 if (size > 0) {
-                    video->inputFrame(std::make_shared<H264FrameNoCacheAble>((char *)config, size, 0, 0,4));
+                    if (_on_track_callback)
+                        _on_track_callback(dynamic_pointer_cast<Track>(video));
+                    video->inputFrame(std::make_shared<H264FrameNoCacheAble>((char *)config, size, 0, 0, 4));
                 }
             }
         }
@@ -117,7 +119,9 @@ void MP4Demuxer::onVideoTrack(uint32_t track, uint8_t object, int width, int hei
                 uint8_t config[1024 * 10] = {0};
                 int size = mpeg4_hevc_to_nalu(&hevc, config, sizeof(config));
                 if (size > 0) {
-                    video->inputFrame(std::make_shared<H265FrameNoCacheAble>((char *) config, size, 0, 0,4));
+                    if (_on_track_callback)
+                        _on_track_callback(dynamic_pointer_cast<Track>(video));
+                    video->inputFrame(std::make_shared<H265FrameNoCacheAble>((char *) config, size, 0, 0, 4));
                 }
             }
         }
@@ -133,6 +137,8 @@ void MP4Demuxer::onAudioTrack(uint32_t track_id, uint8_t object, int channel_cou
         case MOV_OBJECT_AAC:{
             auto audio = std::make_shared<AACTrack>(bytes > 0 ? string((char *)extra,bytes) : "");
             _track_to_codec.emplace(track_id, audio);
+            if (_on_track_callback)
+                _on_track_callback(dynamic_pointer_cast<Track>(audio));
             break;
         }
 
@@ -140,12 +146,16 @@ void MP4Demuxer::onAudioTrack(uint32_t track_id, uint8_t object, int channel_cou
         case MOV_OBJECT_G711u:{
             auto audio = std::make_shared<G711Track>(object == MOV_OBJECT_G711a ? CodecG711A : CodecG711U, sample_rate, channel_count, bit_per_sample / channel_count );
             _track_to_codec.emplace(track_id, audio);
+            if (_on_track_callback)
+                _on_track_callback(dynamic_pointer_cast<Track>(audio));
             break;
         }
 
         case MOV_OBJECT_OPUS: {
             auto audio = std::make_shared<OpusTrack>();
             _track_to_codec.emplace(track_id, audio);
+            if (_on_track_callback)
+                _on_track_callback(dynamic_pointer_cast<Track>(audio));
             break;
         }
 
@@ -177,7 +187,10 @@ struct Context {
 Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
     keyFrame = false;
     eof = false;
-
+    if (!_mov_reader) {
+        eof = true;
+        return nullptr;
+    }
     static mov_reader_onread2 mov_onalloc = [](void *param, uint32_t track_id, size_t bytes, int64_t pts, int64_t dts, int flags) -> void * {
         Context *ctx = (Context *) param;
         ctx->pts = pts;
