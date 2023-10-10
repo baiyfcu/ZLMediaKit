@@ -136,8 +136,8 @@ string strCoding::GB2312ToUTF8(const string &str) {
     auto pText = str.data();
     char buf[4] = { 0 };
     auto nLength = len * 3;
-    char* pOut = new char[nLength];
-    memset(pOut, 0, nLength);
+    char *pOut = new char[nLength + 1];
+    memset(pOut, 0, nLength + 1);
     size_t i = 0, j = 0;
     while (i < len)
     {
