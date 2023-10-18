@@ -483,6 +483,11 @@ void RtspPlayer::handleResPAUSE(const Parser &parser, int type) {
 }
 
 void RtspPlayer::onWholeRtspPacket(Parser &parser) {
+    if (!start_with(parser.method(), "RTSP")) {
+        // 不是rtsp回复，忽略
+        WarnL << "Not rtsp response: " << parser.method();
+        return;
+    }
     try {
         decltype(_on_response) func;
         _on_response.swap(func);
@@ -539,6 +544,9 @@ float RtspPlayer::getPacketLossRate(TrackType type) const {
     size_t lost = 0, expected = 0;
     try {
         auto track_idx = getTrackIndexByTrackType(type);
+        if (_rtcp_context.empty()) {
+            return 0;
+        }
         auto ctx = _rtcp_context[track_idx];
         lost = ctx->getLost();
         expected = ctx->getExpectedPackets();

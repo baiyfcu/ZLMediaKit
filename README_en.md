@@ -350,6 +350,7 @@ bash build_docker_images.sh
 - Media management platform
   - [GB28181 complete solution with web management website, supporting webrtc and h265 playback](https://github.com/648540858/wvp-GB28181-pro)
   - [Powerful media control and management interface platform, supporting GB28181](https://github.com/chatop2020/AKStream)
+  - [GB28181 server implemented in C++](https://github.com/any12345com/BXC_SipServer)
   - [GB28181 server implemented in Go](https://github.com/panjjo/gosip)
   - [Node-js version of GB28181 platform](https://gitee.com/hfwudao/GB28181_Node_Http)
   - [Hikvision ehome server implemented in Go](https://github.com/tsingeye/FreeEhome)
@@ -364,6 +365,7 @@ bash build_docker_images.sh
   - [Player supporting H265 based on wasm](https://github.com/numberwolf/h265web.js)
   - [WebSocket-fmp4 player based on MSE](https://github.com/v354412101/wsPlayer) 
   - [Domestic webrtc sdk(metaRTC)](https://github.com/metartc/metaRTC)
+  - [GB28181 player implemented in C++](https://github.com/any12345com/BXC_gb28181Player)
 
 ## License
 
@@ -489,6 +491,12 @@ Thanks to all those who have supported this project in various ways, including b
 [tbago](https://github.com/tbago)
 [Luosh](https://github.com/Luosh)
 [linxiaoyan87](https://github.com/linxiaoyan)
+[waken](https://github.com/mc373906408)
+[Deepslient](https://github.com/Deepslient)
+
+Also thank to JetBrains for their support for open source project, we developed and debugged zlmediakit with CLion:
+
+[![JetBrains](https://resources.jetbrains.com/storage/products/company/brand/logos/CLion.svg)](https://jb.gg/OpenSourceSupport)
 
 ## Use Cases
 

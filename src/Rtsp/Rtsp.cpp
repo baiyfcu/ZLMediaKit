@@ -8,12 +8,13 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <cstdlib>
+#include <cinttypes>
+#include <random>
 #include "Rtsp.h"
 #include "Common/Parser.h"
 #include "Common/config.h"
 #include "Network/Socket.h"
-#include <cinttypes>
-#include <cstdlib>
 
 using namespace std;
 using namespace toolkit;
@@ -149,7 +150,6 @@ static TrackType toTrackType(const string &str) {
 }
 
 void SdpParser::load(const string &sdp) {
-    std::multimap<char, std::string> global_infos;
     {
         _track_vec.clear();
         SdpTrack::Ptr track = std::make_shared<SdpTrack>();
@@ -166,23 +166,17 @@ void SdpParser::load(const string &sdp) {
             string opt_val = line.substr(2);
             switch (opt) {
                 case 't':
-                    if (_track_vec.size() == 1)
-                        global_infos.emplace(opt, opt_val);
-                    else
-                        track->_t = opt_val;
+                    track->_t = opt_val;
                     break;
                 case 'b':
-                    if (_track_vec.size() == 1)
-                        global_infos.emplace(opt, opt_val);
-                    else
-                        track->_b = opt_val;
+                    track->_b = opt_val;
                     break;
                 case 'm': {
                     track = std::make_shared<SdpTrack>();
                     int pt, port, port_count;
-                    char rtp[16] = { 0 }, type[16];
-                    if (4 == sscanf(opt_val.data(), " %15[^ ] %d %15[^ ] %d", type, &port, rtp, &pt)
-                        || 5 == sscanf(opt_val.data(), " %15[^ ] %d/%d %15[^ ] %d", type, &port, &port_count, rtp, &pt)) {
+                    char rtp[16] = {0}, type[16];
+                    if (4 == sscanf(opt_val.data(), " %15[^ ] %d %15[^ ] %d", type, &port, rtp, &pt) ||
+                        5 == sscanf(opt_val.data(), " %15[^ ] %d/%d %15[^ ] %d", type, &port, &port_count, rtp, &pt)) {
                         track->_pt = pt;
                         track->_samplerate = RtpPayload::getClockRate(pt);
                         track->_channel = RtpPayload::getAudioChannel(pt);
@@ -195,43 +189,17 @@ void SdpParser::load(const string &sdp) {
                 case 'a': {
                     string attr = findSubString(opt_val.data(), nullptr, ":");
                     if (attr.empty()) {
-                        if (_track_vec.size() == 1)
-                            global_infos.emplace(opt, opt_val);
-                        else
-                            track->_attr.emplace(opt_val, "");
+                        track->_attr.emplace(opt_val, "");
                     } else {
-                        if (_track_vec.size() == 1 && attr != "range")
-                            global_infos.emplace(opt, opt_val);
-                        else
-                            track->_attr.emplace(attr, findSubString(opt_val.data(), ":", nullptr));
+                        track->_attr.emplace(attr, findSubString(opt_val.data(), ":", nullptr));
                     }
                     break;
                 }
-                default: {
-                    if (_track_vec.size() == 1) {
-                        global_infos.emplace(opt, opt_val);
-                    } else {
-                        track->_other[opt] = opt_val;
-                    }
-                    break;
-                }
+                default: track->_other[opt] = opt_val; break;
             }
         }
     }
 
-    for (auto &info : global_infos) {
-        std::string attr;
-        switch (info.first) {
-            case 'a':
-                attr = findSubString(info.second.data(), nullptr, ":");
-                if (attr == "control") {
-                    _control_url = findSubString(info.second.data(), ":", nullptr);
-                }
-                break;
-
-            default: break;
-        }
-    }
     for (auto &track_ptr : _track_vec) {
         auto &track = *track_ptr;
         auto it = track._attr.find("range");
@@ -355,9 +323,10 @@ string SdpParser::toString() const {
 }
 
 std::string SdpParser::getControlUrl(const std::string &url) const {
-    if (_control_url.find("://") != string::npos) {
+    auto title_track = getTrack(TrackTitle);
+    if (title_track && title_track->_control.find("://") != string::npos) {
         // 以rtsp://开头
-        return _control_url;
+        return title_track->_control;
     }
     return url;
 }
@@ -424,9 +393,13 @@ public:
 
 private:
     void setRange(uint16_t start_pos, uint16_t end_pos) {
+        std::mt19937 rng(std::random_device {}());
         lock_guard<recursive_mutex> lck(_pool_mtx);
+        auto it = _port_pair_pool.begin();
         while (start_pos < end_pos) {
-            _port_pair_pool.emplace_back(start_pos++);
+            // 随机端口排序，防止重启后导致分配的端口重复
+            _port_pair_pool.insert(it, start_pos++);
+            it = _port_pair_pool.begin() + (rng() % (1 + _port_pair_pool.size()));
         }
     }
 
@@ -494,7 +467,7 @@ bool isRtp(const char *buf, size_t size) {
         return false;
     }
     RtpHeader *header = (RtpHeader *)buf;
-    return ((header->pt < 64) || (header->pt >= 96));
+    return ((header->pt < 64) || (header->pt >= 96)) && header->version == RtpPacket::kRtpVersion;
 }
 
 bool isRtcp(const char *buf, size_t size) {
