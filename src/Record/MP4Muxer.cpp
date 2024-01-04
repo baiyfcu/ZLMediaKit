@@ -163,6 +163,15 @@ static uint8_t getObject(CodecId codecId) {
     }
 }
 
+int MP4MuxerInterface::getTrackId(CodecId id) {
+    auto it = _codec_to_trackid.find(id);
+    if (it == _codec_to_trackid.end()) {
+        // 该Track不存在或初始化失败
+        return -1;
+    } else
+        return it->second.track_id;
+}
+
 void MP4MuxerInterface::stampSync() {
     if (_codec_to_trackid.size() < 2) {
         return;

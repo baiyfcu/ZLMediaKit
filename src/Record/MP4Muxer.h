@@ -67,19 +67,23 @@ public:
 protected:
     virtual MP4FileIO::Writer createWriter() = 0;
 
+    int getTrackId(CodecId id);
+
 private:
     void stampSync();
 
 private:
     bool _started = false;
     bool _have_video = false;
-    MP4FileIO::Writer _mov_writter;
     struct track_info {
         int track_id = -1;
         Stamp stamp;
     };
     std::unordered_map<int, track_info> _codec_to_trackid;
     FrameMerger _frame_merger { FrameMerger::mp4_nal_size };
+
+public:
+    MP4FileIO::Writer _mov_writter;
 };
 
 class MP4Muxer : public MP4MuxerInterface{
@@ -98,7 +102,7 @@ public:
      * 打开mp4
      * @param file 文件完整路径
      */
-    void openMP4(const std::string &file);
+    virtual void openMP4(const std::string &file);
 
     /**
      * 手动关闭文件(对象析构时会自动关闭)
