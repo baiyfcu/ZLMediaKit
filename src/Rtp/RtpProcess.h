@@ -22,7 +22,7 @@ class RtpProcess final : public RtcpContextForRecv, public toolkit::SockInfo, pu
 public:
     using Ptr = std::shared_ptr<RtpProcess>;
     friend class RtpProcessHelper;
-    RtpProcess(const std::string &stream_id);
+    RtpProcess(const std::string &app, const std::string &stream_id);
     ~RtpProcess();
 
     /**

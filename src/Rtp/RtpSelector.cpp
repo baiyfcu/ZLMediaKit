@@ -34,7 +34,7 @@ bool RtpSelector::getSSRC(const char *data, size_t data_len, uint32_t &ssrc){
     return true;
 }
 
-RtpProcess::Ptr RtpSelector::getProcess(const string &stream_id,bool makeNew) {
+RtpProcess::Ptr RtpSelector::getProcess(const string &app, const string &stream_id,bool makeNew) {
     lock_guard<decltype(_mtx_map)> lck(_mtx_map);
     auto it = _map_rtp_process.find(stream_id);
     if (it == _map_rtp_process.end() && !makeNew) {
@@ -46,7 +46,7 @@ RtpProcess::Ptr RtpSelector::getProcess(const string &stream_id,bool makeNew) {
     }
     RtpProcessHelper::Ptr &ref = _map_rtp_process[stream_id];
     if (!ref) {
-        ref = std::make_shared<RtpProcessHelper>(stream_id, shared_from_this());
+        ref = std::make_shared<RtpProcessHelper>(app, stream_id, shared_from_this());
         ref->attachEvent();
         createTimer();
     }
@@ -105,10 +105,11 @@ void RtpSelector::onManager() {
     });
 }
 
-RtpProcessHelper::RtpProcessHelper(const string &stream_id, const weak_ptr<RtpSelector> &parent) {
+RtpProcessHelper::RtpProcessHelper(const string &app, const string &stream_id, const weak_ptr<RtpSelector> &parent) {
+    _app = app;
     _stream_id = stream_id;
     _parent = parent;
-    _process = std::make_shared<RtpProcess>(stream_id);
+    _process = std::make_shared<RtpProcess>(app, stream_id);
 }
 
 RtpProcessHelper::~RtpProcessHelper() {

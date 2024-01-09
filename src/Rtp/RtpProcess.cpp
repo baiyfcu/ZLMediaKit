@@ -25,10 +25,10 @@ static constexpr size_t kMaxCachedFrame = 200;
 
 namespace mediakit {
 
-RtpProcess::RtpProcess(const string &stream_id) {
+RtpProcess::RtpProcess(const string &app, const string &stream_id) {
     _media_info.schema = kRtpAppName;
     _media_info.vhost = DEFAULT_VHOST;
-    _media_info.app = kRtpAppName;
+    _media_info.app = app.length() > 0 ? app : kRtpAppName;
     _media_info.stream = stream_id;
 
     GET_CONFIG(string, dump_dir, RtpProxy::kDumpDir);

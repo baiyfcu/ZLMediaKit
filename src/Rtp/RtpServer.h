@@ -43,7 +43,8 @@ public:
      * @param re_use_port 是否设置socket为re_use属性
      * @param ssrc 指定的ssrc
      */
-    void start(uint16_t local_port, const std::string &stream_id = "", TcpMode tcp_mode = PASSIVE,
+    void start(
+        uint16_t local_port, const std::string &app = "", const std::string &stream_id = "", TcpMode tcp_mode = PASSIVE,
                const char *local_ip = "::", bool re_use_port = true, uint32_t ssrc = 0, bool only_audio = false);
 
     /**

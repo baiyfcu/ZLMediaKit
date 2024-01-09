@@ -69,7 +69,7 @@ static bool loadFile(const char *path, const EventPoller::Ptr &poller){
                 WarnL << "get ssrc from rtp failed:" << len;
                 return false;
             }
-            process = RtpSelector::Instance().getProcess(printSSRC(ssrc), true);
+            process = RtpSelector::Instance().getProcess("", printSSRC(ssrc), true);
         }
         if (process) {
             try {

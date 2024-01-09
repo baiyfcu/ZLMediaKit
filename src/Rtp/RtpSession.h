@@ -22,6 +22,7 @@ namespace mediakit{
 
 class RtpSession : public toolkit::Session, public RtpSplitter, public MediaSourceEvent {
 public:
+    static const std::string kApp;
     static const std::string kStreamID;
     static const std::string kSSRC;
     static const std::string kOnlyAudio;
@@ -50,6 +51,7 @@ private:
     bool _only_audio = false;
     uint32_t _ssrc = 0;
     toolkit::Ticker _ticker;
+    std::string _app;
     std::string _stream_id;
     struct sockaddr_storage _addr;
     RtpProcess::Ptr _process;

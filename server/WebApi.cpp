@@ -404,7 +404,7 @@ Value makeMediaSourceJson(MediaSource &media){
 }
 
 #if defined(ENABLE_RTPPROXY)
-uint16_t openRtpServer(uint16_t local_port, const string &stream_id, int tcp_mode, const string &local_ip, bool re_use_port, uint32_t ssrc, bool only_audio) {
+uint16_t openRtpServer(uint16_t local_port, const string &app, const string &stream_id, int tcp_mode, const string &local_ip, bool re_use_port, uint32_t ssrc, bool only_audio) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     if (s_rtpServerMap.find(stream_id) != s_rtpServerMap.end()) {
         //为了防止RtpProcess所有权限混乱的问题，不允许重复添加相同的stream_id
@@ -412,7 +412,7 @@ uint16_t openRtpServer(uint16_t local_port, const string &stream_id, int tcp_mod
     }
 
     RtpServer::Ptr server = std::make_shared<RtpServer>();
-    server->start(local_port, stream_id, (RtpServer::TcpMode)tcp_mode, local_ip.c_str(), re_use_port, ssrc, only_audio);
+    server->start(local_port, app, stream_id, (RtpServer::TcpMode)tcp_mode, local_ip.c_str(), re_use_port, ssrc, only_audio);
     server->setOnDetach([stream_id]() {
         //设置rtp超时移除事件
         lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
@@ -1156,7 +1156,7 @@ void installWebApi() {
         CHECK_SECRET();
         CHECK_ARGS("stream_id");
 
-        auto process = RtpSelector::Instance().getProcess(allArgs["stream_id"], false);
+        auto process = RtpSelector::Instance().getProcess(allArgs["app"], allArgs["stream_id"], false);
         if (!process) {
             val["exist"] = false;
             return;
@@ -1168,13 +1168,14 @@ void installWebApi() {
     api_regist("/index/api/openRtpServer",[](API_ARGS_MAP){
         CHECK_SECRET();
         CHECK_ARGS("port", "stream_id");
+        auto app = allArgs["app"];
         auto stream_id = allArgs["stream_id"];
         auto tcp_mode = allArgs["tcp_mode"].as<int>();
         if (allArgs["enable_tcp"].as<int>() && !tcp_mode) {
             //兼容老版本请求，新版本去除enable_tcp参数并新增tcp_mode参数
             tcp_mode = 1;
         }
-        auto port = openRtpServer(allArgs["port"], stream_id, tcp_mode, "::", allArgs["re_use_port"].as<bool>(),
+        auto port = openRtpServer(allArgs["port"], app, stream_id, tcp_mode, "::", allArgs["re_use_port"].as<bool>(),
                                   allArgs["ssrc"].as<uint32_t>(), allArgs["only_audio"].as<bool>());
         if (port == 0) {
             throw InvalidArgsException("该stream_id已存在");
@@ -1326,7 +1327,7 @@ void installWebApi() {
         CHECK_SECRET();
         CHECK_ARGS("stream_id");
         //只是暂停流的检查，流媒体服务器做为流负载服务，收流就转发，RTSP/RTMP有自己暂停协议
-        auto rtp_process = RtpSelector::Instance().getProcess(allArgs["stream_id"], false);
+        auto rtp_process = RtpSelector::Instance().getProcess(allArgs["app"], allArgs["stream_id"], false);
         if (rtp_process) {
             rtp_process->setStopCheckRtp(true);
         } else {
@@ -1337,7 +1338,7 @@ void installWebApi() {
     api_regist("/index/api/resumeRtpCheck", [](API_ARGS_MAP) {
         CHECK_SECRET();
         CHECK_ARGS("stream_id");
-        auto rtp_process = RtpSelector::Instance().getProcess(allArgs["stream_id"], false);
+        auto rtp_process = RtpSelector::Instance().getProcess(allArgs["app"], allArgs["stream_id"], false);
         if (rtp_process) {
             rtp_process->setStopCheckRtp(false);
         } else {
