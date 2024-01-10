@@ -20,8 +20,9 @@ namespace mediakit{
 
 void splitH264(const char *ptr, size_t len, size_t prefix, const std::function<void(const char *, size_t, size_t)> &cb);
 size_t prefixSize(const char *ptr, size_t len);
+bool getAVCInfo(const char *sps, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps);
 
-template<typename Parent>
+template <typename Parent>
 class H264FrameHelper : public Parent{
 public:
     friend class FrameImp;

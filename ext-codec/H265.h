@@ -18,8 +18,9 @@
 #define H265_TYPE(v) (((uint8_t)(v) >> 1) & 0x3f)
 
 namespace mediakit {
+bool getHEVCInfo(const char *vps, size_t vps_len, const char *sps, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps);
 
-template<typename Parent>
+template <typename Parent>
 class H265FrameHelper : public Parent{
 public:
     friend class FrameImp;

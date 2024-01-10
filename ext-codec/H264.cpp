@@ -27,7 +27,7 @@ using namespace toolkit;
 
 namespace mediakit {
 
-static bool getAVCInfo(const char *sps, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps) {
+bool getAVCInfo(const char *sps, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps) {
     if (sps_len < 4) {
         return false;
     }

@@ -414,7 +414,8 @@ Value makeMediaSourceJson(MediaSource &media){
 }
 
 #if defined(ENABLE_RTPPROXY)
-uint16_t local_port, const string &app, const string &stream_id, int tcp_mode, const string &local_ip, bool re_use_port, uint32_t ssrc, bool only_audio,
+uint16_t openRtpServer(
+    uint16_t local_port, const string &app, const string &stream_id, int tcp_mode, const string &local_ip, bool re_use_port, uint32_t ssrc, bool only_audio,
         bool multiplex) {
     lock_guard<recursive_mutex> lck(s_rtpServerMapMtx);
     if (s_rtpServerMap.find(stream_id) != s_rtpServerMap.end()) {
@@ -1211,6 +1212,7 @@ void installWebApi() {
       api_regist("/index/api/openRtpServerMultiplex", [](API_ARGS_MAP) {
       CHECK_SECRET();
       CHECK_ARGS("port", "stream_id");
+      auto app = allArgs["app"];
       auto stream_id = allArgs["stream_id"];
       auto tcp_mode = allArgs["tcp_mode"].as<int>();
       if (allArgs["enable_tcp"].as<int>() && !tcp_mode) {
@@ -1219,7 +1221,7 @@ void installWebApi() {
       }
 
       auto port = openRtpServer(
-          allArgs["port"], stream_id, tcp_mode, "::", true, 0, allArgs["only_audio"].as<bool>(),true);
+          allArgs["port"], app, stream_id, tcp_mode, "::", true, 0, allArgs["only_audio"].as<bool>(),true);
       if (port == 0) {
           throw InvalidArgsException("该stream_id已存在");
       }
