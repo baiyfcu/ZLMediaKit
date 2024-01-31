@@ -62,7 +62,7 @@ void MP4Demuxer::onVideoTrack(uint32_t track, uint8_t object, int width, int hei
         return;
     }
 	if (_on_track_callback)
-		_on_track_callback(dynamic_pointer_cast<Track>(video));
+        _on_track_callback(video);
     video->setIndex(track);
     _tracks.emplace(track, video);
     if (extra && bytes) {
@@ -76,7 +76,7 @@ void MP4Demuxer::onAudioTrack(uint32_t track, uint8_t object, int channel_count,
         return;
     }
 	if (_on_track_callback)
-		_on_track_callback(dynamic_pointer_cast<Track>(audio));
+		_on_track_callback(audio);
     audio->setIndex(track);
     _tracks.emplace(track, audio);
     if (extra && bytes) {
