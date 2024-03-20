@@ -28,7 +28,6 @@ static toolkit::onceToken REGISTER_STATIC_VAR(s_token, __LINE__) ([]() { \
 });
 
 namespace mediakit {
-
 struct CodecPlugin {
     CodecId (*getCodec)();
     Track::Ptr (*getTrackByCodecId)(int sample_rate, int channels, int sample_bit);
@@ -42,6 +41,8 @@ struct CodecPlugin {
 
 class Factory {
 public:
+    static void loadPlugins();
+
     /**
      * 注册插件，非线程安全的
      */
