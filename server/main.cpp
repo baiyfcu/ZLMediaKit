@@ -26,6 +26,7 @@
 #include "Rtp/RtpServer.h"
 #include "WebApi.h"
 #include "WebHook.h"
+#include "Extension/Factory.h"
 
 #if defined(ENABLE_WEBRTC)
 #include "../webrtc/WebRtcTransport.h"
@@ -209,6 +210,8 @@ public:
 string g_ini_file;
 
 int start_main(int argc,char *argv[]) {
+    Factory::loadPlugins();
+
     {
         CMD_main cmd_main;
         try {
