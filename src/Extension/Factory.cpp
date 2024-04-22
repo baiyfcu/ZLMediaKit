@@ -28,6 +28,8 @@ extern CodecPlugin g711a_plugin;
 extern CodecPlugin g711u_plugin;
 extern CodecPlugin l16_plugin;
 
+onceToken g_plugins_token([]() { Factory::loadPlugins(); });
+
 void Factory::loadPlugins() {
     registerPlugin(h264_plugin);
     registerPlugin(h265_plugin);

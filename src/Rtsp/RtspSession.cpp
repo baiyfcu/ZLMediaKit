@@ -59,10 +59,8 @@ RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
 void RtspSession::onError(const SockException &err) {
     bool is_player = !_push_src_ownership;
     uint64_t duration = _alive_ticker.createdTime() / 1000;
-    WarnP(this) << (is_player ? "RTSP播放器(" : "RTSP推流器(")
-                << _media_info.shortUrl()
-                << ")断开:" << err.what()
-                << ",耗时(s):" << duration;
+    WarnP(this) << (is_player ? u8"RTSP播放器(" : u8"RTSP推流器(")
+                << _media_info.shortUrl() << u8")断开:" << err.what() << u8",耗时(s):" << duration;
 
     if (_rtp_type == Rtsp::RTP_MULTICAST) {
         //取消UDP端口监听

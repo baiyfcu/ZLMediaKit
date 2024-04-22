@@ -453,7 +453,7 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
             cancel_all();
             if (auto strong_session = weak_session.lock()) {
                 //播发器请求的流终于注册上了，切换到自己的线程再回复
-                DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
+                DebugL << u8"收到媒体注册事件,回复播放器:" << info.getUrl();
                 //再找一遍媒体源，一般能找到
                 findAsync_l(info, strong_session, false, cb_once);
             }
@@ -514,7 +514,7 @@ void MediaSource::emitEvent(bool regist){
     }
     //触发广播
     NOTICE_EMIT(BroadcastMediaChangedArgs, Broadcast::kBroadcastMediaChanged, regist, *this);
-    InfoL << (regist ? "媒体注册:" : "媒体注销:") << getUrl();
+    InfoL << (regist ? u8"媒体注册:" : u8"媒体注销:") << getUrl();
 }
 
 void MediaSource::regist() {
@@ -687,7 +687,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
             }
         } else {
             //这个是mp4点播，我们自动关闭
-            WarnL << "MP4点播无人观看,自动关闭:" << strong_sender->getUrl();
+            WarnL << u8"MP4点播无人观看,自动关闭:" << strong_sender->getUrl();
             strong_sender->close(false);
         }
         return false;

@@ -62,7 +62,7 @@ protected:
     bool close(MediaSource &sender) override {
         if (!_on_close) {
             //未设置回调，没法关闭
-            WarnL << "请使用mk_media_set_on_close函数设置回调函数!";
+            WarnL << u8"请使用mk_media_set_on_close函数设置回调函数!";
             return false;
         }
         //请在回调中调用mk_media_release函数释放资源,否则MediaSource::close()操作不会生效

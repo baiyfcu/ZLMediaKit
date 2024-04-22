@@ -210,8 +210,6 @@ public:
 string g_ini_file;
 
 int start_main(int argc,char *argv[]) {
-    Factory::loadPlugins();
-
     {
         CMD_main cmd_main;
         try {
