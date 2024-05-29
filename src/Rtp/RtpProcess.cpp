@@ -59,9 +59,8 @@ void RtpProcess::flush() {
 
 RtpProcess::~RtpProcess() {
     uint64_t duration = (_last_frame_time.createdTime() - _last_frame_time.elapsedTime()) / 1000;
-    WarnP(this) << "RTP推流器("
-                << _media_info.shortUrl()
-                << ")断开,耗时(s):" << duration;
+    WarnP(this) << u8"RTP推流器("
+                << _media_info.shortUrl() << u8")断开,耗时(s):" << duration;
 
     //流量统计事件广播
     GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
@@ -260,10 +259,10 @@ void RtpProcess::emitOnPublish() {
                 }
                 strong_self->_muxer->setMediaListener(strong_self);
                 strong_self->doCachedFunc();
-                InfoP(strong_self) << "允许RTP推流";
+                InfoP(strong_self) << u8"允许RTP推流";
             } else {
                 strong_self->_auth_err = err;
-                WarnP(strong_self) << "禁止RTP推流:" << err;
+                WarnP(strong_self) << u8"禁止RTP推流:" << err;
             }
         });
     };

@@ -57,6 +57,10 @@ target_compile_definitions(${PLAYER_NAME}
 target_compile_options(${PLAYER_NAME}
   PRIVATE ${COMPILE_OPTIONS_DEFAULT})
 
+if(WIN32)
+target_link_libraries(${PLAYER_NAME}  ${LINK_LIB_LIST} bcrypt setupapi version imm32)
+endif()
+
 # TODO: 统一参数?
 if(MSVC)
   set_target_properties(${PLAYER_NAME} PROPERTIES LINK_FLAGS "/SAFESEH:NO /SUBSYSTEM:WINDOWS")

@@ -153,7 +153,7 @@ void HttpSession::onError(const SockException &err) {
     if (_is_live_stream) {
         // flv/ts播放器
         uint64_t duration = _ticker.createdTime() / 1000;
-        WarnP(this) << "FLV/TS/FMP4播放器(" << _media_info.shortUrl() << ")断开:" << err << ",耗时(s):" << duration;
+        WarnP(this) << u8"FLV/TS/FMP4播放器(" << _media_info.shortUrl() << u8")断开:" << err << u8",耗时(s):" << duration;
 
         GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
         if (_total_bytes_usage >= iFlowThreshold * 1024) {
@@ -436,7 +436,7 @@ bool HttpSession::checkLiveStreamFlv(const function<void()> &cb) {
                 case CodecH264:
                 case CodecAAC: break;
                 default: {
-                    WarnP(this) << "flv播放器一般只支持H264和AAC编码,该编码格式可能不被播放器支持:" << track->getCodecName();
+                    WarnP(this) << u8"flv播放器一般只支持H264和AAC编码,该编码格式可能不被播放器支持:" << track->getCodecName();
                     break;
                 }
             }
