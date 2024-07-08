@@ -717,7 +717,14 @@ void HttpResponseInvokerImp::responseFile(const StrCaseMap &requestHeader,
     }
 
     // 尝试添加Content-Type
-    httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()) + "; charset=" + charSet);
+    if (end_with(file, ".js") || end_with(file, ".css") || end_with(file, ".wasm") || end_with(file, ".png") || end_with(file, ".woff")
+        || end_with(file, ".ico")) {
+        httpHeader.emplace("ETag", "filecache");
+        httpHeader.emplace("Last-Modified:", "Tue, 04 Jun 2024 06:25:38 GMT");
+        httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()));
+    }
+    else
+        httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()) + "; charset=" + charSet);
 
     auto &strRange = const_cast<StrCaseMap &>(requestHeader)["Range"];
     int code = 200;

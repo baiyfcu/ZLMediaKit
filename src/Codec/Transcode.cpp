@@ -80,7 +80,7 @@ static bool checkIfSupportedNvidia_l() {
     }
     auto so = dlopen("libnvcuvid.so.1", RTLD_LAZY);
     if (!so) {
-        WarnL << "libnvcuvid.so.1加载失败:" << get_uv_errmsg();
+        WarnL << u8"libnvcuvid.so.1加载失败:" << get_uv_errmsg();
         return false;
     }
     dlclose(so);
@@ -96,7 +96,7 @@ static bool checkIfSupportedNvidia_l() {
     }, false);
 
     if (!find_driver) {
-        WarnL << "英伟达硬件编解码器驱动文件 /dev/nvidia* 不存在";
+        WarnL << u8"英伟达硬件编解码器驱动文件 /dev/nvidia* 不存在";
     }
     return find_driver;
 #else
@@ -391,7 +391,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
 
     codec = codec ? codec : codec_default;
     if (!codec) {
-        throw std::runtime_error("未找到解码器");
+        throw std::runtime_error(u8"未找到解码器");
     }
 
     while (true) {
@@ -400,7 +400,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
         });
 
         if (!_context) {
-            throw std::runtime_error("创建解码器失败");
+            throw std::runtime_error(u8"创建解码器失败");
         }
 
         //保存AVFrame的引用
@@ -449,17 +449,17 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
         av_dict_free(&dict);
         if (ret >= 0) {
             //成功
-            InfoL << "打开解码器成功:" << codec->name;
+            InfoL << u8"打开解码器成功:" << codec->name;
             break;
         }
 
         if (codec_default && codec_default != codec) {
             //硬件编解码器打开失败，尝试软件的
-            WarnL << "打开解码器" << codec->name << "失败，原因是:" << ffmpeg_err(ret) << ", 再尝试打开解码器" << codec_default->name;
+            WarnL << u8"打开解码器" << codec->name << u8"失败，原因是:" << ffmpeg_err(ret) << u8", 再尝试打开解码器" << codec_default->name;
             codec = codec_default;
             continue;
         }
-        throw std::runtime_error(StrPrinter << "打开解码器" << codec->name << "失败:" << ffmpeg_err(ret));
+        throw std::runtime_error(StrPrinter << u8"打开解码器" << codec->name << u8"失败:" << ffmpeg_err(ret));
     }
 }
 
@@ -554,7 +554,7 @@ bool FFmpegDecoder::decodeFrame(const char *data, size_t size, uint64_t dts, uin
         }
         if (live && pts - out_frame->get()->pts > MAX_DELAY_SECOND * 1000 && _ticker.createdTime() > 10 * 1000) {
             //后面的帧才忽略,防止Track无法ready
-            WarnL << "解码时，忽略" << MAX_DELAY_SECOND << "秒前的数据:" << pts << " " << out_frame->get()->pts;
+            WarnL << u8"解码时，忽略" << MAX_DELAY_SECOND << u8"秒前的数据:" << pts << " " << out_frame->get()->pts;
             continue;
         }
         onDecode(out_frame);

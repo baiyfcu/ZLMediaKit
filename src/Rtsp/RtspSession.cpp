@@ -844,7 +844,7 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     //设置播放track
     if (inited_tracks.size() == 1) {
         _target_play_track = inited_tracks[0];
-        InfoP(this) << "指定播放track:" << _target_play_track;
+        InfoP(this) << u8"指定播放track:" << _target_play_track;
     }
 
     //在回复rtsp信令后再恢复播放

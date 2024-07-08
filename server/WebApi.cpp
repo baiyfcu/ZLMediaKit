@@ -1203,7 +1203,7 @@ void installWebApi() {
         auto port = openRtpServer(allArgs["port"], app, stream_id, tcp_mode, "::", allArgs["re_use_port"].as<bool>(),
                                   allArgs["ssrc"].as<uint32_t>(), allArgs["only_audio"].as<bool>());
         if (port == 0) {
-            throw InvalidArgsException("该stream_id已存在");
+            throw InvalidArgsException(u8"该stream_id已存在");
         }
         //回复json
         val["port"] = port;
@@ -1223,7 +1223,7 @@ void installWebApi() {
       auto port = openRtpServer(
           allArgs["port"], app, stream_id, tcp_mode, "::", true, 0, allArgs["only_audio"].as<bool>(),true);
       if (port == 0) {
-          throw InvalidArgsException("该stream_id已存在");
+          throw InvalidArgsException(u8"该stream_id已存在");
       }
       // 回复json
       val["port"] = port;

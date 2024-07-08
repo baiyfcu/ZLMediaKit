@@ -125,7 +125,7 @@ void RtmpSession::onCmd_publish(AMFDecoder &dec) {
     std::shared_ptr<onceToken> token(new onceToken(nullptr, [ticker, weak_self]() {
         auto strong_self = weak_self.lock();
         if (strong_self) {
-            DebugP(strong_self.get()) << "publish 回复时间:" << ticker->elapsedTime() << "ms";
+            DebugP(strong_self.get()) << u8"publish 回复时间:" << ticker->elapsedTime() << "ms";
         }
     }));
     dec.load<AMFValue>();/* NULL */

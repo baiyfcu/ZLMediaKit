@@ -169,10 +169,10 @@ void RtpServer::start(uint16_t local_port, const string &app, const string &stre
         local_port = rtp_socket->get_local_port();
     } else if (!rtp_socket->bindUdpSock(local_port, local_ip, re_use_port)) {
         //用户指定端口
-        throw std::runtime_error(StrPrinter << "创建rtp端口 " << local_ip << ":" << local_port << " 失败:" << get_uv_errmsg(true));
+        throw std::runtime_error(StrPrinter << u8"创建rtp端口 " << local_ip << ":" << local_port << u8" 失败:" << get_uv_errmsg(true));
     } else if (!rtcp_socket->bindUdpSock(local_port + 1, local_ip, re_use_port)) {
         // rtcp端口
-        throw std::runtime_error(StrPrinter << "创建rtcp端口 " << local_ip << ":" << local_port + 1 << " 失败:" << get_uv_errmsg(true));
+        throw std::runtime_error(StrPrinter << u8"创建rtcp端口 " << local_ip << ":" << local_port + 1 << u8" 失败:" << get_uv_errmsg(true));
     }
 
     //设置udp socket读缓存
@@ -183,6 +183,7 @@ void RtpServer::start(uint16_t local_port, const string &app, const string &stre
     if (tcp_mode == PASSIVE || tcp_mode == ACTIVE) {
         //创建tcp服务器
         tcp_server = std::make_shared<TcpServer>(rtp_socket->getPoller());
+        (*tcp_server)[RtpSession::kApp] = app;
         (*tcp_server)[RtpSession::kStreamID] = stream_id;
         (*tcp_server)[RtpSession::kSSRC] = ssrc;
         (*tcp_server)[RtpSession::kOnlyAudio] = only_audio;
@@ -190,7 +191,7 @@ void RtpServer::start(uint16_t local_port, const string &app, const string &stre
             tcp_server->start<RtpSession>(local_port, local_ip);
         } else if (stream_id.empty()) {
             // tcp主动模式时只能一个端口一个流，必须指定流id; 创建TcpServer对象也仅用于传参
-            throw std::runtime_error(StrPrinter << "tcp主动模式时必需指定流id");
+            throw std::runtime_error(StrPrinter << u8"tcp主动模式时必需指定流id");
         }
     }
 
@@ -254,20 +255,20 @@ uint16_t RtpServer::getPort() {
 
 void RtpServer::connectToServer(const std::string &url, uint16_t port, const function<void(const SockException &ex)> &cb) {
     if (_tcp_mode != ACTIVE || !_rtp_socket) {
-        cb(SockException(Err_other, "仅支持tcp主动模式"));
+        cb(SockException(Err_other, u8"仅支持tcp主动模式"));
         return;
     }
     weak_ptr<RtpServer> weak_self = shared_from_this();
     _rtp_socket->connect(url, port, [url, port, cb, weak_self](const SockException &err) {
         auto strong_self = weak_self.lock();
         if (!strong_self) {
-            cb(SockException(Err_other, "服务对象已释放"));
+            cb(SockException(Err_other, u8"服务对象已释放"));
             return;
         }
         if (err) {
-            WarnL << "连接到服务器 " << url << ":" << port << " 失败 " << err;
+            WarnL << u8"连接到服务器 " << url << ":" << port << u8" 失败 " << err;
         } else {
-            InfoL << "连接到服务器 " << url << ":" << port << " 成功";
+            InfoL << u8"连接到服务器 " << url << ":" << port << u8" 成功";
             strong_self->onConnect();
         }
         cb(err);

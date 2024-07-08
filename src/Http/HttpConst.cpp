@@ -193,7 +193,8 @@ static const char *s_mime_src[][2] = {
         {"asx", "video/x-ms-asf"},
         {"asf", "video/x-ms-asf"},
         {"wmv", "video/x-ms-wmv"},
-        {"avi", "video/x-msvideo"},
+        { "avi", "video/x-msvideo" },
+        { "wasm", "application/wasm" },
 };
 
 const string& HttpConst::getHttpContentType(const char *name) {

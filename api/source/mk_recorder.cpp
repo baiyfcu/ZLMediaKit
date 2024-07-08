@@ -50,7 +50,7 @@ static inline bool isRecording(Recorder::type type, const string &vhost, const s
 static inline bool startRecord(Recorder::type type, const string &vhost, const string &app, const string &stream_id, const string &customized_path, size_t max_second) {
     auto src = MediaSource::find(vhost, app, stream_id);
     if (!src) {
-        WarnL << "未找到相关的MediaSource,startRecord失败:" << vhost << "/" << app << "/" << stream_id;
+        WarnL << u8"未找到相关的MediaSource,startRecord失败:" << vhost << "/" << app << "/" << stream_id;
         return false;
     }
     bool ret;
