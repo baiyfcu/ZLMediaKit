@@ -15,6 +15,7 @@
 #include "Common/Parser.h"
 #include "Common/config.h"
 #include "Network/Socket.h"
+#include "Extension/Factory.h"
 
 using namespace std;
 using namespace toolkit;
@@ -259,6 +260,16 @@ void SdpParser::load(const string &sdp) {
         it = track._attr.find("control");
         if (it != track._attr.end()) {
             track._control = it->second;
+        }
+        if (!track._samplerate) {
+            if (track._type == TrackVideo) {
+                track._samplerate = 90000;
+            } else if (track._type == TrackAudio) {
+                auto t = Factory::getTrackBySdp(track_ptr);
+                if (t) {
+                    track._samplerate = std::static_pointer_cast<AudioTrack>(t)->getAudioSampleRate();
+                }
+            }
         }
     }
 }
