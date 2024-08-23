@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
         auto pusher = std::make_shared<MediaPusher>(src);
         pusher->setOnCreateSocket([](const EventPoller::Ptr &poller) {
             //socket关闭互斥锁，提高性能	
-            return std::make_shared<Socket>(poller, false);
+            return Socket::createSocket(poller, false);
         });
         //设置推流失败监听	
         pusher->setOnPublished([&mtx, &pusher_map, index](const SockException &ex) {
@@ -223,8 +223,9 @@ int main(int argc, char *argv[]) {
         option.enable_hls = false;
         option.enable_mp4 = false;
         option.modify_stamp = (int)ProtocolOption::kModifyStampRelative;
-        //添加拉流代理	
-        auto proxy = std::make_shared<PlayerProxy>(DEFAULT_VHOST, "app", std::to_string(i), option, -1, nullptr, 1);
+        //添加拉流代理
+        auto tuple = MediaTuple { DEFAULT_VHOST, "app", std::to_string(i), "" };
+        auto proxy = std::make_shared<PlayerProxy>(tuple, option, -1, nullptr, 1);
         //开始拉流代理	
         proxy->play(input_urls[i]);
         proxy_map.emplace(i, std::move(proxy));

@@ -18,33 +18,48 @@
 extern "C" {
 #endif
 
-///////////////////////////////////////////MP4Info/////////////////////////////////////////////
-//MP4Info对象的C映射
-typedef struct mk_mp4_info_t *mk_mp4_info;
+///////////////////////////////////////////RecordInfo/////////////////////////////////////////////
+//RecordInfo对象的C映射
+typedef struct mk_record_info_t *mk_record_info;
 // GMT 标准时间，单位秒
-API_EXPORT uint64_t API_CALL mk_mp4_info_get_start_time(const mk_mp4_info ctx);
+API_EXPORT uint64_t API_CALL mk_record_info_get_start_time(const mk_record_info ctx);
 // 录像长度，单位秒
-API_EXPORT float API_CALL mk_mp4_info_get_time_len(const mk_mp4_info ctx);
+API_EXPORT float API_CALL mk_record_info_get_time_len(const mk_record_info ctx);
 // 文件大小，单位 BYTE
-API_EXPORT size_t API_CALL mk_mp4_info_get_file_size(const mk_mp4_info ctx);
+API_EXPORT size_t API_CALL mk_record_info_get_file_size(const mk_record_info ctx);
 // 文件路径
-API_EXPORT const char* API_CALL mk_mp4_info_get_file_path(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_file_path(const mk_record_info ctx);
 // 文件名称
-API_EXPORT const char* API_CALL mk_mp4_info_get_file_name(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_file_name(const mk_record_info ctx);
 // 文件夹路径
-API_EXPORT const char* API_CALL mk_mp4_info_get_folder(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_folder(const mk_record_info ctx);
 // 播放路径
-API_EXPORT const char* API_CALL mk_mp4_info_get_url(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_url(const mk_record_info ctx);
 // 应用名称
-API_EXPORT const char* API_CALL mk_mp4_info_get_vhost(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_vhost(const mk_record_info ctx);
 // 流 ID
-API_EXPORT const char* API_CALL mk_mp4_info_get_app(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_app(const mk_record_info ctx);
 // 虚拟主机
-API_EXPORT const char* API_CALL mk_mp4_info_get_stream(const mk_mp4_info ctx);
+API_EXPORT const char *API_CALL mk_record_info_get_stream(const mk_record_info ctx);
+
+//// 下面宏保障用户代码兼容性, 二进制abi不兼容，用户需要重新编译链接 /////
+#define mk_mp4_info mk_record_info
+#define mk_mp4_info_get_start_time mk_record_info_get_start_time
+#define mk_mp4_info_get_time_len mk_record_info_get_time_len
+#define mk_mp4_info_get_file_size mk_record_info_get_file_size
+#define mk_mp4_info_get_file_path mk_record_info_get_file_path
+#define mk_mp4_info_get_file_name mk_record_info_get_file_name
+#define mk_mp4_info_get_folder mk_record_info_get_folder
+#define mk_mp4_info_get_url mk_record_info_get_url
+#define mk_mp4_info_get_vhost mk_record_info_get_vhost
+#define mk_mp4_info_get_app mk_record_info_get_app
+#define mk_mp4_info_get_stream mk_record_info_get_stream
 
 ///////////////////////////////////////////Parser/////////////////////////////////////////////
 //Parser对象的C映射
 typedef struct mk_parser_t *mk_parser;
+//Parser对象中Headers foreach回调
+typedef void(API_CALL *on_mk_parser_header_cb)(void *user_data, const char *key, const char *val);
 //Parser::Method(),获取命令字，譬如GET/POST
 API_EXPORT const char* API_CALL mk_parser_get_method(const mk_parser ctx);
 //Parser::Url(),获取HTTP的访问url(不包括?后面的参数)
@@ -59,6 +74,8 @@ API_EXPORT const char* API_CALL mk_parser_get_tail(const mk_parser ctx);
 API_EXPORT const char* API_CALL mk_parser_get_header(const mk_parser ctx,const char *key);
 //Parser::Content(),获取HTTP body
 API_EXPORT const char* API_CALL mk_parser_get_content(const mk_parser ctx, size_t *length);
+//循环获取所有header
+API_EXPORT void API_CALL mk_parser_headers_for_each(const mk_parser ctx, on_mk_parser_header_cb cb, void *user_data);
 
 ///////////////////////////////////////////MediaInfo/////////////////////////////////////////////
 //MediaInfo对象的C映射
@@ -101,9 +118,24 @@ API_EXPORT int API_CALL mk_media_source_get_total_reader_count(const mk_media_so
 API_EXPORT int API_CALL mk_media_source_get_track_count(const mk_media_source ctx);
 // copy track reference by index from MediaSource, please use mk_track_unref to release it
 API_EXPORT mk_track API_CALL mk_media_source_get_track(const mk_media_source ctx, int index);
+// MediaSource::Track:loss
+API_EXPORT float API_CALL mk_media_source_get_track_loss(const mk_media_source ctx, const mk_track track);
 // MediaSource::broadcastMessage
 API_EXPORT int API_CALL mk_media_source_broadcast_msg(const mk_media_source ctx, const char *msg, size_t len);
-
+// MediaSource::getOriginUrl()
+API_EXPORT const char* API_CALL mk_media_source_get_origin_url(const mk_media_source ctx);
+// MediaSource::getOriginType()
+API_EXPORT int API_CALL mk_media_source_get_origin_type(const mk_media_source ctx);
+// MediaSource::getOriginTypeStr(), 使用后请用mk_free释放返回值
+API_EXPORT const char *API_CALL mk_media_source_get_origin_type_str(const mk_media_source ctx);
+// MediaSource::getCreateStamp()
+API_EXPORT uint64_t API_CALL mk_media_source_get_create_stamp(const mk_media_source ctx);
+// MediaSource::isRecording()  0:hls,1:MP4
+API_EXPORT int API_CALL mk_media_source_is_recording(const mk_media_source ctx, int type);
+// MediaSource::getBytesSpeed() 
+API_EXPORT int API_CALL mk_media_source_get_bytes_speed(const mk_media_source ctx);
+// MediaSource::getAliveSecond()
+API_EXPORT uint64_t API_CALL mk_media_source_get_alive_second(const mk_media_source ctx);
 /**
  * 直播源在ZLMediaKit中被称作为MediaSource，
  * 目前支持3种，分别是RtmpMediaSource、RtspMediaSource、HlsMediaSource
@@ -127,9 +159,11 @@ API_EXPORT int API_CALL mk_media_source_seek_to(const mk_media_source ctx,uint32
  */
 typedef void(API_CALL *on_mk_media_source_send_rtp_result)(void *user_data, uint16_t local_port, int err, const char *msg);
 
-//MediaSource::startSendRtp,请参考mk_media_start_send_rtp,注意ctx参数类型不一样
-API_EXPORT void API_CALL mk_media_source_start_send_rtp(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int is_udp, on_mk_media_source_send_rtp_result cb, void *user_data);
-API_EXPORT void API_CALL mk_media_source_start_send_rtp2(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int is_udp, on_mk_media_source_send_rtp_result cb, void *user_data, on_user_data_free user_data_free);
+// MediaSource::startSendRtp,请参考mk_media_start_send_rtp,注意ctx参数类型不一样
+API_EXPORT void API_CALL mk_media_source_start_send_rtp(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int con_type, on_mk_media_source_send_rtp_result cb, void *user_data);
+API_EXPORT void API_CALL mk_media_source_start_send_rtp2(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int con_type, on_mk_media_source_send_rtp_result cb, void *user_data, on_user_data_free user_data_free);
+API_EXPORT void API_CALL mk_media_source_start_send_rtp3(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int con_type, mk_ini options, on_mk_media_source_send_rtp_result cb, void *user_data);
+API_EXPORT void API_CALL mk_media_source_start_send_rtp4(const mk_media_source ctx, const char *dst_url, uint16_t dst_port, const char *ssrc, int con_type, mk_ini options, on_mk_media_source_send_rtp_result cb,void *user_data, on_user_data_free user_data_free);
 //MediaSource::stopSendRtp，请参考mk_media_stop_send_rtp,注意ctx参数类型不一样
 API_EXPORT int API_CALL mk_media_source_stop_send_rtp(const mk_media_source ctx);
 
@@ -142,11 +176,11 @@ API_EXPORT void API_CALL mk_media_source_find(const char *schema,
                                               void *user_data,
                                               on_mk_media_source_find_cb cb);
 
-API_EXPORT const mk_media_source API_CALL mk_media_source_find2(const char *schema,
-                                                                const char *vhost,
-                                                                const char *app,
-                                                                const char *stream,
-                                                                int from_mp4);
+API_EXPORT mk_media_source API_CALL mk_media_source_find2(const char *schema,
+                                                          const char *vhost,
+                                                          const char *app,
+                                                          const char *stream,
+                                                          int from_mp4);
 //MediaSource::for_each_media()
 API_EXPORT void API_CALL mk_media_source_for_each(void *user_data, on_mk_media_source_find_cb cb, const char *schema,
                                                   const char *vhost, const char *app, const char *stream);
@@ -351,6 +385,20 @@ API_EXPORT mk_auth_invoker API_CALL mk_auth_invoker_clone(const mk_auth_invoker 
  * 销毁堆上的克隆对象
  */
 API_EXPORT void API_CALL mk_auth_invoker_clone_release(const mk_auth_invoker ctx);
+
+///////////////////////////////////////////WebRtcTransport/////////////////////////////////////////////
+//WebRtcTransport对象的C映射
+typedef struct mk_rtc_transport_t *mk_rtc_transport;
+
+/**
+ * 发送rtc数据通道
+ * @param ctx 数据通道对象
+ * @param streamId 流id
+ * @param ppid 协议id
+ * @param msg 数据
+ * @param len 数据长度
+ */
+API_EXPORT void API_CALL mk_rtc_send_datachannel(const mk_rtc_transport ctx, uint16_t streamId, uint32_t ppid, const char* msg, size_t len);
 
 #ifdef __cplusplus
 }

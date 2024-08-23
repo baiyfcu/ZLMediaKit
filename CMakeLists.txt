@@ -57,7 +57,8 @@ option(ENABLE_SCTP "Enable SCTP" ON)
 option(ENABLE_WEBRTC "Enable WebRTC" ON)
 option(ENABLE_X264 "Enable x264" OFF)
 option(ENABLE_WEPOLL "Enable wepoll" ON)
-option(DISABLE_REPORT "Disable report to report.zlmediakit.com" off)
+option(ENABLE_VIDEOSTACK "Enable video stack" OFF)
+option(DISABLE_REPORT "Disable report to report.zlmediakit.com" OFF)
 option(USE_SOLUTION_FOLDERS "Enable solution dir supported" ON)
 ##############################################################################
 # 设置socket默认缓冲区大小为256k.如果设置为0则不设置socket的默认缓冲区大小,使用系统内核默认值(设置为0仅对linux有效)
@@ -150,8 +151,8 @@ if(GIT_FOUND)
 endif()
 
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/version.h.ini
-  ${CMAKE_CURRENT_BINARY_DIR}/version.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/ZLMVersion.h.ini
+  ${CMAKE_CURRENT_BINARY_DIR}/ZLMVersion.h
   @ONLY)
 
 message(STATUS "Git version is ${BRANCH_NAME} ${COMMIT_HASH}/${COMMIT_TIME} ${BUILD_TIME}")
@@ -200,7 +201,7 @@ if(UNIX)
   set(COMPILE_OPTIONS_DEFAULT
     "-fPIC"
     "-Wall;-Wextra"
-    "-Wno-unused-function;-Wno-unused-parameter;-Wno-unused-variable"
+    "-Wno-unused-function;-Wno-unused-parameter;-Wno-unused-variable;-Wno-deprecated-declarations"
     "-Wno-error=extra;-Wno-error=missing-field-initializers;-Wno-error=type-limits")
 
   if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
@@ -212,7 +213,7 @@ elseif(WIN32)
   if (MSVC)
     set(COMPILE_OPTIONS_DEFAULT
             # TODO: /wd4819 应该是不会生效
-            "/wd4566;/wd4819"
+            "/wd4566;/wd4819;/utf-8"
             # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
             "/EHsc")
     # disable Windows logo
@@ -379,7 +380,7 @@ if(ENABLE_JEMALLOC_STATIC)
     set(ENABLE_JEMALLOC_STAT OFF)
   endif ()
   include(Jemalloc)
-  include_directories(SYSTEM ${DEP_ROOT_DIR}/${JEMALLOC_NAME}/include/jemalloc)
+  include_directories(SYSTEM ${DEP_ROOT_DIR}/${JEMALLOC_NAME}/include)
   link_directories(${DEP_ROOT_DIR}/${JEMALLOC_NAME}/lib)
   # 用于影响后续查找过程
   # Used to affect subsequent lookup process
@@ -411,6 +412,8 @@ if(OPENSSL_FOUND AND ENABLE_OPENSSL)
   update_cached_list(MK_LINK_LIBRARIES ${OPENSSL_LIBRARIES})
   if(CMAKE_SYSTEM_NAME MATCHES "Linux" AND OPENSSL_USE_STATIC_LIBS)
     update_cached_list(MK_LINK_LIBRARIES ${CMAKE_DL_LIBS})
+  elseif(CMAKE_SYSTEM_NAME MATCHES "Windows" AND OPENSSL_USE_STATIC_LIBS)
+    update_cached_list(MK_LINK_LIBRARIES Crypt32)
   endif()
 else()
   set(ENABLE_OPENSSL OFF)
@@ -454,9 +457,20 @@ endif()
 
 if(WIN32)
   update_cached_list(MK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi)
+elseif(ANDROID)
+  update_cached_list(MK_LINK_LIBRARIES log)
 elseif(NOT ANDROID OR IOS)
   update_cached_list(MK_LINK_LIBRARIES pthread)
 endif()
+
+if(ENABLE_VIDEOSTACK)
+  if(ENABLE_FFMPEG AND ENABLE_X264)
+    message(STATUS "ENABLE_VIDEOSTACK defined")
+    update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_VIDEOSTACK)
+  else()
+    message(WARNING "ENABLE_VIDEOSTACK requires ENABLE_FFMPEG and ENABLE_X264")
+  endif ()
+endif ()
 
 # ----------------------------------------------------------------------------
 # Solution folders:
@@ -542,3 +556,9 @@ endif ()
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/www" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/config.ini" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/default.pem" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+
+# 拷贝VideoStack 无视频流时默认填充的背景图片
+# Copy the default background image used by VideoStack when there is no video stream
+if (ENABLE_VIDEOSTACK AND ENABLE_FFMPEG AND ENABLE_X264)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/novideo.yuv" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+endif ()

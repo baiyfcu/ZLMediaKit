@@ -9,29 +9,12 @@
  */
 
 #include "macros.h"
-#include "Util/util.h"
-#include "Util/logger.h"
+
 using namespace toolkit;
 
 #if defined(ENABLE_VERSION)
-#include "version.h"
+#include "ZLMVersion.h"
 #endif
-
-extern "C" {
-void Assert_Throw(int failed, const char *exp, const char *func, const char *file, int line, const char *str) {
-    if (failed) {
-        _StrPrinter printer;
-        printer << "Assertion failed: (" << exp ;
-        if(str && *str){
-            printer << ", " << str;
-        }
-        printer << "), function " << func << ", file " << file << ", line " << line << ".";
-        //throw std::runtime_error(printer);
-        ErrorL << printer;
-
-    }
-}
-}
 
 namespace mediakit {
 

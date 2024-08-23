@@ -39,7 +39,7 @@
 #endif
 
 #if defined(ENABLE_VERSION)
-#include "version.h"
+#include "ZLMVersion.h"
 #endif
 
 #if !defined(_WIN32)
@@ -259,6 +259,15 @@ int start_main(int argc,char *argv[]) {
         //加载配置文件，如果配置文件不存在就创建一个
         loadIniConfig(g_ini_file.data());
 
+        auto &secret = mINI::Instance()[API::kSecret];
+        if (secret == "035c73f7-bb6b-4889-a715-d9eb2d1925cc" || secret.empty()) {
+            // 使用默认secret被禁止启动
+            secret = makeRandStr(32, true);
+            mINI::Instance().dumpFile(g_ini_file);
+            WarnL << "The " << API::kSecret << " is invalid, modified it to: " << secret
+                  << ", saved config file: " << g_ini_file;
+        }
+
         if (!File::is_dir(ssl_file)) {
             // 不是文件夹，加载证书，证书包含公钥和私钥
             SSL_Initor::Instance().loadCertificate(ssl_file.data());
@@ -273,6 +282,7 @@ int start_main(int argc,char *argv[]) {
             });
         }
 
+        std::string listen_ip = mINI::Instance()[General::kListenIP];
         uint16_t shellPort = mINI::Instance()[Shell::kPort];
         uint16_t rtspPort = mINI::Instance()[Rtsp::kPort];
         uint16_t rtspsPort = mINI::Instance()[Rtsp::kSSLPort];
@@ -353,48 +363,40 @@ int start_main(int argc,char *argv[]) {
         InfoL << "已启动http hook 接口";
 
         try {
-            auto &secret = mINI::Instance()[API::kSecret];
-            if (secret == "035c73f7-bb6b-4889-a715-d9eb2d1925cc" || secret.empty()) {
-                // 使用默认secret被禁止启动
-                secret = makeRandStr(32, true);
-                mINI::Instance().dumpFile(g_ini_file);
-                WarnL << "The " << API::kSecret << " is invalid, modified it to: " << secret
-                      << ", saved config file: " << g_ini_file;
-            }
             //rtsp服务器，端口默认554
-            if (rtspPort) { rtspSrv->start<RtspSession>(rtspPort); }
+            if (rtspPort) { rtspSrv->start<RtspSession>(rtspPort, listen_ip); }
             //rtsps服务器，端口默认322
-            if (rtspsPort) { rtspSSLSrv->start<RtspSessionWithSSL>(rtspsPort); }
+            if (rtspsPort) { rtspSSLSrv->start<RtspSessionWithSSL>(rtspsPort, listen_ip); }
 
             //rtmp服务器，端口默认1935
-            if (rtmpPort) { rtmpSrv->start<RtmpSession>(rtmpPort); }
+            if (rtmpPort) { rtmpSrv->start<RtmpSession>(rtmpPort, listen_ip); }
             //rtmps服务器，端口默认19350
-            if (rtmpsPort) { rtmpsSrv->start<RtmpSessionWithSSL>(rtmpsPort); }
+            if (rtmpsPort) { rtmpsSrv->start<RtmpSessionWithSSL>(rtmpsPort, listen_ip); }
 
             //http服务器，端口默认80
-            if (httpPort) { httpSrv->start<HttpSession>(httpPort); }
+            if (httpPort) { httpSrv->start<HttpSession>(httpPort, listen_ip); }
             //https服务器，端口默认443
-            if (httpsPort) { httpsSrv->start<HttpsSession>(httpsPort); }
+            if (httpsPort) { httpsSrv->start<HttpsSession>(httpsPort, listen_ip); }
 
             //telnet远程调试服务器
-            if (shellPort) { shellSrv->start<ShellSession>(shellPort); }
+            if (shellPort) { shellSrv->start<ShellSession>(shellPort, listen_ip); }
 
 #if defined(ENABLE_RTPPROXY)
             //创建rtp服务器
-            if (rtpPort) { rtpServer->start(rtpPort); }
+            if (rtpPort) { rtpServer->start(rtpPort, listen_ip.c_str()); }
 #endif//defined(ENABLE_RTPPROXY)
 
 #if defined(ENABLE_WEBRTC)
             //webrtc udp服务器
-            if (rtcPort) { rtcSrv_udp->start<WebRtcSession>(rtcPort);}
+            if (rtcPort) { rtcSrv_udp->start<WebRtcSession>(rtcPort, listen_ip);}
 
-            if (rtcTcpPort) { rtcSrv_tcp->start<WebRtcSession>(rtcTcpPort);}
+            if (rtcTcpPort) { rtcSrv_tcp->start<WebRtcSession>(rtcTcpPort, listen_ip);}
              
 #endif//defined(ENABLE_WEBRTC)
 
 #if defined(ENABLE_SRT)
-        // srt udp服务器
-        if(srtPort) { srtSrv->start<SRT::SrtSession>(srtPort); }
+            // srt udp服务器
+            if (srtPort) { srtSrv->start<SRT::SrtSession>(srtPort, listen_ip); }
 #endif//defined(ENABLE_SRT)
 
         } catch (std::exception &ex) {

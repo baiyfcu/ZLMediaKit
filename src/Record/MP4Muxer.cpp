@@ -31,7 +31,8 @@ void MP4Muxer::openMP4(const string &file) {
 
 MP4FileIO::Writer MP4Muxer::createWriter() {
     GET_CONFIG(bool, mp4FastStart, Record::kFastStart);
-    return _mp4_file->createWriter(mp4FastStart ? MOV_FLAG_FASTSTART : 0, false);
+    GET_CONFIG(bool, recordEnableFmp4, Record::kEnableFmp4);
+    return _mp4_file->createWriter(mp4FastStart ? MOV_FLAG_FASTSTART : 0, recordEnableFmp4);
 }
 
 void MP4Muxer::closeMP4() {
@@ -96,6 +97,20 @@ bool MP4MuxerInterface::inputFrame(const Frame::Ptr &frame) {
         }
         // 开始写文件
         _started = true;
+    }
+
+    // fmp4封装超过一定I帧间隔，强制刷新segment，防止内存上涨
+    if (frame->getTrackType() == TrackVideo && _mov_writter->fmp4) {
+        if (frame->keyFrame()) {
+            _non_iframe_video_count = 0;
+        } else {
+            _non_iframe_video_count++;
+        }
+
+        if (_non_iframe_video_count > 200) {
+            saveSegment();
+            _non_iframe_video_count = 0;
+        }
     }
 
     // mp4文件时间戳需要从0开始
@@ -172,6 +187,7 @@ bool MP4MuxerInterface::addTrack(const Track::Ptr &track) {
         }
         _tracks[track->getIndex()].track_id = track_id;
         _have_video = true;
+        _non_iframe_video_count = 0;
     } else if (track->getTrackType() == TrackAudio) {
         auto audio_track = dynamic_pointer_cast<AudioTrack>(track);
         CHECK(audio_track);

@@ -24,13 +24,9 @@ using namespace std;
 namespace mediakit {
 
 PlayerProxy::PlayerProxy(
-    const string &vhost, const string &app, const string &stream_id, const ProtocolOption &option, int retry_count,
+    const MediaTuple &tuple, const ProtocolOption &option, int retry_count,
     const EventPoller::Ptr &poller, int reconnect_delay_min, int reconnect_delay_max, int reconnect_delay_step)
-    : MediaPlayer(poller)
-    , _option(option) {
-    _tuple.vhost = vhost;
-    _tuple.app = app;
-    _tuple.stream = stream_id;
+    : MediaPlayer(poller), _tuple(tuple), _option(option) {
     _retry_count = retry_count;
 
     setOnClose(nullptr);
@@ -195,13 +191,13 @@ void PlayerProxy::setDirectProxy() {
     if (dynamic_pointer_cast<RtspPlayer>(_delegate)) {
         // rtsp拉流
         GET_CONFIG(bool, directProxy, Rtsp::kDirectProxy);
-        if (directProxy) {
+        if (directProxy && _option.enable_rtsp) {
             mediaSource = std::make_shared<RtspMediaSource>(_tuple);
         }
     } else if (dynamic_pointer_cast<RtmpPlayer>(_delegate)) {
         // rtmp拉流
         GET_CONFIG(bool, directProxy, Rtmp::kDirectProxy);
-        if (directProxy) {
+        if (directProxy && _option.enable_rtmp) {
             mediaSource = std::make_shared<RtmpMediaSource>(_tuple);
         }
     }
@@ -292,14 +288,18 @@ void PlayerProxy::onPlaySuccess() {
     if (dynamic_pointer_cast<RtspMediaSource>(_media_src)) {
         // rtsp拉流代理
         if (reset_when_replay || !_muxer) {
+            auto old = _option.enable_rtsp;
             _option.enable_rtsp = false;
             _muxer = std::make_shared<MultiMediaSourceMuxer>(_tuple, getDuration(), _option);
+            _option.enable_rtsp = old;
         }
     } else if (dynamic_pointer_cast<RtmpMediaSource>(_media_src)) {
         // rtmp拉流代理
         if (reset_when_replay || !_muxer) {
+             auto old = _option.enable_rtmp;
             _option.enable_rtmp = false;
             _muxer = std::make_shared<MultiMediaSourceMuxer>(_tuple, getDuration(), _option);
+             _option.enable_rtmp = old;
         }
     } else {
         // 其他拉流代理

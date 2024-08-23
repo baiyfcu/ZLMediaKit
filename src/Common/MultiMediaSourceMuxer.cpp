@@ -44,6 +44,7 @@ public:
     }
 
     void resetTimer(const EventPoller::Ptr &poller) {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         std::weak_ptr<FramePacedSender> weak_self = shared_from_this();
         _timer = std::make_shared<Timer>(_paced_sender_ms / 1000.0f, [weak_self]() {
             if (auto strong_self = weak_self.lock()) {
@@ -55,6 +56,7 @@ public:
     }
 
     bool inputFrame(const Frame::Ptr &frame) override {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         if (!_timer) {
             setCurrentStamp(frame->dts());
             resetTimer(EventPoller::getCurrentPoller());
@@ -66,6 +68,7 @@ public:
 
 private:
     void onTick() {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
         auto dst = _cache.empty() ? 0 : _cache.back().first;
         while (!_cache.empty()) {
             auto &front = _cache.front();
@@ -110,6 +113,7 @@ private:
     OnFrame _cb;
     Ticker _ticker;
     Timer::Ptr _timer;
+    std::recursive_mutex _mtx;
     std::list<std::pair<uint64_t, Frame::Ptr>> _cache;
 };
 
@@ -167,6 +171,12 @@ std::string MultiMediaSourceMuxer::shortUrl() const {
         return ret;
     }
     return _tuple.shortUrl();
+}
+
+void MultiMediaSourceMuxer::forEachRtpSender(const std::function<void(const std::string &ssrc)> &cb) const {
+    for (auto &pr : _rtp_sender) {
+        cb(pr.first);
+    }
 }
 
 MultiMediaSourceMuxer::MultiMediaSourceMuxer(const MediaTuple& tuple, float dur_sec, const ProtocolOption &option): _tuple(tuple) {
@@ -376,6 +386,17 @@ void MultiMediaSourceMuxer::startSendRtp(MediaSource &sender, const MediaSourceE
 
     weak_ptr<MultiMediaSourceMuxer> weak_self = shared_from_this();
 
+    rtp_sender->setOnClose([weak_self, ssrc](const toolkit::SockException &ex) {
+        if (auto strong_self = weak_self.lock()) {
+            // 可能归属线程发生变更
+            strong_self->getOwnerPoller(MediaSource::NullMediaSource())->async([=]() {
+                WarnL << "stream:" << strong_self->shortUrl() << " stop send rtp:" << ssrc << ", reason:" << ex;
+                strong_self->_rtp_sender.erase(ssrc);
+                NOTICE_EMIT(BroadcastSendRtpStoppedArgs, Broadcast::kBroadcastSendRtpStopped, *strong_self, ssrc, ex);
+            });
+        }
+    });
+
     rtp_sender->startSend(args, [ssrc,ssrc_multi_send, weak_self, rtp_sender, cb, tracks, ring, poller](uint16_t local_port, const SockException &ex) mutable {
         cb(local_port, ex);
         auto strong_self = weak_self.lock();
@@ -387,16 +408,6 @@ void MultiMediaSourceMuxer::startSendRtp(MediaSource &sender, const MediaSourceE
             rtp_sender->addTrack(track);
         }
         rtp_sender->addTrackCompleted();
-        rtp_sender->setOnClose([weak_self, ssrc](const toolkit::SockException &ex) {
-            if (auto strong_self = weak_self.lock()) {
-                // 可能归属线程发生变更
-                strong_self->getOwnerPoller(MediaSource::NullMediaSource())->async([=]() {
-                    WarnL << "stream:" << strong_self->shortUrl() << " stop send rtp:" << ssrc << ", reason:" << ex;
-                    strong_self->_rtp_sender.erase(ssrc);
-                    NOTICE_EMIT(BroadcastSendRtpStoppedArgs, Broadcast::kBroadcastSendRtpStopped, *strong_self, ssrc, ex);
-                });
-            }
-        });
 
         auto reader = ring->attach(poller);
         reader->setReadCB([rtp_sender](const Frame::Ptr &frame) {
@@ -456,8 +467,8 @@ EventPoller::Ptr MultiMediaSourceMuxer::getOwnerPoller(MediaSource &sender) {
     }
 }
 
-std::shared_ptr<MultiMediaSourceMuxer> MultiMediaSourceMuxer::getMuxer(MediaSource &sender) {
-    return shared_from_this();
+std::shared_ptr<MultiMediaSourceMuxer> MultiMediaSourceMuxer::getMuxer(MediaSource &sender) const {
+    return const_cast<MultiMediaSourceMuxer*>(this)->shared_from_this();
 }
 
 bool MultiMediaSourceMuxer::onTrackReady(const Track::Ptr &track) {
@@ -593,15 +604,17 @@ void MultiMediaSourceMuxer::resetTracks() {
     }
 }
 
-bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame) {
+bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
+    auto frame = frame_in;
     if (_option.modify_stamp != ProtocolOption::kModifyStampOff) {
         // 时间戳不采用原始的绝对时间戳
-        const_cast<Frame::Ptr&>(frame) = std::make_shared<FrameStamp>(frame, _stamps[frame->getIndex()], _option.modify_stamp);
+        frame = std::make_shared<FrameStamp>(frame, _stamps[frame->getIndex()], _option.modify_stamp);
     }
     return _paced_sender ? _paced_sender->inputFrame(frame) : onTrackFrame_l(frame);
 }
 
-bool MultiMediaSourceMuxer::onTrackFrame_l(const Frame::Ptr &frame) {
+bool MultiMediaSourceMuxer::onTrackFrame_l(const Frame::Ptr &frame_in) {
+    auto frame = frame_in;
     bool ret = false;
     if (_rtmp) {
         ret = _rtmp->inputFrame(frame) ? true : ret;
@@ -629,7 +642,7 @@ bool MultiMediaSourceMuxer::onTrackFrame_l(const Frame::Ptr &frame) {
     }
     if (_ring) {
         // 此场景由于直接转发，可能存在切换线程引起的数据被缓存在管道，所以需要CacheAbleFrame
-        const_cast<Frame::Ptr &>(frame) = Frame::getCacheAbleFrame(frame);
+        frame = Frame::getCacheAbleFrame(frame);
         if (frame->getTrackType() == TrackVideo) {
             // 视频时，遇到第一帧配置帧或关键帧则标记为gop开始处
             auto video_key_pos = frame->keyFrame() || frame->configFrame();
