@@ -266,13 +266,7 @@ void RtpSender::onConnect() {
             strong_self->onErr(err);
         }
     });
-<<<<<<< HEAD
-    //获取本地端口，断开重连后确保端口不变
-    _args.src_port = _socket_rtp->get_local_port();
-    InfoL << u8"开始发送 rtp:" << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << u8", 是否为udp方式:" << _args.is_udp;
-=======
     InfoL << "startSend rtp success: " << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << ", data_type: " << _args.data_type << ", con_type: " << _args.con_type;
->>>>>>> c409fc57545599a8d4dac2cbf179ce3e57d4a6ff
 }
 
 bool RtpSender::addTrack(const Track::Ptr &track) {
