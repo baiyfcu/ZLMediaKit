@@ -107,7 +107,26 @@ extern const std::string kBroadcastReloadConfig;
 
 // rtp server 超时
 extern const std::string kBroadcastRtpServerTimeout;
-#define BroadcastRtpServerTimeoutArgs uint16_t &local_port, const string &stream_id,int &tcp_mode, bool &re_use_port, uint32_t &ssrc
+#define BroadcastRtpServerTimeoutArgs uint16_t &local_port, const MediaTuple &tuple, int &tcp_mode, bool &re_use_port, uint32_t &ssrc
+
+// rtc transport sctp 连接状态
+extern const std::string kBroadcastRtcSctpConnecting;
+extern const std::string kBroadcastRtcSctpConnected;
+extern const std::string kBroadcastRtcSctpFailed;
+extern const std::string kBroadcastRtcSctpClosed;
+#define BroadcastRtcSctpConnectArgs WebRtcTransport& sender
+
+// rtc transport sctp 发送数据
+extern const std::string kBroadcastRtcSctpSend;
+#define BroadcastRtcSctpSendArgs WebRtcTransport& sender, const uint8_t *&data, size_t& len
+
+// rtc transport sctp 接收数据
+extern const std::string kBroadcastRtcSctpReceived;
+#define BroadcastRtcSctpReceivedArgs WebRtcTransport& sender, uint16_t &streamId, uint32_t &ppid, const uint8_t *&msg, size_t &len
+
+// 观看人数变化广播
+extern const std::string kBroadcastPlayerCountChanged;
+#define BroadcastPlayerCountChangedArgs const MediaTuple& args, const int& count
 
 #define ReloadConfigTag ((void *)(0xFF))
 #define RELOAD_KEY(arg, key)                                                                                           \
@@ -181,9 +200,14 @@ extern const std::string kWaitTrackReadyMS;
 extern const std::string kWaitAddTrackMS;
 // 如果track未就绪，我们先缓存帧数据，但是有最大个数限制(100帧时大约4秒)，防止内存溢出
 extern const std::string kUnreadyFrameCache;
+// 是否启用观看人数变化事件广播，置1则启用，置0则关闭
+extern const std::string kBroadcastPlayerCountChanged;
+// 绑定的本地网卡ip
+extern const std::string kListenIP;
 } // namespace General
 
 namespace Protocol {
+static constexpr char kFieldName[] = "protocol.";
 //时间戳修复这一路流标志位
 extern const std::string kModifyStamp;
 //转协议是否开启音频
@@ -339,6 +363,8 @@ extern const std::string kFileBufSize;
 extern const std::string kFastStart;
 // mp4文件是否重头循环读取
 extern const std::string kFileRepeat;
+// mp4录制文件是否采用fmp4格式
+extern const std::string kEnableFmp4;
 } // namespace Record
 
 ////////////HLS相关配置///////////
@@ -382,6 +408,11 @@ extern const std::string kPSPT;
 extern const std::string kOpusPT;
 // RtpSender相关功能是否提前开启gop缓存优化级联秒开体验，默认开启
 extern const std::string kGopCache;
+//国标发送g711 rtp 打包时，每个包的语音时长是多少，默认是100 ms，范围为20~180ms (gb28181-2016，c.2.4规定)，
+//最好为20 的倍数，程序自动向20的倍数取整
+extern const std::string kRtpG711DurMs;
+// udp recv socket buffer size
+extern const std::string kUdpRecvSocketBuffer;
 } // namespace RtpProxy
 
 /**
@@ -395,6 +426,9 @@ extern const std::string kNetAdapter;
 // 设置rtp传输类型，可选项有0(tcp，默认)、1(udp)、2(组播)
 // 设置方法:player[PlayerBase::kRtpType] = 0/1/2;
 extern const std::string kRtpType;
+// rtsp播放器发送信令心跳还是rtcp心跳，可选项有0(同时发)、1(rtcp心跳)、2(信令心跳)
+// 设置方法:player[PlayerBase::kRtspBeatType] = 0/1/2;
+extern const std::string kRtspBeatType;
 // rtsp认证用户名
 extern const std::string kRtspUser;
 // rtsp认证用用户密码，可以是明文也可以是md5,md5密码生成方式 md5(username:realm:password)
@@ -416,6 +450,8 @@ extern const std::string kWaitTrackReady;
 extern const std::string kPlayTrack;
 //设置代理url，目前只支持http协议
 extern const std::string kProxyUrl;
+//设置开始rtsp倍速播放
+extern const std::string kRtspSpeed;
 } // namespace Client
 } // namespace mediakit
 

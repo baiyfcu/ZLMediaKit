@@ -31,14 +31,18 @@ extern CodecPlugin l16_plugin;
 onceToken g_plugins_token([]() { Factory::loadPlugins(); });
 
 void Factory::loadPlugins() {
-    registerPlugin(h264_plugin);
-    registerPlugin(h265_plugin);
-    registerPlugin(jpeg_plugin);
-    registerPlugin(aac_plugin);
-    registerPlugin(opus_plugin);
-    registerPlugin(g711a_plugin);
-    registerPlugin(g711u_plugin);
-    registerPlugin(l16_plugin);
+    static bool load = false;
+    if (!load) {
+        load = true;
+        registerPlugin(h264_plugin);
+        registerPlugin(h265_plugin);
+        registerPlugin(jpeg_plugin);
+        registerPlugin(aac_plugin);
+        registerPlugin(opus_plugin);
+        registerPlugin(g711a_plugin);
+        registerPlugin(g711u_plugin);
+        registerPlugin(l16_plugin);
+    }
 }
 
 void Factory::registerPlugin(const CodecPlugin &plugin) {

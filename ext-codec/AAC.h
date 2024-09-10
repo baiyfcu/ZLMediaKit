@@ -41,6 +41,8 @@ public:
     void setExtraData(const uint8_t *data, size_t size) override;
     bool update() override;
 
+    static Frame::Ptr addADTSHeader(const Frame::Ptr &frame_in, const std::string &aac_config);
+
 private:
     Sdp::Ptr getSdp(uint8_t payload_type) const override;
     Track::Ptr clone() const override;

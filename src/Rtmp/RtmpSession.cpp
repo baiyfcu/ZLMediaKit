@@ -25,10 +25,10 @@ RtmpSession::RtmpSession(const Socket::Ptr &sock) : Session(sock) {
 void RtmpSession::onError(const SockException& err) {
     bool is_player = !_push_src_ownership;
     uint64_t duration = _ticker.createdTime() / 1000;
-    WarnP(this) << (is_player ? "RTMP播放器(" : "RTMP推流器(")
+    WarnP(this) << (is_player ? u8"RTMP播放器(" : u8"RTMP推流器(")
                 << _media_info.shortUrl()
-                << ")断开:" << err.what()
-                << ",耗时(s):" << duration;
+                << u8")断开:" << err.what()
+                << u8",耗时(s):" << duration;
 
     //流量统计事件广播
     GET_CONFIG(uint32_t, iFlowThreshold, General::kFlowThreshold);
@@ -125,7 +125,7 @@ void RtmpSession::onCmd_publish(AMFDecoder &dec) {
     std::shared_ptr<onceToken> token(new onceToken(nullptr, [ticker, weak_self]() {
         auto strong_self = weak_self.lock();
         if (strong_self) {
-            DebugP(strong_self.get()) << "publish 回复时间:" << ticker->elapsedTime() << "ms";
+            DebugP(strong_self.get()) << u8"publish 回复时间:" << ticker->elapsedTime() << "ms";
         }
     }));
     dec.load<AMFValue>();/* NULL */

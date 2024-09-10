@@ -73,6 +73,7 @@ private:
 private:
     bool _started = false;
     bool _have_video = false;
+    int _non_iframe_video_count; // 非I帧个数
 
     class FrameMergerImp : public FrameMerger {
     public:

@@ -15,6 +15,7 @@
 #include "Common/Parser.h"
 #include "Common/config.h"
 #include "Network/Socket.h"
+#include "Extension/Factory.h"
 
 using namespace std;
 using namespace toolkit;
@@ -236,10 +237,6 @@ void SdpParser::load(const string &sdp) {
                 track._codec = codec;
                 track._samplerate = samplerate;
             }
-            if (!track._samplerate && track._type == TrackVideo) {
-                // 未设置视频采样率时，赋值为90000
-                track._samplerate = 90000;
-            }
             ++it;
         }
 
@@ -259,6 +256,17 @@ void SdpParser::load(const string &sdp) {
         it = track._attr.find("control");
         if (it != track._attr.end()) {
             track._control = it->second;
+        }
+
+        if (!track._samplerate && track._type == TrackVideo) {
+            // 未设置视频采样率时，赋值为90000
+            track._samplerate = 90000;
+        } else if (!track._samplerate && track._type == TrackAudio) {
+            // some rtsp sdp no sample rate but has fmt config to parser get sample rate
+            auto t = Factory::getTrackBySdp(track_ptr);
+            if (t) {
+                track._samplerate = std::static_pointer_cast<AudioTrack>(t)->getAudioSampleRate();
+            }
         }
     }
 }
@@ -352,12 +360,20 @@ public:
     }
 
     void makeSockPair(std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip, bool re_use_port, bool is_udp) {
-        auto &sock0 = pair.first;
-        auto &sock1 = pair.second;
         auto sock_pair = getPortPair();
         if (!sock_pair) {
             throw runtime_error("none reserved port in pool");
         }
+        makeSockPair_l(sock_pair, pair, local_ip, re_use_port, is_udp);
+
+        // 确保udp和tcp模式都能打开
+        auto new_pair = std::make_pair(Socket::createSocket(), Socket::createSocket());
+        makeSockPair_l(sock_pair, new_pair, local_ip, re_use_port, !is_udp);
+    }
+
+    void makeSockPair_l(const std::shared_ptr<uint16_t> &sock_pair, std::pair<Socket::Ptr, Socket::Ptr> &pair, const string &local_ip, bool re_use_port, bool is_udp) {
+        auto &sock0 = pair.first;
+        auto &sock1 = pair.second;
         if (is_udp) {
             if (!sock0->bindUdpSock(2 * *sock_pair, local_ip.data(), re_use_port)) {
                 // 分配端口失败
@@ -460,6 +476,15 @@ string printSSRC(uint32_t ui32Ssrc) {
         sprintf(tmp + 2 * i, "%02X", pSsrc[i]);
     }
     return tmp;
+}
+
+bool getSSRC(const char *data, size_t data_len, uint32_t &ssrc) {
+    if (data_len < 12) {
+        return false;
+    }
+    uint32_t *ssrc_ptr = (uint32_t *)(data + 8);
+    ssrc = ntohl(*ssrc_ptr);
+    return true;
 }
 
 bool isRtp(const char *buf, size_t size) {

@@ -268,7 +268,7 @@ int AACTrack::getAudioChannel() const {
     return _channel;
 }
 
-static Frame::Ptr addADTSHeader(const Frame::Ptr &frame_in, const std::string &aac_config) {
+Frame::Ptr AACTrack::addADTSHeader(const Frame::Ptr &frame_in, const std::string &aac_config) {
     auto frame = FrameImp::create();
     frame->_codec_id = CodecAAC;
     // 生成adts头

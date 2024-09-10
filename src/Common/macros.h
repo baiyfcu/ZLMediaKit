@@ -11,9 +11,10 @@
 #ifndef ZLMEDIAKIT_MACROS_H
 #define ZLMEDIAKIT_MACROS_H
 
-#include "Util/logger.h"
-#include <iostream>
 #include <sstream>
+#include <iostream>
+#include "Util/util.h"
+#include "Util/logger.h"
 #if defined(__MACH__)
 #include <arpa/inet.h>
 #include <machine/endian.h>
@@ -35,6 +36,16 @@
 #ifndef CHECK
 #define CHECK(exp, ...) ::mediakit::Assert_ThrowCpp(!(exp), #exp, __FUNCTION__, __FILE__, __LINE__, ##__VA_ARGS__)
 #endif // CHECK
+
+#ifndef CHECK_RET
+#define CHECK_RET(...)                                                         \
+    try {                                                                      \
+        CHECK(__VA_ARGS__);                                                    \
+    } catch (toolkit::AssertFailedException & ex) {                                     \
+        WarnL << ex.what();                                                    \
+        return;                                                                \
+    }
+#endif
 
 #ifndef MAX
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -61,21 +72,7 @@
 #define VHOST_KEY "vhost"
 #define DEFAULT_VHOST "__defaultVhost__"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern void Assert_Throw(int failed, const char *exp, const char *func, const char *file, int line, const char *str);
-#ifdef __cplusplus
-}
-#endif
-
 namespace mediakit {
-
-class AssertFailedException : public std::runtime_error {
-public:
-    template<typename ...T>
-    AssertFailedException(T && ...args) : std::runtime_error(std::forward<T>(args)...) {}
-};
 
 extern const char kServerName[];
 

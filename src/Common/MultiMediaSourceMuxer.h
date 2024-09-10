@@ -127,11 +127,13 @@ public:
     /**
      * 获取本对象
      */
-    std::shared_ptr<MultiMediaSourceMuxer> getMuxer(MediaSource &sender) override;
+    std::shared_ptr<MultiMediaSourceMuxer> getMuxer(MediaSource &sender) const override;
 
     const ProtocolOption &getOption() const;
     const MediaTuple &getMediaTuple() const;
     std::string shortUrl() const;
+
+    void forEachRtpSender(const std::function<void(const std::string &ssrc)> &cb) const;
 
 protected:
     /////////////////////////////////MediaSink override/////////////////////////////////
