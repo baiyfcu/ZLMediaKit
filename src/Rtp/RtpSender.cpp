@@ -239,7 +239,7 @@ void RtpSender::onConnect(){
     });
     //获取本地端口，断开重连后确保端口不变
     _args.src_port = _socket_rtp->get_local_port();
-    InfoL << "开始发送 rtp:" << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << ", 是否为udp方式:" << _args.is_udp;
+    InfoL << u8"开始发送 rtp:" << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << u8", 是否为udp方式:" << _args.is_udp;
 }
 
 bool RtpSender::addTrack(const Track::Ptr &track){
