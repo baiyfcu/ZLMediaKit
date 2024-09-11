@@ -228,7 +228,7 @@ static bool makeFolderMenu(const string &httpPath, const string &strFullPath, st
     multimap<string/*url name*/, std::pair<string/*note name*/, string/*file path*/> > file_map;
     File::scanDir(strPathPrefix, [&](const std::string &path, bool isDir) {
         auto name = fileName(strPathPrefix, path);
-        file_map.emplace(strCoding::UrlEncodePath(name), std::make_pair(name, path));
+        file_map.emplace(strCoding::UrlEncode(name), std::make_pair(name, path));
         return true;
     });
     //如果是root目录，添加虚拟目录
@@ -720,7 +720,7 @@ void HttpResponseInvokerImp::responseFile(const StrCaseMap &requestHeader,
     if (end_with(file, ".js") || end_with(file, ".css") || end_with(file, ".wasm") || end_with(file, ".png") || end_with(file, ".woff")
         || end_with(file, ".ico")) {
         httpHeader.emplace("ETag", "filecache");
-        httpHeader.emplace("Last-Modified:", "Tue, 04 Jun 2024 06:25:38 GMT");
+        httpHeader.emplace("Last-Modified:", "Fri, 06 Sep 2024 09:51:18 GMT");
         httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()));
     }
     else
