@@ -83,7 +83,7 @@ void MP4FileDisk::openFile(const char *file, const char *mode) {
     //创建文件
     auto fp = File::create_file(file, mode);
     if(!fp){
-        throw std::runtime_error(string("打开文件失败:") + file);
+        throw std::runtime_error(string(u8"打开文件失败:") + file);
     }
 
     GET_CONFIG(uint32_t,mp4BufSize,Record::kFileBufSize);

@@ -190,7 +190,7 @@ bool checkArgs(Args &args, const First &first, const KeyTypes &...keys) {
     do { \
         auto ip = sender.get_peer_ip(); \
         if (!HttpFileManager::isIPAllowed(ip)) { \
-            throw AuthException("Your ip is not allowed to access the service."); \
+            throw AuthException(("Your ip " + ip + " is not allowed to access the service.").c_str()); \
         } \
         CHECK_ARGS("secret"); \
         if (api_secret != allArgs["secret"]) { \
