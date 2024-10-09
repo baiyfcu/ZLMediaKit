@@ -235,7 +235,8 @@ void FrameMerger::doMerge(BufferLikeString &merged, const Frame::Ptr &frame) con
 static bool isNeedMerge(CodecId codec){
     switch (codec) {
         case CodecH264:
-        case CodecH265: return true;
+        case CodecH265:
+        case CodecSVAC3: return true;
         default: return false;
     }
 }

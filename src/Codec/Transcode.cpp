@@ -386,6 +386,17 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
             }
             codec = getCodec({AV_CODEC_ID_VP9});
             break;
+        case CodecSVAC3:
+            codec_default = getCodec({AV_CODEC_ID_H264});
+            if (codec && codec->id == AV_CODEC_ID_H264) {
+                break;
+            }
+            if (checkIfSupportedNvidia()) {
+                codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_qsv"}, {"h264_videotoolbox"}, {"h264_cuvid"}, {"h264_nvmpi"}});
+            } else {
+                codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_qsv"}, {"h264_videotoolbox"}, {"h264_nvmpi"}});
+            }
+            break;
         default: codec = nullptr; break;
     }
 

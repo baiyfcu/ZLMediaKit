@@ -43,7 +43,8 @@ typedef enum {
     XX(CodecVP8,   TrackVideo, 7, "VP8", PSI_STREAM_VP8, MOV_OBJECT_VP8)             \
     XX(CodecVP9,   TrackVideo, 8, "VP9", PSI_STREAM_VP9, MOV_OBJECT_VP9)             \
     XX(CodecAV1,   TrackVideo, 9, "AV1", PSI_STREAM_AV1, MOV_OBJECT_AV1)             \
-    XX(CodecJPEG,  TrackVideo, 10, "JPEG", PSI_STREAM_JPEG_2000, MOV_OBJECT_JPEG)
+    XX(CodecJPEG,  TrackVideo, 10, "JPEG", PSI_STREAM_JPEG_2000, MOV_OBJECT_JPEG)    \
+    XX(CodecSVAC3, TrackVideo, 20, "SVAC3", PSI_STREAM_VIDEO_SVAC, MOV_OBJECT_SVAC3)
 
 typedef enum {
     CodecInvalid = -1,

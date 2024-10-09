@@ -27,6 +27,7 @@ extern CodecPlugin opus_plugin;
 extern CodecPlugin g711a_plugin;
 extern CodecPlugin g711u_plugin;
 extern CodecPlugin l16_plugin;
+extern CodecPlugin svac3_plugin;
 
 onceToken g_plugins_token([]() { Factory::loadPlugins(); });
 
@@ -42,6 +43,7 @@ void Factory::loadPlugins() {
         registerPlugin(g711a_plugin);
         registerPlugin(g711u_plugin);
         registerPlugin(l16_plugin);
+		REGISTER_CODEC(svac3_plugin);
     }
 }
 
@@ -114,6 +116,7 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val){
             case RtmpVideoCodec::h265: return CodecH265;
             case RtmpVideoCodec::fourcc_av1: return CodecAV1;
             case RtmpVideoCodec::fourcc_vp9: return CodecVP9;
+            case RtmpVideoCodec::svac3: return CodecSVAC3;
             default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
         }
     }
@@ -198,6 +201,7 @@ AMFValue Factory::getAmfByCodecId(CodecId codecId) {
         case CodecOpus: return AMFValue((int)RtmpAudioCodec::opus);
         case CodecAV1: return AMFValue((int)RtmpVideoCodec::fourcc_av1);
         case CodecVP9: return AMFValue((int)RtmpVideoCodec::fourcc_vp9);
+        case CodecSVAC3: return AMFValue((int)RtmpVideoCodec::svac3);
         default: return AMFValue(AMF_NULL);
     }
 }

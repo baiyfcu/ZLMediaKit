@@ -296,6 +296,12 @@ CodecId parseVideoRtmpPacket(const uint8_t *data, size_t size, RtmpPacketInfo *i
                 info->video.h264_pkt_type = (RtmpH264PacketType)classic_header->h264_pkt_type;
                 break;
             }
+            case RtmpVideoCodec::svac3: {
+                CHECK(size >= 1, "Invalid rtmp buffer size: ", size);
+                info->codec = CodecSVAC3;
+                info->video.h264_pkt_type = (RtmpH264PacketType)classic_header->h264_pkt_type;
+                break;
+            }
             default: WarnL << "Rtmp video codec not supported: " << (int)classic_header->codec_id; break;
         }
     }
