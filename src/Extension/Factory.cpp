@@ -43,7 +43,7 @@ void Factory::loadPlugins() {
         registerPlugin(g711a_plugin);
         registerPlugin(g711u_plugin);
         registerPlugin(l16_plugin);
-		REGISTER_CODEC(svac3_plugin);
+		registerPlugin(svac3_plugin);
     }
 }
 

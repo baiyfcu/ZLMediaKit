@@ -283,7 +283,7 @@ enum class RtmpVideoCodec : uint32_t {
     screen_video2 = 6, // Screen video version 2
     h264 = 7, // avc
     h265 = 12, // 国内扩展
-    svac3 = 20, // 国内扩展
+    svac3 = 13, // 国内扩展
 
     // 增强型rtmp FourCC
     fourcc_vp9 = MKBETAG('v', 'p', '0', '9'),

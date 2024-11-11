@@ -45,6 +45,7 @@ public:
     }
 
     bool keyFrame() const override {
+        return true;
         auto nal_ptr = (uint8_t *) this->data() + this->prefixSize();
         return SVAC3_TYPE(*nal_ptr) == NAL_IDR && decodeAble();
     }
