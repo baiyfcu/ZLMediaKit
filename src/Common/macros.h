@@ -11,9 +11,10 @@
 #ifndef ZLMEDIAKIT_MACROS_H
 #define ZLMEDIAKIT_MACROS_H
 
-#include "Util/logger.h"
-#include <iostream>
 #include <sstream>
+#include <iostream>
+#include "Util/util.h"
+#include "Util/logger.h"
 #if defined(__MACH__)
 #include <arpa/inet.h>
 #include <machine/endian.h>
@@ -40,7 +41,7 @@
 #define CHECK_RET(...)                                                         \
     try {                                                                      \
         CHECK(__VA_ARGS__);                                                    \
-    } catch (AssertFailedException & ex) {                                     \
+    } catch (toolkit::AssertFailedException & ex) {                                     \
         WarnL << ex.what();                                                    \
         return;                                                                \
     }
@@ -71,38 +72,9 @@
 #define VHOST_KEY "vhost"
 #define DEFAULT_VHOST "__defaultVhost__"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern void Assert_Throw(int failed, const char *exp, const char *func, const char *file, int line, const char *str);
-#ifdef __cplusplus
-}
-#endif
-
-
-#if defined(GENERATE_EXPORT)
-#include "mk_cxx_export.h"
-#endif
-
-#if defined(_WIN32) && defined(_MSC_VER)
-#    define API_CALL __cdecl
-#else
-#    define API_CALL
-#endif
-
-#if defined(_WIN32) && defined(_MSC_VER)
-#    if !defined(GENERATE_EXPORT)
-#        if defined(zlmediakit_EXPORTS)
-#            define MK_EXPORT __declspec(dllexport)
-#        else
-#            define MK_EXPORT __declspec(dllimport)
-#        endif
-#    endif
-#elif !defined(GENERATE_EXPORT)
-#   define MK_EXPORT __attribute__((visibility("default")))
-#endif
-
 namespace mediakit {
+
+extern const char kServerName[];
 
 template <typename... ARGS>
 void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *file, int line, ARGS &&...args) {
@@ -112,7 +84,6 @@ void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *
         Assert_Throw(failed, exp, func, file, line, ss.str().data());
     }
 }
-MK_EXPORT extern const char kServerName[];
 
 } // namespace mediakit
 #endif // ZLMEDIAKIT_MACROS_H
