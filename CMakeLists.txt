@@ -92,10 +92,13 @@ if(ENABLE_CXX_API)
     message(WARNING "Windows下C++ API SDK只支持md/mdd,ENABLE_MSVC_MT set off")
   endif()
   # 在 Windows 下启用导出所有符号的选项
-  if(WIN32)
+if(MSVC)
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /FORCE:MULTIPLE")
   endif()
+
   include_directories(${ROOT_BINARY_DIR})
+
 else()
   add_definitions(-DMediaKit_STATIC)
 endif ()
