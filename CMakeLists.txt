@@ -79,12 +79,20 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE INTERNAL "" FORCE)
 # TODO: include 当前目录会导致 server 编译出错, 待排除
 set(CMAKE_INCLUDE_CURRENT_DIR OFF)
 
+#在此目录生成export头文件
+set(ROOT_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+
 if(ENABLE_CXX_API)
   add_definitions(-DENABLE_CXX_API)
   if(WIN32 AND ENABLE_MSVC_MT)
     set(ENABLE_MSVC_MT OFF)
     message(WARNING "Windows下C++ API SDK只支持md/mdd,ENABLE_MSVC_MT set off")
   endif()
+  # 在 Windows 下启用导出所有符号的选项
+  if(WIN32)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  endif()
+  include_directories(${ROOT_BINARY_DIR})
 else()
   add_definitions(-DMediaKit_STATIC)
 endif ()
@@ -118,6 +126,7 @@ string(TOLOWER ${CMAKE_SYSTEM_NAME} SYSTEM_NAME_LOWER)
 set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
 set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
+
 
 # 添加 git 版本信息
 # Add git version information

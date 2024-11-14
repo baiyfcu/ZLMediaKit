@@ -39,10 +39,9 @@ if(NOT ENABLE_CXX_API OR IOS)
   add_library(ZLMediaKit::MediaKit ALIAS zlmediakit)
   list(APPEND COMPILE_DEFINITIONS MediaKit_STATIC)
 else()
-  # 在 Windows 下启用导出所有符号的选项
-  if(WIN32)
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
-  endif()
+  if (MSVC)
+    list(APPEND COMPILE_DEFINITIONS GENERATE_EXPORT)
+  endif ()
   # 添加动态库
   add_definitions(-DMediaKit_EXPORTS)
   add_library(zlmediakit SHARED ${MediaKit_SRC_LIST})
@@ -53,6 +52,17 @@ else()
   set_target_properties(zlmediakit PROPERTIES
           OUTPUT_NAME zlmediakit  # 输出的 DLL 文件名
   )
+
+  target_compile_definitions(zlmediakit
+  PRIVATE ${COMPILE_DEFINITIONS})
+  target_include_directories(zlmediakit
+  PRIVATE
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+  target_compile_definitions(zlmediakit PRIVATE DLL_EXPORTS)
 endif ()
 
 set(LINK_LIBRARIES ${MK_LINK_LIBRARIES})
@@ -84,10 +94,14 @@ generate_export_header(zlmediakit
         EXPORT_MACRO_NAME MK_EXPORT
         BASE_NAME MK_CXX
         STATIC_DEFINE MediaKit_STATIC
-        EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/mk_cxx_export.h")
+        EXPORT_FILE_NAME "${ROOT_BINARY_DIR}/mk_cxx_export.h")
 
 # 未在使用
 if(ENABLE_CXX_API)
+  file(GLOB CXX_HEADER_LIST ${ROOT_BINARY_DIR}/*.h)
+  install(FILES ${CXX_HEADER_LIST}
+          DESTINATION ${INSTALL_PATH_INCLUDE})
+
   # 保留目录结构
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
     DESTINATION ${INSTALL_PATH_INCLUDE}/ZLMediaKit

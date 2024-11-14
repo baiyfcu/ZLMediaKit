@@ -198,10 +198,6 @@ else()
 endif()
 
 if(ENABLE_CXX_API)
-  # 在 Windows 下启用导出所有符号的选项
-  if(WIN32)
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
-  endif()
   # 添加动态库
   add_library(zltoolkit SHARED ${ToolKit_SRC_LIST})
   add_library(ZLMediaKit::ToolKit ALIAS zltoolkit)

@@ -55,5 +55,5 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
 else()
   target_link_libraries(MediaServer ${MK_LINK_LIBRARIES})
 endif()
-
+add_dependencies(MediaServer zltoolkit zlmediakit)
 install(TARGETS MediaServer DESTINATION ${INSTALL_PATH_RUNTIME})

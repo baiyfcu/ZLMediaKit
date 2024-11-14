@@ -15,6 +15,7 @@
 #include <iostream>
 #include "Util/util.h"
 #include "Util/logger.h"
+#include "mk_cxx_export.h"
 #if defined(__MACH__)
 #include <arpa/inet.h>
 #include <machine/endian.h>
@@ -74,7 +75,7 @@
 
 namespace mediakit {
 
-extern const char kServerName[];
+extern MK_EXPORT const char kServerName[];
 
 template <typename... ARGS>
 void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *file, int line, ARGS &&...args) {
