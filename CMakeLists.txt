@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2016-2022 The ZLMediaKit project authors. All Rights Reserved.
+# Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -217,8 +217,8 @@ elseif(WIN32)
             # warning C4530: C++ exception handler used, but unwind semantics are not enabled.
             "/EHsc")
     # disable Windows logo
-    list(APPEND COMPILE_OPTIONS_DEFAULT "/nologo")
-    list(APPEND CMAKE_STATIC_LINKER_FLAGS "/nologo")
+   string(REPLACE "/nologo" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+   set(CMAKE_STATIC_LINKER_FLAGS "")
   endif()
 endif()
 
@@ -471,6 +471,10 @@ if(ENABLE_VIDEOSTACK)
     message(WARNING "ENABLE_VIDEOSTACK requires ENABLE_FFMPEG and ENABLE_X264")
   endif ()
 endif ()
+
+if(ENABLE_SRT)
+  update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_SRT)
+endif()
 
 # ----------------------------------------------------------------------------
 # Solution folders:
