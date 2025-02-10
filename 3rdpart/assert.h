@@ -25,6 +25,10 @@ extern void Assert_Throw(int failed, const char *exp, const char *func, const ch
 }
 #endif
 
+#ifdef NDEBUG
+#define assert(exp) ((void)0)
+#else
 #define assert(exp) Assert_Throw(!(exp), #exp, __FUNCTION__, __FILE__, __LINE__, NULL)
+#endif
 
 #endif //ZLMEDIAKIT_ASSERT_H
