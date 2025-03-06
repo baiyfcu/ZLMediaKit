@@ -459,6 +459,23 @@ void RtspPlayer::sendKeepAlive() {
     }
 }
 
+std::string convertTimestampToISO8601(long long timestamp) {
+    // 将毫秒转换为秒
+    timestamp /= 1000;
+
+    // 转换为时间结构
+    std::time_t rawTime = static_cast<std::time_t>(timestamp);
+    std::tm *timeInfo = std::gmtime(&rawTime); // 获取UTC时间
+
+    // 创建一个字符串流，用于格式化输出
+    std::ostringstream oss;
+
+    // 使用ISO 8601格式 (yyyyMMddTHHmmssZ)
+    oss << std::put_time(timeInfo, "%Y%m%dT%H%M%SZ");
+
+    return oss.str();
+}
+
 void RtspPlayer::sendPause(int type, uint32_t seekMS) {
     _on_response = std::bind(&RtspPlayer::handleResPAUSE, this, placeholders::_1, type);
     // 开启或暂停rtsp  [AUTO-TRANSLATED:8ba5b594]
@@ -469,7 +486,15 @@ void RtspPlayer::sendPause(int type, uint32_t seekMS) {
             // sendRtspRequest("PLAY", _content_base);
             // break;
         case type_seek:
-            sendRtspRequest("PLAY", _control_url, { "Range", StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << seekMS / 1000.0 << "-" });
+            if ((*this)["vendor"] == "univiewlite") {
+                time_t endStamp = (*this)["end_stamp_ms"];
+                uint64_t ntpStamp = (*this)["ntp"];
+                std::string startTime = convertTimestampToISO8601(ntpStamp);
+                std::string endTime = convertTimestampToISO8601(endStamp);
+                sendRtspRequest("PLAY", _control_url, { "Range", StrPrinter << "clock=" << startTime << "-" << endTime });
+            }
+            else
+                sendRtspRequest("PLAY", _control_url, { "Range", StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << seekMS / 1000.0 << "-" });
             break;
         case type_speed:
             speed(_speed);

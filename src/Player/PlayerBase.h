@@ -256,6 +256,10 @@ public:
         _on_resume = cb;
     }
 
+    std::shared_ptr<Delegate> getDelegate() {
+        return _delegate;
+    }
+	
 protected:
     void onShutdown(const toolkit::SockException &ex) override {
         if (_on_shutdown) {
