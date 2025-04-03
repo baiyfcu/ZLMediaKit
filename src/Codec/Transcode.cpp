@@ -12,6 +12,23 @@
 #if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <combaseapi.h>
+// 添加DXGI相关头文件
+#include <dxgi.h>
+#include <codecvt>
+#include <locale>
+#pragma comment(lib, "dxgi.lib")
+
+// 添加Windows平台下宽字符转换函数
+static std::string WStringToString(const std::wstring& wstr) {
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    return converter.to_bytes(wstr);
+}
+#endif
+
 #include "Util/File.h"
 #include "Util/uv_errno.h"
 #include "Transcode.h"
@@ -103,6 +120,102 @@ static bool checkIfSupportedNvidia_l() {
 
 static bool checkIfSupportedNvidia() {
     static auto ret = checkIfSupportedNvidia_l();
+    return ret;
+}
+
+// 添加QSV硬件解码器检测函数
+static bool checkIfSupportedQSV_l() {
+#if !defined(_WIN32)
+    // 检查QSV相关库是否存在
+    auto so = dlopen("libmfx.so.1", RTLD_LAZY);
+    if (!so) {
+        WarnL << u8"libmfx.so.1加载失败:" << get_uv_errmsg();
+        return false;
+    }
+    dlclose(so);
+
+    // 检查设备节点是否存在
+    bool find_device = false;
+    File::scanDir("/dev/dri", [&](const string &path, bool is_dir) {
+        if (!is_dir && (path.find("renderD") != string::npos)) {
+            find_device = true;
+            return false;
+        }
+        return true;
+    }, false);
+
+    if (!find_device) {
+        WarnL << u8"Intel QSV硬件编解码器设备节点不存在";
+    }
+    return find_device;
+#else
+    // Windows平台上的QSV检测逻辑
+    HMODULE hModule = LoadLibraryA("libmfx.dll");
+    if (!hModule) {
+        // 尝试加载其他可能的库名称
+        hModule = LoadLibraryA("libmfxsw32.dll");
+        if (!hModule) {
+            hModule = LoadLibraryA("libmfxhw32.dll");
+        }
+        if (!hModule) {
+            hModule = LoadLibraryA("libmfxsw64.dll");
+        }
+        if (!hModule) {
+            hModule = LoadLibraryA("libmfxhw64.dll");
+        }
+    }
+    
+    if (!hModule) {
+        WarnL << u8"Intel QSV库加载失败，无法找到libmfx.dll或其他相关库";
+        return false;
+    }
+    
+    FreeLibrary(hModule);
+    
+    // 检查是否有Intel显卡
+    bool has_intel_gpu = false;
+    
+    // 使用DXGI枚举适配器
+    HRESULT hr = CoInitialize(NULL);
+    if (SUCCEEDED(hr)) {
+        IDXGIFactory* pFactory = NULL;
+        hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&pFactory);
+        
+        if (SUCCEEDED(hr)) {
+            UINT i = 0;
+            IDXGIAdapter* pAdapter = NULL;
+            while (pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+                DXGI_ADAPTER_DESC desc;
+                pAdapter->GetDesc(&desc);
+                
+                // 检查是否为Intel适配器
+                if (wcsstr(desc.Description, L"Intel")) {
+                    has_intel_gpu = true;
+                    InfoL << u8"找到Intel显卡: " << WStringToString(desc.Description);
+                    pAdapter->Release();
+                    break;
+                }
+                
+                pAdapter->Release();
+                i++;
+            }
+            
+            pFactory->Release();
+        }
+        
+        CoUninitialize();
+    }
+    
+    if (!has_intel_gpu) {
+        WarnL << u8"未找到Intel显卡，QSV可能不可用";
+    }
+    
+    return has_intel_gpu;
+#endif
+}
+
+static bool checkIfSupportedQSV() {
+    static auto ret = checkIfSupportedQSV_l();
     return ret;
 }
 
@@ -311,6 +424,7 @@ static inline const AVCodec *getCodecByName(const std::vector<std::string> &code
     return ret;
 }
 
+
 FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std::vector<std::string> &codec_name) {
     setupFFmpeg();
     _frame_pool.setSize(AV_NUM_DATA_POINTERS);
@@ -326,9 +440,11 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
                 break;
             }
             if (checkIfSupportedNvidia()) {
-                codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_qsv"}, {"h264_videotoolbox"}, {"h264_cuvid"}, {"h264_nvmpi"}});
-            } else {
+                codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_cuvid"}, {"h264_nvmpi"}});
+            } else if (checkIfSupportedQSV()) {
                 codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_qsv"}, {"h264_videotoolbox"}, {"h264_nvmpi"}});
+            } else {
+                codec = getCodec({{"libopenh264"}, {AV_CODEC_ID_H264}, {"h264_videotoolbox"}, {"h264_nvmpi"}});
             }
             break;
         case CodecH265:
@@ -337,9 +453,11 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
                 break;
             }
             if (checkIfSupportedNvidia()) {
-                codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_qsv"}, {"hevc_videotoolbox"}, {"hevc_cuvid"}, {"hevc_nvmpi"}});
-            } else {
+                codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_cuvid"}, {"hevc_nvmpi"}});
+            } else if (checkIfSupportedQSV()) {
                 codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_qsv"}, {"hevc_videotoolbox"}, {"hevc_nvmpi"}});
+            } else {
+                codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_videotoolbox"}, {"hevc_nvmpi"}});
             }
             break;
         case CodecAAC:
