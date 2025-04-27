@@ -22,6 +22,7 @@
 #
 
 set(LINK_LIBRARIES ${MK_LINK_LIBRARIES})
+list(APPEND LINK_LIBRARIES libmfx)
 
 find_package(PkgConfig QUIET)
 # 查找 SDL2 是否安装
@@ -60,7 +61,7 @@ target_compile_options(${PLAYER_NAME}
   PRIVATE ${COMPILE_OPTIONS_DEFAULT})
 
 if(WIN32)
-target_link_libraries(${PLAYER_NAME}  ${LINK_LIB_LIST} bcrypt setupapi version imm32)
+target_link_libraries(${PLAYER_NAME}  ${LINK_LIB_LIST} bcrypt setupapi version imm32 winmm Mfuuid Strmiids)
 endif()
 
 # TODO: 统一参数?
