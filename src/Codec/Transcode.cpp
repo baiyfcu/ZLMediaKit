@@ -114,7 +114,45 @@ static bool checkIfSupportedNvidia_l() {
     }
     return find_driver;
 #else
-    return false;
+    // 检查是否有Intel显卡
+    bool has_intel_gpu = false;
+
+    // 使用DXGI枚举适配器
+    HRESULT hr = CoInitialize(NULL);
+    if (SUCCEEDED(hr)) {
+        IDXGIFactory *pFactory = NULL;
+        hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&pFactory);
+
+        if (SUCCEEDED(hr)) {
+            UINT i = 0;
+            IDXGIAdapter *pAdapter = NULL;
+            while (pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+                DXGI_ADAPTER_DESC desc;
+                pAdapter->GetDesc(&desc);
+
+                // 检查是否为Intel适配器
+                if (wcsstr(desc.Description, L"NVIDIA")) {
+                    has_intel_gpu = true;
+                    InfoL << u8"找到NVIDIA显卡: " << WStringToString(desc.Description);
+                    pAdapter->Release();
+                    break;
+                }
+
+                pAdapter->Release();
+                i++;
+            }
+
+            pFactory->Release();
+        }
+
+        CoUninitialize();
+    }
+
+    if (!has_intel_gpu) {
+        WarnL << u8"未找到Intel显卡，QSV可能不可用";
+    }
+
+    return has_intel_gpu;
 #endif
 }
 
@@ -149,6 +187,7 @@ static bool checkIfSupportedQSV_l() {
     }
     return find_device;
 #else
+    /*
     // Windows平台上的QSV检测逻辑
     HMODULE hModule = LoadLibraryA("libmfx.dll");
     if (!hModule) {
@@ -171,7 +210,7 @@ static bool checkIfSupportedQSV_l() {
     }
     
     FreeLibrary(hModule);
-    
+    */
     // 检查是否有Intel显卡
     bool has_intel_gpu = false;
     
@@ -216,6 +255,81 @@ static bool checkIfSupportedQSV_l() {
 
 static bool checkIfSupportedQSV() {
     static auto ret = checkIfSupportedQSV_l();
+    return ret;
+}
+
+static bool checkIfSupportedAMF_l() {
+#if !defined(_WIN32)
+    // 检查QSV相关库是否存在
+    auto so = dlopen("libmfx.so.1", RTLD_LAZY);
+    if (!so) {
+        WarnL << u8"libmfx.so.1加载失败:" << get_uv_errmsg();
+        return false;
+    }
+    dlclose(so);
+
+    // 检查设备节点是否存在
+    bool find_device = false;
+    File::scanDir(
+        "/dev/dri",
+        [&](const string &path, bool is_dir) {
+            if (!is_dir && (path.find("renderD") != string::npos)) {
+                find_device = true;
+                return false;
+            }
+            return true;
+        },
+        false);
+
+    if (!find_device) {
+        WarnL << u8"Intel QSV硬件编解码器设备节点不存在";
+    }
+    return find_device;
+#else
+    // 检查是否有Intel显卡
+    bool has_intel_gpu = false;
+
+    // 使用DXGI枚举适配器
+    HRESULT hr = CoInitialize(NULL);
+    if (SUCCEEDED(hr)) {
+        IDXGIFactory *pFactory = NULL;
+        hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&pFactory);
+
+        if (SUCCEEDED(hr)) {
+            UINT i = 0;
+            IDXGIAdapter *pAdapter = NULL;
+            while (pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+                DXGI_ADAPTER_DESC desc;
+                pAdapter->GetDesc(&desc);
+
+                // 检查是否为Intel适配器
+                if (wcsstr(desc.Description, L"AMD")) {
+                    has_intel_gpu = true;
+                    InfoL << u8"找到Intel显卡: " << WStringToString(desc.Description);
+                    pAdapter->Release();
+                    break;
+                }
+
+                pAdapter->Release();
+                i++;
+            }
+
+            pFactory->Release();
+        }
+
+        CoUninitialize();
+    }
+
+    if (!has_intel_gpu) {
+        WarnL << u8"未找到AMD显卡，AMF可能不可用";
+    }
+
+    return has_intel_gpu;
+#endif
+}
+
+static bool checkIfSupportedAMF() {
+    static auto ret = checkIfSupportedAMF_l();
     return ret;
 }
 
@@ -424,7 +538,6 @@ static inline const AVCodec *getCodecByName(const std::vector<std::string> &code
     return ret;
 }
 
-
 FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std::vector<std::string> &codec_name) {
     setupFFmpeg();
     _frame_pool.setSize(AV_NUM_DATA_POINTERS);
@@ -452,7 +565,7 @@ FFmpegDecoder::FFmpegDecoder(const Track::Ptr &track, int thread_num, const std:
             if (codec && codec->id == AV_CODEC_ID_HEVC) {
                 break;
             }
-            if (checkIfSupportedNvidia()) {
+            if(checkIfSupportedNvidia()) {
                 codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_cuvid"}, {"hevc_nvmpi"}});
             } else if (checkIfSupportedQSV()) {
                 codec = getCodec({{AV_CODEC_ID_HEVC}, {"hevc_qsv"}, {"hevc_videotoolbox"}, {"hevc_nvmpi"}});
