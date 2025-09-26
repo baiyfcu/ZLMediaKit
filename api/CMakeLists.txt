@@ -43,6 +43,7 @@ elseif(IOS)
   add_library(mk_api STATIC ${API_SRC_LIST})
 else()
   add_library(mk_api SHARED ${API_SRC_LIST})
+  list(APPEND COMPILE_DEFINITIONS MediaKitApi_EXPORTS)
 endif()
 
 target_compile_definitions(mk_api

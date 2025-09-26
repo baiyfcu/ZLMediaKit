@@ -22,7 +22,7 @@
 #
 
 set(LINK_LIBRARIES ${MK_LINK_LIBRARIES})
-list(APPEND LINK_LIBRARIES libmfx)
+#list(APPEND LINK_LIBRARIES libmfx)
 
 find_package(PkgConfig QUIET)
 # 查找 SDL2 是否安装

@@ -72,9 +72,22 @@
 #define VHOST_KEY "vhost"
 #define DEFAULT_VHOST "__defaultVhost__"
 
+// 定义符号导出宏
+#if defined(_WIN32)
+#ifdef MediaKit_EXPORTS
+#define ZLMEDIAKIT_API __declspec(dllexport)
+#else
+#define ZLMEDIAKIT_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define ZLMEDIAKIT_API __attribute__((visibility("default")))
+#else
+#define ZLMEDIAKIT_API
+#endif
+
 namespace mediakit {
 
-extern const char kServerName[];
+extern ZLMEDIAKIT_API const char kServerName[];
 
 template <typename... ARGS>
 void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *file, int line, ARGS &&...args) {
@@ -86,4 +99,6 @@ void Assert_ThrowCpp(int failed, const char *exp, const char *func, const char *
 }
 
 } // namespace mediakit
+
+
 #endif // ZLMEDIAKIT_MACROS_H

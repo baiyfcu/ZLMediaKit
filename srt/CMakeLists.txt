@@ -25,10 +25,9 @@ file(GLOB SRT_SRC_LIST *.cpp *.h *.hpp)
 
 add_library(srt STATIC ${SRT_SRC_LIST})
 add_library(ZLMediaKit::SRT ALIAS srt)
-target_link_libraries(srt
-  PUBLIC
-    ZLMediaKit::MediaKit
-    ZLMediaKit::ToolKit)
+
+target_include_directories(srt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/../3rdpart/ZLToolKit/src)
+
 target_compile_options(srt
   PRIVATE ${COMPILE_OPTIONS_DEFAULT})
 target_include_directories(srt
