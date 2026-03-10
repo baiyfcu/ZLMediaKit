@@ -74,10 +74,14 @@
 
 // 定义符号导出宏
 #if defined(_WIN32)
+#ifndef ENABLE_CXX_API
 #ifdef MediaKit_EXPORTS
 #define ZLMEDIAKIT_API __declspec(dllexport)
 #else
 #define ZLMEDIAKIT_API __declspec(dllimport)
+#endif
+#else
+#define ZLMEDIAKIT_API
 #endif
 #elif defined(__GNUC__) && __GNUC__ >= 4
 #define ZLMEDIAKIT_API __attribute__((visibility("default")))
