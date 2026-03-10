@@ -21,7 +21,7 @@
 # SOFTWARE.
 #
 
-cmake_minimum_required(VERSION 3.1.3)
+cmake_minimum_required(VERSION 3.5)
 
 # 加载自定义模块
 # Load custom modules
@@ -36,7 +36,7 @@ set(CMAKE_CXX_STANDARD 11)
 option(ENABLE_API "Enable C API SDK" ON)
 option(ENABLE_API_STATIC_LIB "Enable mk_api static lib" OFF)
 option(ENABLE_ASAN "Enable Address Sanitize" OFF)
-option(ENABLE_CXX_API "Enable C++ API SDK" OFF)
+option(ENABLE_CXX_API "Enable C++ API SDK as shared library" OFF)
 option(ENABLE_FAAC "Enable FAAC" OFF)
 option(ENABLE_FFMPEG "Enable FFmpeg" OFF)
 option(ENABLE_HLS "Enable HLS" ON)
@@ -79,6 +79,16 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE INTERNAL "" FORCE)
 # TODO: include 当前目录会导致 server 编译出错, 待排除
 set(CMAKE_INCLUDE_CURRENT_DIR OFF)
 
+if(ENABLE_CXX_API)
+  add_definitions(-DENABLE_CXX_API)
+  if(WIN32 AND ENABLE_MSVC_MT)
+    set(ENABLE_MSVC_MT OFF)
+    message(WARNING "Windows下C++ API SDK只支持md/mdd,ENABLE_MSVC_MT set off")
+  endif()
+else()
+  add_definitions(-DMediaKit_STATIC)
+endif ()
+
 # 安装路径
 # Install path
 if(NOT CMAKE_INSTALL_PREFIX)
@@ -113,10 +123,10 @@ string(TOLOWER ${CMAKE_SYSTEM_NAME} SYSTEM_NAME_LOWER)
 #    set(OUTPUT_FULL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}${CL_32_64}/${CMAKE_BUILD_TYPE})
 #    message(WARNING "++++++++++++++:${OUTPUT_DIR}/${CMAKE_BUILD_TYPE}")
 #else()
-#    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
+    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
 #endif()
-#set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
-#set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
+set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
+set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
 
 # 添加 git 版本信息
 # Add git version information
@@ -264,6 +274,7 @@ if(ENABLE_FFMPEG)
     if(AVUTIL_FOUND)
       update_cached_list(MK_LINK_LIBRARIES PkgConfig::AVUTIL)
       message(STATUS "found library: ${AVUTIL_LIBRARIES}")
+      message(STATUS "*MK_LINK_LIBRARIES: ${MK_LINK_LIBRARIES}")
     endif()
   endif()
 
@@ -349,6 +360,8 @@ if(ENABLE_FFMPEG)
     message(WARNING "ffmpeg related functions not found")
   endif()
 endif()
+
+message(STATUS "MK_LINK_LIBRARIES: ${MK_LINK_LIBRARIES} ENABLE_FFMPEG:${ENABLE_FFMPEG}")
 
 if(ENABLE_MEM_DEBUG)
   update_cached_list(MK_LINK_LIBRARIES
@@ -456,7 +469,7 @@ if(FAAC_FOUND AND ENABLE_FAAC)
 endif()
 
 if(WIN32)
-  update_cached_list(MK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi)
+  update_cached_list(MK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi advapi32 kernel32)
 elseif(ANDROID)
   update_cached_list(MK_LINK_LIBRARIES log)
 elseif(NOT ANDROID OR IOS)
@@ -509,13 +522,15 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdpart)
 
 add_subdirectory(3rdpart)
 
+if(ENABLE_SRT)
+  add_subdirectory(srt)
+endif()
+message(STATUS "MK_LINK_LIBRARIES1: ${MK_LINK_LIBRARIES}")
 add_subdirectory(src)
 
 add_subdirectory(ext-codec)
 
-if(ENABLE_SRT)
-  add_subdirectory(srt)
-endif()
+
 
 if(ENABLE_WEBRTC)
   add_subdirectory(webrtc)
