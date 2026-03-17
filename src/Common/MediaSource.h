@@ -567,7 +567,7 @@ protected:
     MediaTuple _tuple;
 
 private:
-    std::atomic_flag _owned { false };
+    std::atomic_flag _owned = ATOMIC_FLAG_INIT;
     time_t _create_stamp;
     toolkit::Ticker _ticker;
     std::string _schema;

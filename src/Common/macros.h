@@ -74,7 +74,7 @@
 
 // 定义符号导出宏
 #if defined(_WIN32)
-#ifndef ENABLE_CXX_API
+#ifdef ENABLE_CXX_API
 #ifdef MediaKit_EXPORTS
 #define ZLMEDIAKIT_API __declspec(dllexport)
 #else
