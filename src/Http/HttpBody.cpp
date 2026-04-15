@@ -26,12 +26,117 @@
 
 #include "HttpBody.h"
 #include "HttpClient.h"
+#include "HttpClientImp.h"
 #include "Common/macros.h"
 
 using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+namespace {
+class HttpUrlClient : public HttpClientImp {
+public:
+    using Ptr = std::shared_ptr<HttpUrlClient>;
+    using HeaderCB = std::function<void(int, const HttpHeader &)>;
+    using BodyCB = std::function<void(const Buffer::Ptr &)>;
+    using CompleteCB = std::function<void(const SockException &)>;
+
+    void setHeaderCB(HeaderCB cb) {
+        _on_header = std::move(cb);
+    }
+
+    void setBodyCB(BodyCB cb) {
+        _on_body = std::move(cb);
+    }
+
+    void setCompleteCB(CompleteCB cb) {
+        _on_complete = std::move(cb);
+    }
+
+    void setClientPoller(const EventPoller::Ptr &poller) {
+        setPoller(poller);
+    }
+
+protected:
+    void onResponseHeader(const std::string &status, const HttpHeader &headers) override {
+        if (_on_header) {
+            _on_header(atoi(status.data()), headers);
+        }
+    }
+
+    void onResponseBody(const char *buf, size_t size) override {
+        if (_on_body && size) {
+            auto raw = BufferRaw::create();
+            raw->assign(buf, size);
+            _on_body(std::move(raw));
+        }
+    }
+
+    void onResponseCompleted(const SockException &ex) override {
+        if (_on_complete) {
+            _on_complete(ex);
+        }
+    }
+
+private:
+    HeaderCB _on_header;
+    BodyCB _on_body;
+    CompleteCB _on_complete;
+};
+}
+
+namespace {
+class RtpHttpUrlClient : public HttpClientImp {
+public:
+    using Ptr = std::shared_ptr<RtpHttpUrlClient>;
+    using HeaderCB = std::function<void(int, const HttpHeader &)>;
+    using BodyCB = std::function<void(const Buffer::Ptr &)>;
+    using CompleteCB = std::function<void(const SockException &)>;
+
+    void setHeaderCB(HeaderCB cb) {
+        _on_header = std::move(cb);
+    }
+
+    void setBodyCB(BodyCB cb) {
+        _on_body = std::move(cb);
+    }
+
+    void setCompleteCB(CompleteCB cb) {
+        _on_complete = std::move(cb);
+    }
+
+    void setClientPoller(const EventPoller::Ptr &poller) {
+        setPoller(poller);
+    }
+
+protected:
+    void onResponseHeader(const std::string &status, const HttpHeader &headers) override {
+        if (_on_header) {
+            _on_header(atoi(status.data()), headers);
+        }
+    }
+
+    void onResponseBody(const char *buf, size_t size) override {
+        if (_on_body && size) {
+            auto raw = BufferRaw::create();
+            raw->assign(buf, size);
+            _on_body(std::move(raw));
+        }
+    }
+
+    void onResponseCompleted(const SockException &ex) override {
+        if (_on_complete) {
+            _on_complete(ex);
+        }
+    }
+
+private:
+    HeaderCB _on_header;
+    BodyCB _on_body;
+    CompleteCB _on_complete;
+};
+}
 
 HttpStringBody::HttpStringBody(string str) {
     _str = std::move(str);
@@ -305,6 +410,366 @@ Buffer::Ptr HttpFileBody::readData(size_t size) {
     return ret;
 }
 
+HttpUrlBody::HttpUrlBody(const std::string &url, const StrCaseMap &request_header) {
+    _url = url;
+    _request_header = request_header;
+    _alive_token = std::make_shared<char>(0);
+    std::weak_ptr<void> weak_alive = _alive_token;
+    auto self = this;
+    auto client = std::make_shared<HttpUrlClient>();
+    _client_holder = client;
+    client->setClientPoller(EventPollerPool::Instance().getPoller(false));
+    client->setMethod("GET");
+    client->setCompleteTimeout(30 * 1000);
+    for (auto &pr : _request_header) {
+        if (pr.first == "Range" || pr.first == "User-Agent" || pr.first == "Accept" || pr.first == "Authorization") {
+            client->addHeader(pr.first, pr.second, true);
+        }
+    }
+    client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
+        if (weak_alive.expired()) {
+            return;
+        }
+        HttpUrlBody::HeaderReadyCB cb;
+        int response_code = 200;
+        StrCaseMap response_header;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            self->_response_code = code > 0 ? code : 200;
+            self->_response_header = headers;
+            self->_header_ready = true;
+            if (!self->_header_cb_fired) {
+                self->_header_cb_fired = true;
+                cb = self->_header_ready_cb;
+                response_code = self->_response_code;
+                response_header = self->_response_header;
+            }
+        }
+        self->_header_cv.notify_all();
+        if (cb) {
+            cb(response_code, response_header);
+        }
+    });
+    client->setBodyCB([weak_alive, self](const Buffer::Ptr &buf) {
+        if (weak_alive.expired() || !buf) {
+            return;
+        }
+        std::function<void(const Buffer::Ptr &)> cb;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            if (self->_wait_cb) {
+                cb = std::move(self->_wait_cb);
+                self->_wait_cb = nullptr;
+            } else {
+                self->_cache.emplace_back(buf);
+                return;
+            }
+        }
+        cb(buf);
+    });
+    client->setCompleteCB([weak_alive, self](const SockException &ex) {
+        if (weak_alive.expired()) {
+            return;
+        }
+        std::function<void(const Buffer::Ptr &)> cb;
+        HttpUrlBody::HeaderReadyCB header_cb;
+        int response_code = 200;
+        StrCaseMap response_header;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            self->_completed = true;
+            self->_success = !ex;
+            if (!self->_header_ready && ex) {
+                self->_response_code = 503;
+            }
+            if (self->_wait_cb && self->_cache.empty()) {
+                cb = std::move(self->_wait_cb);
+                self->_wait_cb = nullptr;
+            }
+            if (!self->_header_cb_fired) {
+                self->_header_cb_fired = true;
+                header_cb = self->_header_ready_cb;
+                response_code = self->_response_code;
+                response_header = self->_response_header;
+            }
+        }
+        self->_header_cv.notify_all();
+        if (header_cb) {
+            header_cb(response_code, response_header);
+        }
+        if (cb) {
+            cb(nullptr);
+        }
+    });
+    client->setClientPoller(EventPollerPool::Instance().getPoller(false));
+    client->sendRequest(_url);
+}
+
+void HttpUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
+    int code = 200;
+    StrCaseMap header;
+    bool do_cb = false;
+    {
+        std::lock_guard<std::mutex> lck(_mtx);
+        if (_header_cb_fired) {
+            do_cb = true;
+            code = _response_code;
+            header = _response_header;
+        } else {
+            _header_ready_cb = std::move(cb);
+        }
+    }
+    if (do_cb && cb) {
+        cb(code, header);
+    }
+}
+
+void HttpUrlBody::waitHeaderReady() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+}
+
+int64_t HttpUrlBody::remainSize() {
+    auto headers = responseHeader();
+    if (headers.find("Content-Length") == headers.end()) {
+        return -1;
+    }
+    return std::stoll(headers["Content-Length"]);
+}
+
+Buffer::Ptr HttpUrlBody::readData(size_t size) {
+    std::lock_guard<std::mutex> lck(_mtx);
+    if (_cache.empty()) {
+        return nullptr;
+    }
+    auto ret = _cache.front();
+    _cache.pop_front();
+    return ret;
+}
+
+void HttpUrlBody::readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) {
+    Buffer::Ptr ret;
+    bool completed = false;
+    {
+        std::lock_guard<std::mutex> lck(_mtx);
+        if (!_cache.empty()) {
+            ret = _cache.front();
+            _cache.pop_front();
+        } else if (_completed) {
+            completed = true;
+        } else {
+            _wait_cb = cb;
+            return;
+        }
+    }
+    if (ret) {
+        cb(ret);
+    } else if (completed) {
+        cb(nullptr);
+    }
+}
+
+int HttpUrlBody::responseCode() const {
+    waitHeaderReady();
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _response_code;
+}
+
+StrCaseMap HttpUrlBody::responseHeader() const {
+    waitHeaderReady();
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _response_header;
+}
+
+bool HttpUrlBody::requestCompleted() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _completed;
+}
+
+bool HttpUrlBody::requestSuccess() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _success;
+}
+
+// rtp-http
+RtpHttpUrlBody::RtpHttpUrlBody(const std::string &url, const StrCaseMap &request_header) {
+    _url = url;
+    _request_header = request_header;
+    _alive_token = std::make_shared<char>(0);
+    std::weak_ptr<void> weak_alive = _alive_token;
+    auto self = this;
+    auto client = std::make_shared<RtpHttpUrlClient>();
+    _client_holder = client;
+    client->setClientPoller(EventPollerPool::Instance().getPoller(false));
+    client->setMethod("GET");
+    client->setCompleteTimeout(30 * 1000);
+    for (auto &pr : _request_header) {
+        if (pr.first == "Range" || pr.first == "User-Agent" || pr.first == "Accept" || pr.first == "Authorization") {
+            client->addHeader(pr.first, pr.second, true);
+        }
+    }
+    client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
+        if (weak_alive.expired()) {
+            return;
+        }
+        HttpUrlBody::HeaderReadyCB cb;
+        int response_code = 200;
+        StrCaseMap response_header;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            self->_response_code = code > 0 ? code : 200;
+            self->_response_header = headers;
+            self->_header_ready = true;
+            if (!self->_header_cb_fired) {
+                self->_header_cb_fired = true;
+                cb = self->_header_ready_cb;
+                response_code = self->_response_code;
+                response_header = self->_response_header;
+            }
+        }
+        self->_header_cv.notify_all();
+        if (cb) {
+            cb(response_code, response_header);
+        }
+    });
+    client->setBodyCB([weak_alive, self](const Buffer::Ptr &buf) {
+        if (weak_alive.expired() || !buf) {
+            return;
+        }
+        std::function<void(const Buffer::Ptr &)> cb;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            if (self->_wait_cb) {
+                cb = std::move(self->_wait_cb);
+                self->_wait_cb = nullptr;
+            } else {
+                self->_cache.emplace_back(buf);
+                return;
+            }
+        }
+        cb(buf);
+    });
+    client->setCompleteCB([weak_alive, self](const SockException &ex) {
+        if (weak_alive.expired()) {
+            return;
+        }
+        std::function<void(const Buffer::Ptr &)> cb;
+        HttpUrlBody::HeaderReadyCB header_cb;
+        int response_code = 200;
+        StrCaseMap response_header;
+        {
+            std::lock_guard<std::mutex> lck(self->_mtx);
+            self->_completed = true;
+            self->_success = !ex;
+            if (!self->_header_ready && ex) {
+                self->_response_code = 503;
+            }
+            if (self->_wait_cb && self->_cache.empty()) {
+                cb = std::move(self->_wait_cb);
+                self->_wait_cb = nullptr;
+            }
+            if (!self->_header_cb_fired) {
+                self->_header_cb_fired = true;
+                header_cb = self->_header_ready_cb;
+                response_code = self->_response_code;
+                response_header = self->_response_header;
+            }
+        }
+        self->_header_cv.notify_all();
+        if (header_cb) {
+            header_cb(response_code, response_header);
+        }
+        if (cb) {
+            cb(nullptr);
+        }
+    });
+    client->setClientPoller(EventPollerPool::Instance().getPoller(false));
+    client->sendRequest(_url);
+}
+
+void RtpHttpUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
+    int code = 200;
+    StrCaseMap header;
+    bool do_cb = false;
+    {
+        std::lock_guard<std::mutex> lck(_mtx);
+        if (_header_cb_fired) {
+            do_cb = true;
+            code = _response_code;
+            header = _response_header;
+        } else {
+            _header_ready_cb = std::move(cb);
+        }
+    }
+    if (do_cb && cb) {
+        cb(code, header);
+    }
+}
+
+void RtpHttpUrlBody::waitHeaderReady() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+}
+
+int64_t RtpHttpUrlBody::remainSize() {
+    auto headers = responseHeader();
+    if (headers.find("Content-Length") == headers.end()) {
+        return -1;
+    }
+    return std::stoll(headers["Content-Length"]);
+}
+
+Buffer::Ptr RtpHttpUrlBody::readData(size_t size) {
+    std::lock_guard<std::mutex> lck(_mtx);
+    if (_cache.empty()) {
+        return nullptr;
+    }
+    auto ret = _cache.front();
+    _cache.pop_front();
+    return ret;
+}
+
+void RtpHttpUrlBody::readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) {
+    Buffer::Ptr ret;
+    bool completed = false;
+    {
+        std::lock_guard<std::mutex> lck(_mtx);
+        if (!_cache.empty()) {
+            ret = _cache.front();
+            _cache.pop_front();
+        } else if (_completed) {
+            completed = true;
+        } else {
+            _wait_cb = cb;
+            return;
+        }
+    }
+    if (ret) {
+        cb(ret);
+    } else if (completed) {
+        cb(nullptr);
+    }
+}
+
+int RtpHttpUrlBody::responseCode() const {
+    waitHeaderReady();
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _response_code;
+}
+
+StrCaseMap RtpHttpUrlBody::responseHeader() const {
+    waitHeaderReady();
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _response_header;
+}
+
+bool RtpHttpUrlBody::requestCompleted() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _completed;
+}
+
+bool RtpHttpUrlBody::requestSuccess() const {
+    std::lock_guard<std::mutex> lck(_mtx);
+    return _success;
+}
 //////////////////////////////////////////////////////////////////
 
 HttpMultiFormBody::HttpMultiFormBody(const HttpArgs &args, const string &filePath, const string &boundary) {

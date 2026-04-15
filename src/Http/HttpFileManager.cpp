@@ -16,6 +16,7 @@
 #include "Record/HlsMediaSource.h"
 #include "HttpConst.h"
 #include "HttpSession.h"
+#include "Util/util.h"
 #include "HttpFileManager.h"
 
 using namespace std;
@@ -640,6 +641,80 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
     });
 }
 
+
+static void accessHttpUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
+    weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
+    canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
+        auto strongSession = weakSession.lock();
+        if (!strongSession) {
+            return;
+        }
+        if (!err_msg.empty()) {
+            StrCaseMap headerOut;
+            if (cookie) {
+                headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
+            }
+            cb(401, "text/html", headerOut, std::make_shared<HttpStringBody>(err_msg));
+            return;
+        }
+        auto response_url = [](const HttpServerCookie::Ptr &cookie, const HttpFileManager::invoker &cb, const string &url, const Parser &parser) {
+            StrCaseMap httpHeader;
+            if (cookie) {
+                httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
+            }
+            auto url_body = std::make_shared<HttpUrlBody>(url, parser.getHeader());
+            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body](int code, const StrCaseMap &headerOut) mutable {
+                for (auto &pr : headerOut) {
+                    httpHeader.emplace(pr.first, pr.second);
+                }
+                auto type = HttpFileManager::getContentType(url.data());
+                auto it = httpHeader.find("Content-Type");
+                if (it != httpHeader.end() && !it->second.empty()) {
+                    type = it->second;
+                }
+                cb(code, type, httpHeader, url_body);
+            });
+        };
+        response_url(cookie, cb, url, parser);
+    });
+}
+
+static void accessRtpHttpUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
+    weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
+    canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
+        auto strongSession = weakSession.lock();
+        if (!strongSession) {
+            return;
+        }
+        if (!err_msg.empty()) {
+            StrCaseMap headerOut;
+            if (cookie) {
+                headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
+            }
+            cb(401, "text/html", headerOut, std::make_shared<HttpStringBody>(err_msg));
+            return;
+        }
+        auto response_url = [](const HttpServerCookie::Ptr &cookie, const HttpFileManager::invoker &cb, const string &url, const Parser &parser) {
+            StrCaseMap httpHeader;
+            if (cookie) {
+                httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
+            }
+            auto url_body = std::make_shared<HttpUrlBody>(url, parser.getHeader());
+            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body](int code, const StrCaseMap &headerOut) mutable {
+                for (auto &pr : headerOut) {
+                    httpHeader.emplace(pr.first, pr.second);
+                }
+                auto type = HttpFileManager::getContentType(url.data());
+                auto it = httpHeader.find("Content-Type");
+                if (it != httpHeader.end() && !it->second.empty()) {
+                    type = it->second;
+                }
+                cb(code, type, httpHeader, url_body);
+            });
+        };
+        response_url(cookie, cb, url, parser);
+    });
+}
 static string getFilePath(const Parser &parser,const MediaInfo &media_info, Session &sender) {
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
     GET_CONFIG(string, rootPath, Http::kRootPath);
@@ -700,6 +775,20 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
     auto file_path = getFilePath(parser, media_info, sender);
     if (file_path.size() == 0) {
         sendNotFound(cb);
+        return;
+    }
+
+    // 访问的是URL  [AUTO-TRANSLATED:79c824d]
+    // Accessing URL
+    if (start_with(file_path, "http://") || start_with(file_path, "https://")){
+        accessHttpUrl(sender, parser, media_info, file_path, cb);
+        return;
+    }
+
+    // 访问的是基于RTP传输文件URL
+    // Accessing URL base on rtp 
+    if (start_with(file_path, "rtp-http://") || start_with(file_path, "rtp-https://")){
+        accessRtpHttpUrl(sender, parser, media_info, file_path, cb);
         return;
     }
     // 访问的是文件夹  [AUTO-TRANSLATED:279974bb]
@@ -844,6 +933,32 @@ void HttpResponseInvokerImp::responseFile(const StrCaseMap &requestHeader,
     // 回复文件  [AUTO-TRANSLATED:5d91a916]
     // Reply file
     (*this)(code, httpHeader, fileBody);
+}
+
+void HttpResponseInvokerImp::responseUrl(const StrCaseMap &requestHeader,
+                                         const StrCaseMap &responseHeader,
+                                         const std::string &url) const {
+    StrCaseMap &httpHeader = const_cast<StrCaseMap &>(responseHeader);
+    auto url_body = std::make_shared<HttpUrlBody>(url, requestHeader);
+    auto response_header = url_body->responseHeader();
+    for (auto &pr : response_header) {
+        httpHeader.emplace(pr.first, pr.second);
+    }
+    auto code = url_body->responseCode();
+    (*this)(code, httpHeader, url_body);
+}
+
+void HttpResponseInvokerImp::responseRtpUrl(const StrCaseMap &requestHeader,
+                                         const StrCaseMap &responseHeader,
+                                         const std::string &url) const {
+    StrCaseMap &httpHeader = const_cast<StrCaseMap &>(responseHeader);
+    auto url_body = std::make_shared<HttpUrlBody>(url, requestHeader);
+    auto response_header = url_body->responseHeader();
+    for (auto &pr : response_header) {
+        httpHeader.emplace(pr.first, pr.second);
+    }
+    auto code = url_body->responseCode();
+    (*this)(code, httpHeader, url_body);
 }
 
 HttpResponseInvokerImp::operator bool(){

@@ -34,7 +34,9 @@ public:
     void operator()(int code, const StrCaseMap &headerOut, const std::string &body) const;
 
     void responseFile(const StrCaseMap &requestHeader,const StrCaseMap &responseHeader,const std::string &file, bool use_mmap = true, bool is_path = true) const;
-    operator bool();
+    void responseUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
+    void responseRtpUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
+	operator bool();
 private:
     HttpResponseInvokerLambda0 _lambad;
 };
