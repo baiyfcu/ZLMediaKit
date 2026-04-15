@@ -1,4 +1,4 @@
-# MIT License
+﻿# MIT License
 #
 # Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
 #
@@ -539,6 +539,8 @@ endif()
 if(ENABLE_API)
   add_subdirectory(api)
 endif()
+
+add_subdirectory(esfileferry)
 
 ##############################################################################
 

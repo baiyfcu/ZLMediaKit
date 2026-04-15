@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MP4 分屏测试</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel {
+      background: #1b1b1b;
+      padding: 10px 12px;
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 8px 10px;
+      align-items: center;
+      border-bottom: 1px solid #333;
+      overflow-x: auto;
+      overflow-y: hidden;
+      flex: 0 0 auto;
+    }
+    .panel label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    .panel input[type="number"] {
+      width: 72px;
+    }
+    .panel input[type="text"] {
+      width: 260px;
+    }
+    .panel input, .panel button {
+      border: 1px solid #444;
+      background: #222;
+      color: #eee;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 14px;
+    }
+    .panel button {
+      cursor: pointer;
+    }
+    .grid {
+      display: grid;
+      gap: 8px;
+      padding: 8px;
+      box-sizing: border-box;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .cell {
+      position: relative;
+      background: #171717;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      overflow: hidden;
+      min-width: 0;
+      min-height: 0;
+    }
+    .cell video {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      object-fit: contain;
+    }
+    .idx {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      z-index: 1;
+      font-size: 12px;
+      color: #ddd;
+      background: rgba(0, 0, 0, 0.45);
+      border-radius: 4px;
+      padding: 2px 6px;
+    }
+    .cell.active {
+      border-color: #4ea1ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <label>行
+      <input id="rows" type="number" min="1" max="12" value="1" />
+    </label>
+    <label>列
+      <input id="cols" type="number" min="1" max="12" value="1" />
+    </label>
+    <label>默认 MP4 地址
+      <input id="defaultUrl" type="text" value="http://localhost:7090/changeprotocol/changeprotocol/1.mp4" placeholder="https://example.com/demo.mp4" />
+    </label>
+    <label>
+      <input id="autoplay" type="checkbox" checked />
+      自动播放
+    </label>
+    <label>
+      <input id="muted" type="checkbox" checked />
+      静音
+    </label>
+    <button id="buildBtn">生成分屏</button>
+    <button id="applyAllBtn">地址应用到全部</button>
+    <label>当前窗口
+      <input id="selectedCellIndex" type="number" min="1" value="1" />
+    </label>
+    <label>当前窗口地址
+      <input id="selectedCellUrl" type="text" placeholder="输入当前窗口 MP4 地址" />
+    </label>
+    <button id="applySelectedBtn">应用到当前窗口</button>
+    <button id="playAllBtn">全部播放</button>
+    <button id="pauseAllBtn">全部暂停</button>
+  </div>
+  <div id="grid" class="grid"></div>
+
+  <script>
+    const rowsInput = document.getElementById('rows');
+    const colsInput = document.getElementById('cols');
+    const defaultUrlInput = document.getElementById('defaultUrl');
+    const autoplayInput = document.getElementById('autoplay');
+    const mutedInput = document.getElementById('muted');
+    const buildBtn = document.getElementById('buildBtn');
+    const applyAllBtn = document.getElementById('applyAllBtn');
+    const selectedCellIndexInput = document.getElementById('selectedCellIndex');
+    const selectedCellUrlInput = document.getElementById('selectedCellUrl');
+    const applySelectedBtn = document.getElementById('applySelectedBtn');
+    const playAllBtn = document.getElementById('playAllBtn');
+    const pauseAllBtn = document.getElementById('pauseAllBtn');
+    const grid = document.getElementById('grid');
+    let selectedCellIndex = 0;
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function playVideo(video) {
+      const p = video.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {});
+      }
+    }
+
+    function applyVideoOptions(video) {
+      video.autoplay = autoplayInput.checked;
+      video.muted = mutedInput.checked;
+      video.playsInline = true;
+    }
+
+    function updateSource(cell, url, autoPlayNow) {
+      const video = cell.querySelector('video');
+      const nextUrl = (url || '').trim();
+      video.src = nextUrl;
+      video.load();
+      if (autoplayInput.checked || autoPlayNow) {
+        playVideo(video);
+      }
+    }
+
+    function getCells() {
+      return Array.from(grid.querySelectorAll('.cell'));
+    }
+
+    function setActiveCell(index) {
+      const cells = getCells();
+      if (cells.length === 0) {
+        selectedCellIndex = 0;
+        selectedCellIndexInput.value = '1';
+        selectedCellUrlInput.value = '';
+        return;
+      }
+      const safeIndex = clamp(index, 0, cells.length - 1);
+      selectedCellIndex = safeIndex;
+      selectedCellIndexInput.value = String(safeIndex + 1);
+      cells.forEach((cell, i) => {
+        if (i === safeIndex) {
+          cell.classList.add('active');
+        } else {
+          cell.classList.remove('active');
+        }
+      });
+      const activeVideo = cells[safeIndex].querySelector('video');
+      selectedCellUrlInput.value = activeVideo.currentSrc || activeVideo.src || '';
+    }
+
+    function createCell(index, initialUrl) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.innerHTML = `
+        <div class="idx">窗口 #${index + 1}</div>
+        <video controls preload="auto"></video>
+      `;
+      const video = cell.querySelector('video');
+      applyVideoOptions(video);
+      if (initialUrl) {
+        updateSource(cell, initialUrl, true);
+      }
+      cell.addEventListener('click', () => {
+        setActiveCell(index);
+      });
+      video.addEventListener('loadedmetadata', () => {
+        if (selectedCellIndex === index) {
+          selectedCellUrlInput.value = video.currentSrc || video.src || '';
+        }
+      });
+      return cell;
+    }
+
+    function allVideos() {
+      return Array.from(grid.querySelectorAll('video'));
+    }
+
+    function buildGrid() {
+      const rows = clamp(parseInt(rowsInput.value || '1', 10), 1, 12);
+      const cols = clamp(parseInt(colsInput.value || '1', 10), 1, 12);
+      rowsInput.value = String(rows);
+      colsInput.value = String(cols);
+      const total = rows * cols;
+      const defaultUrl = defaultUrlInput.value.trim();
+      grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+      grid.innerHTML = '';
+      for (let i = 0; i < total; i++) {
+        const cell = createCell(i, defaultUrl);
+        grid.appendChild(cell);
+      }
+      setActiveCell(0);
+    }
+
+    function applyUrlToAll() {
+      const url = defaultUrlInput.value.trim();
+      const cells = getCells();
+      cells.forEach((cell) => updateSource(cell, url, true));
+      setActiveCell(selectedCellIndex);
+    }
+
+    function applyUrlToSelected() {
+      const cells = getCells();
+      if (cells.length === 0) {
+        return;
+      }
+      const targetIndex =
+        clamp(parseInt(selectedCellIndexInput.value || '1', 10) - 1, 0, cells.length - 1);
+      selectedCellIndexInput.value = String(targetIndex + 1);
+      const targetCell = cells[targetIndex];
+      const nextUrl = selectedCellUrlInput.value.trim();
+      updateSource(targetCell, nextUrl, true);
+      setActiveCell(targetIndex);
+    }
+
+    function playAll() {
+      allVideos().forEach((video) => {
+        applyVideoOptions(video);
+        playVideo(video);
+      });
+    }
+
+    function pauseAll() {
+      allVideos().forEach((video) => video.pause());
+    }
+
+    autoplayInput.addEventListener('change', () => {
+      allVideos().forEach((video) => {
+        video.autoplay = autoplayInput.checked;
+      });
+    });
+
+    mutedInput.addEventListener('change', () => {
+      allVideos().forEach((video) => {
+        video.muted = mutedInput.checked;
+      });
+      if (autoplayInput.checked) {
+        playAll();
+      }
+    });
+
+    buildBtn.addEventListener('click', buildGrid);
+    applyAllBtn.addEventListener('click', applyUrlToAll);
+    applySelectedBtn.addEventListener('click', applyUrlToSelected);
+    selectedCellIndexInput.addEventListener('change', () => {
+      const cells = getCells();
+      if (cells.length === 0) {
+        return;
+      }
+      const targetIndex =
+        clamp(parseInt(selectedCellIndexInput.value || '1', 10) - 1, 0, cells.length - 1);
+      setActiveCell(targetIndex);
+    });
+    selectedCellUrlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        applyUrlToSelected();
+      }
+    });
+    playAllBtn.addEventListener('click', playAll);
+    pauseAllBtn.addEventListener('click', pauseAll);
+
+    buildGrid();
+  </script>
+</body>
+</html>

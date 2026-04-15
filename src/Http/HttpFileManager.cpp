@@ -679,7 +679,7 @@ static void accessHttpUrl(Session &sender, const Parser &parser, const MediaInfo
     });
 }
 
-static void accessRtpHttpUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
+static void accessPlayChannelUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
     weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
     canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
         auto strongSession = weakSession.lock();
@@ -699,7 +699,7 @@ static void accessRtpHttpUrl(Session &sender, const Parser &parser, const MediaI
             if (cookie) {
                 httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
             }
-            auto url_body = std::make_shared<HttpUrlBody>(url, parser.getHeader());
+            auto url_body = std::make_shared<PlayChannelUrlBody>(url, parser.getHeader());
             url_body->setHeaderReadyCB([cb, url, httpHeader, url_body](int code, const StrCaseMap &headerOut) mutable {
                 for (auto &pr : headerOut) {
                     httpHeader.emplace(pr.first, pr.second);
@@ -788,7 +788,7 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
     // 访问的是基于RTP传输文件URL
     // Accessing URL base on rtp 
     if (start_with(file_path, "rtp-http://") || start_with(file_path, "rtp-https://")){
-        accessRtpHttpUrl(sender, parser, media_info, file_path, cb);
+        accessPlayChannelUrl(sender, parser, media_info, file_path, cb);
         return;
     }
     // 访问的是文件夹  [AUTO-TRANSLATED:279974bb]
@@ -948,11 +948,11 @@ void HttpResponseInvokerImp::responseUrl(const StrCaseMap &requestHeader,
     (*this)(code, httpHeader, url_body);
 }
 
-void HttpResponseInvokerImp::responseRtpUrl(const StrCaseMap &requestHeader,
-                                         const StrCaseMap &responseHeader,
-                                         const std::string &url) const {
+void HttpResponseInvokerImp::responsePlayChannelUrl(const StrCaseMap &requestHeader,
+                                                    const StrCaseMap &responseHeader,
+                                                    const std::string &url) const {
     StrCaseMap &httpHeader = const_cast<StrCaseMap &>(responseHeader);
-    auto url_body = std::make_shared<HttpUrlBody>(url, requestHeader);
+    auto url_body = std::make_shared<PlayChannelUrlBody>(url, requestHeader);
     auto response_header = url_body->responseHeader();
     for (auto &pr : response_header) {
         httpHeader.emplace(pr.first, pr.second);

@@ -87,9 +87,9 @@ private:
 }
 
 namespace {
-class RtpHttpUrlClient : public HttpClientImp {
+class PlayChannelUrlClient : public HttpClientImp {
 public:
-    using Ptr = std::shared_ptr<RtpHttpUrlClient>;
+    using Ptr = std::shared_ptr<PlayChannelUrlClient>;
     using HeaderCB = std::function<void(int, const HttpHeader &)>;
     using BodyCB = std::function<void(const Buffer::Ptr &)>;
     using CompleteCB = std::function<void(const SockException &)>;
@@ -590,14 +590,14 @@ bool HttpUrlBody::requestSuccess() const {
     return _success;
 }
 
-// rtp-http
-RtpHttpUrlBody::RtpHttpUrlBody(const std::string &url, const StrCaseMap &request_header) {
+// play-channel-url
+PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url, const StrCaseMap &request_header) {
     _url = url;
     _request_header = request_header;
     _alive_token = std::make_shared<char>(0);
     std::weak_ptr<void> weak_alive = _alive_token;
     auto self = this;
-    auto client = std::make_shared<RtpHttpUrlClient>();
+    auto client = std::make_shared<PlayChannelUrlClient>();
     _client_holder = client;
     client->setClientPoller(EventPollerPool::Instance().getPoller(false));
     client->setMethod("GET");
@@ -686,7 +686,7 @@ RtpHttpUrlBody::RtpHttpUrlBody(const std::string &url, const StrCaseMap &request
     client->sendRequest(_url);
 }
 
-void RtpHttpUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
+void PlayChannelUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
     int code = 200;
     StrCaseMap header;
     bool do_cb = false;
@@ -705,11 +705,11 @@ void RtpHttpUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
     }
 }
 
-void RtpHttpUrlBody::waitHeaderReady() const {
+void PlayChannelUrlBody::waitHeaderReady() const {
     std::lock_guard<std::mutex> lck(_mtx);
 }
 
-int64_t RtpHttpUrlBody::remainSize() {
+int64_t PlayChannelUrlBody::remainSize() {
     auto headers = responseHeader();
     if (headers.find("Content-Length") == headers.end()) {
         return -1;
@@ -717,7 +717,7 @@ int64_t RtpHttpUrlBody::remainSize() {
     return std::stoll(headers["Content-Length"]);
 }
 
-Buffer::Ptr RtpHttpUrlBody::readData(size_t size) {
+Buffer::Ptr PlayChannelUrlBody::readData(size_t size) {
     std::lock_guard<std::mutex> lck(_mtx);
     if (_cache.empty()) {
         return nullptr;
@@ -727,7 +727,7 @@ Buffer::Ptr RtpHttpUrlBody::readData(size_t size) {
     return ret;
 }
 
-void RtpHttpUrlBody::readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) {
+void PlayChannelUrlBody::readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) {
     Buffer::Ptr ret;
     bool completed = false;
     {
@@ -749,24 +749,24 @@ void RtpHttpUrlBody::readDataAsync(size_t size, const std::function<void(const t
     }
 }
 
-int RtpHttpUrlBody::responseCode() const {
+int PlayChannelUrlBody::responseCode() const {
     waitHeaderReady();
     std::lock_guard<std::mutex> lck(_mtx);
     return _response_code;
 }
 
-StrCaseMap RtpHttpUrlBody::responseHeader() const {
+StrCaseMap PlayChannelUrlBody::responseHeader() const {
     waitHeaderReady();
     std::lock_guard<std::mutex> lck(_mtx);
     return _response_header;
 }
 
-bool RtpHttpUrlBody::requestCompleted() const {
+bool PlayChannelUrlBody::requestCompleted() const {
     std::lock_guard<std::mutex> lck(_mtx);
     return _completed;
 }
 
-bool RtpHttpUrlBody::requestSuccess() const {
+bool PlayChannelUrlBody::requestSuccess() const {
     std::lock_guard<std::mutex> lck(_mtx);
     return _success;
 }

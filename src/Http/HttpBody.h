@@ -214,11 +214,11 @@ private:
     mutable std::condition_variable _header_cv;
 };
 
-class RtpHttpUrlBody : public HttpBody {
+class PlayChannelUrlBody : public HttpBody {
 public:
-    using Ptr = std::shared_ptr<HttpUrlBody>;
+    using Ptr = std::shared_ptr<PlayChannelUrlBody>;
     using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
-    RtpHttpUrlBody(const std::string &url, const StrCaseMap &request_header = StrCaseMap());
+    PlayChannelUrlBody(const std::string &url, const StrCaseMap &request_header = StrCaseMap());
 
     int64_t remainSize() override;
     toolkit::Buffer::Ptr readData(size_t size) override;

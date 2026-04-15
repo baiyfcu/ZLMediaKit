@@ -35,7 +35,7 @@ public:
 
     void responseFile(const StrCaseMap &requestHeader,const StrCaseMap &responseHeader,const std::string &file, bool use_mmap = true, bool is_path = true) const;
     void responseUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
-    void responseRtpUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
+    void responsePlayChannelUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
 	operator bool();
 private:
     HttpResponseInvokerLambda0 _lambad;
