@@ -679,6 +679,7 @@ static void accessHttpUrl(Session &sender, const Parser &parser, const MediaInfo
     });
 }
 
+#if ENABLE_FERRY
 static void accessPlayChannelUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
     weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
     canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
@@ -715,6 +716,8 @@ static void accessPlayChannelUrl(Session &sender, const Parser &parser, const Me
         response_url(cookie, cb, url, parser);
     });
 }
+#endif
+
 static string getFilePath(const Parser &parser,const MediaInfo &media_info, Session &sender) {
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
     GET_CONFIG(string, rootPath, Http::kRootPath);
@@ -784,13 +787,14 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
         accessHttpUrl(sender, parser, media_info, file_path, cb);
         return;
     }
-
+#if ENABLE_FERRY
     // 访问的是基于RTP传输文件URL
     // Accessing URL base on rtp 
     if (start_with(file_path, "rtp-http://") || start_with(file_path, "rtp-https://")){
         accessPlayChannelUrl(sender, parser, media_info, file_path, cb);
         return;
     }
+#endif
     // 访问的是文件夹  [AUTO-TRANSLATED:279974bb]
     // Accessing a folder
     if (File::is_dir(file_path)) {
@@ -948,6 +952,7 @@ void HttpResponseInvokerImp::responseUrl(const StrCaseMap &requestHeader,
     (*this)(code, httpHeader, url_body);
 }
 
+#if ENABLE_FERRY
 void HttpResponseInvokerImp::responsePlayChannelUrl(const StrCaseMap &requestHeader,
                                                     const StrCaseMap &responseHeader,
                                                     const std::string &url) const {
@@ -960,6 +965,9 @@ void HttpResponseInvokerImp::responsePlayChannelUrl(const StrCaseMap &requestHea
     auto code = url_body->responseCode();
     (*this)(code, httpHeader, url_body);
 }
+#endif
+
+
 
 HttpResponseInvokerImp::operator bool(){
     return _lambad.operator bool();

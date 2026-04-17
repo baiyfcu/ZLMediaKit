@@ -52,6 +52,7 @@ option(ENABLE_RTPPROXY "Enable RTPPROXY" ON)
 option(ENABLE_SERVER "Enable Server" ON)
 option(ENABLE_SERVER_LIB "Enable server as android static library" OFF)
 option(ENABLE_SRT "Enable SRT" ON)
+option(ENABLE_FERRY "Enable Ferry" ON)
 option(ENABLE_TESTS "Enable Tests" ON)
 option(ENABLE_SCTP "Enable SCTP" ON)
 option(ENABLE_WEBRTC "Enable WebRTC" ON)
@@ -489,6 +490,10 @@ if(ENABLE_SRT)
   update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_SRT)
 endif()
 
+if(ENABLE_FERRY)
+  update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FERRY)
+endif()
+
 # ----------------------------------------------------------------------------
 # Solution folders:
 # ----------------------------------------------------------------------------
@@ -525,6 +530,7 @@ add_subdirectory(3rdpart)
 if(ENABLE_SRT)
   add_subdirectory(srt)
 endif()
+
 message(STATUS "MK_LINK_LIBRARIES1: ${MK_LINK_LIBRARIES}")
 add_subdirectory(src)
 
@@ -539,8 +545,6 @@ endif()
 if(ENABLE_API)
   add_subdirectory(api)
 endif()
-
-add_subdirectory(esfileferry)
 
 ##############################################################################
 

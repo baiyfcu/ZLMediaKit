@@ -1,4 +1,4 @@
-#include "../EsFileFerryPacker.h"
+﻿#include "../EsFileFerryPacker.h"
 #include "../EsFileFerryPlayer.h"
 #include <algorithm>
 #include <cassert>
@@ -12,6 +12,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "Util/File.h"
 
 namespace {
 size_t onHttpWrite(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -73,6 +75,10 @@ bool hasVersionShape(const std::string &body) {
     return body.find("\"code\"") != std::string::npos &&
            body.find("\"msg\"") != std::string::npos &&
            body.find("\"version\"") != std::string::npos;
+}
+
+std::string makeTempFilePath(const std::string &name) {
+    return "./" + name;
 }
 }
 
@@ -195,7 +201,8 @@ int main() {
         }
     };
 
-    const std::string file_path_large = "/tmp/esfileferry_unpacker_stability_large.bin";
+    const std::string file_path_large =
+        makeTempFilePath("esfileferry_unpacker_stability_large.bin");
     std::vector<uint8_t> source_data_large;
     source_data_large.resize(1024 * 256 * 10);
     for (size_t i = 0; i < source_data_large.size(); ++i) {
@@ -209,7 +216,8 @@ int main() {
         ofs.flush();
     }
 
-    const std::string file_path_small = "/tmp/esfileferry_unpacker_stability_small.bin";
+    const std::string file_path_small =
+        makeTempFilePath("esfileferry_unpacker_stability_small.bin");
     std::vector<uint8_t> source_data_small;
     source_data_small.resize(37);
     for (size_t i = 0; i < source_data_small.size(); ++i) {
@@ -223,7 +231,8 @@ int main() {
         ofs.flush();
     }
 
-    const std::string file_path_empty = "/tmp/esfileferry_unpacker_stability_empty.bin";
+    const std::string file_path_empty =
+        makeTempFilePath("esfileferry_unpacker_stability_empty.bin");
     std::vector<uint8_t> source_data_empty;
     {
         std::ofstream ofs(file_path_empty, std::ios::binary);
@@ -321,6 +330,9 @@ int main() {
     unpacker.clearTasks();
     packer.clearTasks();
     packer.setPacketCallback(nullptr);
+    toolkit::File::delete_file(file_path_large, false);
+    toolkit::File::delete_file(file_path_small, false);
+    toolkit::File::delete_file(file_path_empty, false);
     curl_global_cleanup();
 
     return 0;

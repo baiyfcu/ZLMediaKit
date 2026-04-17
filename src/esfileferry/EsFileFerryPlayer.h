@@ -40,6 +40,9 @@ public:
     using OnTaskData = std::function<void(const EsTaskDataEvent &)>;
     using OnError = std::function<void(const std::string &)>;
 
+    EsFileFerryUnPacker() {
+        
+    };
     // 单例入口
     static EsFileFerryUnPacker &Instance();
 
@@ -82,7 +85,7 @@ private:
         uint64_t out_of_order_seq_count = 0;
     };
 
-    EsFileFerryUnPacker() = default;
+
     EsFileFerryUnPacker(const EsFileFerryUnPacker &) = delete;
     EsFileFerryUnPacker &operator=(const EsFileFerryUnPacker &) = delete;
 

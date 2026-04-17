@@ -8,7 +8,9 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <atomic>
 #include <csignal>
+#include <sstream>
 #include <tuple>
 
 #ifndef _WIN32
@@ -19,11 +21,13 @@
 #endif
 
 #include "Util/File.h"
+#include "Util/NoticeCenter.h"
 #include "Util/logger.h"
-#include "Util/onceToken.h"
 #include "Util/util.h"
 #include "Util/uv_errno.h"
 
+#include "Common/config.h"
+#include "esfileferry/EsFileFerryPlayer.h"
 #include "HttpBody.h"
 #include "HttpClient.h"
 #include "HttpClientImp.h"
@@ -33,6 +37,8 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+using HttpHeader = HttpClient::HttpHeader;
 
 namespace {
 class HttpUrlClient : public HttpClientImp {
@@ -86,13 +92,104 @@ private:
 };
 }
 
+#if ENABLE_FERRY
 namespace {
-class PlayChannelUrlClient : public HttpClientImp {
+constexpr const char *kPlayChannelTaskIdHeader = "X-Play-Channel-Task-Id";
+
+std::string trimPlayChannelCopy(std::string value) {
+    size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+bool parsePlayChannelResponseMetaPayload(const std::vector<uint8_t> &payload, int &status_code, HttpHeader &headers) {
+    status_code = 200;
+    headers.clear();
+    std::string text(payload.begin(), payload.end());
+    std::stringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        if (start_with(line, ":status:")) {
+            auto code_text = trimPlayChannelCopy(line.substr(std::string(":status:").size()));
+            if (!code_text.empty()) {
+                status_code = atoi(code_text.c_str());
+                if (status_code <= 0) {
+                    status_code = 200;
+                }
+            }
+            continue;
+        }
+        auto pos = line.find(':');
+        if (pos == std::string::npos) {
+            continue;
+        }
+        auto key = trimPlayChannelCopy(line.substr(0, pos));
+        auto value = trimPlayChannelCopy(line.substr(pos + 1));
+        if (!key.empty()) {
+            headers[key] = value;
+        }
+    }
+    return !headers.empty() || status_code != 200;
+}
+
+void sanitizePlayChannelResponseHeaders(HttpHeader &headers) {
+    for (auto it = headers.begin(); it != headers.end();) {
+        auto key_lower = strToLower(it->first.data());
+        if (key_lower == "connection" || key_lower == "keep-alive" || key_lower == "proxy-connection" ||
+            key_lower == "te" || key_lower == "trailer" || key_lower == "upgrade" ||
+            key_lower == "transfer-encoding") {
+            it = headers.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
+std::string normalizePlayChannelSourceUrl(const std::string &url) {
+    if (start_with(url, "rtp-http://")) {
+        return "http://" + url.substr(sizeof("rtp-http://") - 1);
+    }
+    if (start_with(url, "rtp-https://")) {
+        return "https://" + url.substr(sizeof("rtp-https://") - 1);
+    }
+    return url;
+}
+
+std::string resolvePlayChannelScheme(const std::string &url) {
+    auto pos = url.find("://");
+    if (pos == std::string::npos) {
+        return "";
+    }
+    return url.substr(0, pos);
+}
+
+std::string makePlayChannelTaskId() {
+    static atomic<uint64_t> s_task_index{0};
+    return StrPrinter << "play-channel-" << ++s_task_index << "-" << getCurrentMillisecond();
+}
+
+class PlayChannelClientImp : public std::enable_shared_from_this<PlayChannelClientImp> {
 public:
-    using Ptr = std::shared_ptr<PlayChannelUrlClient>;
+    using Ptr = std::shared_ptr<PlayChannelClientImp>;
     using HeaderCB = std::function<void(int, const HttpHeader &)>;
     using BodyCB = std::function<void(const Buffer::Ptr &)>;
     using CompleteCB = std::function<void(const SockException &)>;
+
+    ~PlayChannelClientImp() {
+        cleanupTask();
+    }
 
     void setHeaderCB(HeaderCB cb) {
         _on_header = std::move(cb);
@@ -107,36 +204,245 @@ public:
     }
 
     void setClientPoller(const EventPoller::Ptr &poller) {
-        setPoller(poller);
+        _poller = poller;
     }
 
-protected:
-    void onResponseHeader(const std::string &status, const HttpHeader &headers) override {
+    void setMethod(std::string method) {
+        _method = std::move(method);
+    }
+
+    void setCompleteTimeout(uint64_t timeout_ms) {
+        _timeout_ms = timeout_ms;
+    }
+
+    void start(const std::string &url, const StrCaseMap &request_header) {
+        if (!_poller) {
+            _poller = EventPollerPool::Instance().getPoller(false);
+        }
+        _ctx.url = url;
+        _ctx.source_url = normalizePlayChannelSourceUrl(url);
+        _ctx.scheme = resolvePlayChannelScheme(url);
+        _ctx.method = _method.empty() ? "GET" : _method;
+        _ctx.request_header = request_header;
+        _ctx.timeout_ms = _timeout_ms;
+        _ctx.task_id = makePlayChannelTaskId();
+        _task_id = _ctx.task_id;
+        InfoL << "play channel start register callback, task_id:" << _task_id
+              << " url:" << _ctx.url
+              << " source_url:" << _ctx.source_url
+              << " timeout_ms:" << _ctx.timeout_ms;
+
+        auto &unpacker = EsFileFerryUnPacker::Instance();
+        std::weak_ptr<PlayChannelClientImp> weak_self = shared_from_this();
+        unpacker.setTaskCallback(_task_id, [weak_self](const EsTaskDataEvent &event) {
+            auto self = weak_self.lock();
+            if (!self || !self->_poller) {
+                WarnL << "play channel task callback dropped, task_id:" << event.task_id
+                      << " has_self:" << !!self
+                      << " has_poller:" << (self && self->_poller);
+                return;
+            }
+            //确保发送的数据没有问题，此处添加测试代码实现写文件，文件名是task_id + .mp4组成
+            if(event.type == EsFilePacketType::FileInfo) {
+                if (self->_fp_test == nullptr)
+                    self->_fp_test = fopen(("./tem/" + self->_task_id + ".mp4").c_str(), "ab");
+            }else if (event.type == EsFilePacketType::FileChunk) {
+                // 写入文件
+                if(self->_fp_test) {
+                    fwrite(event.payload.data(), 1, event.payload.size(), self->_fp_test);
+                }
+            }else if (event.type == EsFilePacketType::FileEnd) {
+                // 处理任务状态
+                if(self->_fp_test) {
+                    fclose(self->_fp_test);
+                    self->_fp_test = nullptr;
+                }
+            }
+
+            self->_poller->async([self, event]() { self->handleTaskEvent(event); }, false);
+        });
+        _task_registered = true;
+        InfoL << "play channel emit add event, task_id:" << _task_id
+              << " source_url:" << _ctx.source_url;
+        NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("add"));
+        scheduleTimeout();
+    }
+
+private:
+    HttpHeader buildDebugResponseHeader(HttpHeader header) const {
+        if (!_task_id.empty()) {
+            header[kPlayChannelTaskIdHeader] = _task_id;
+        }
+        return header;
+    }
+
+    void scheduleTimeout() {
+        if (!_poller || !_timeout_ms) {
+            return;
+        }
+        std::weak_ptr<PlayChannelClientImp> weak_self = shared_from_this();
+        _poller->doDelayTask(_timeout_ms, [weak_self]() -> uint64_t {
+            auto self = weak_self.lock();
+            if (!self || self->_completed) {
+                return 0;
+            }
+            self->emitFailure(504, "play channel request timeout", SockException(Err_timeout, "play channel request timeout"));
+            return 0;
+        });
+    }
+
+    void handleTaskEvent(const EsTaskDataEvent &event) {
+        if (_completed || event.task_id != _task_id) {
+            return;
+        }
+        switch (event.type) {
+        case EsFilePacketType::TaskStatus: {
+            std::string message = event.status.empty() ? "play channel task status error" : event.status;
+            emitFailure(503, message, SockException(Err_other, message));
+            break;
+        }
+        case EsFilePacketType::FileInfo: {
+            int response_code = 200;
+            HttpHeader response_header;
+            if ((event.flags & kEsFileFlagFileInfoHasHttpResponseHeaders) != 0 && !event.payload.empty()) {
+                parsePlayChannelResponseMetaPayload(event.payload, response_code, response_header);
+                sanitizePlayChannelResponseHeaders(response_header);
+            }
+            ensureHeaderReady(response_code, response_header);
+            if (event.completed) {
+                finish(SockException(Err_success, "play channel complete"));
+            }
+            break;
+        }
+        case EsFilePacketType::FileChunk:
+        case EsFilePacketType::FileEnd: {
+            ensureHeaderReady(_response_code, _response_header);
+            emitPayload(event.payload);
+            if (event.type == EsFilePacketType::FileEnd || event.completed) {
+                finish(SockException(Err_success, "play channel complete"));
+            }
+            break;
+        }
+        default:
+            if (event.completed) {
+                ensureHeaderReady(_response_code, _response_header);
+                finish(SockException(Err_success, "play channel complete"));
+            }
+            break;
+        }
+    }
+
+    void ensureHeaderReady(int code, const HttpHeader &header) {
+        if (_header_emitted) {
+            return;
+        }
+        _response_code = code > 0 ? code : 200;
+        _response_header = buildDebugResponseHeader(header);
+        _header_emitted = true;
         if (_on_header) {
-            _on_header(atoi(status.data()), headers);
+            _on_header(_response_code, _response_header);
+        }
+        flushPendingBody();
+    }
+
+    void emitPayload(const std::vector<uint8_t> &payload) {
+        if (payload.empty()) {
+            return;
+        }
+        auto raw = BufferRaw::create();
+        raw->assign((const char *)payload.data(), payload.size());
+        emitBody(raw);
+    }
+
+    void emitPayload(const std::string &payload) {
+        if (payload.empty()) {
+            return;
+        }
+        auto raw = BufferRaw::create();
+        raw->assign(payload.data(), payload.size());
+        emitBody(raw);
+    }
+
+    void emitBody(const Buffer::Ptr &buf) {
+        if (!buf) {
+            return;
+        }
+        if (!_header_emitted) {
+            _pending_body.emplace_back(buf);
+            return;
+        }
+        if (_on_body) {
+            _on_body(buf);
         }
     }
 
-    void onResponseBody(const char *buf, size_t size) override {
-        if (_on_body && size) {
-            auto raw = BufferRaw::create();
-            raw->assign(buf, size);
-            _on_body(std::move(raw));
+    void flushPendingBody() {
+        if (!_header_emitted || _pending_body.empty()) {
+            return;
+        }
+        auto pending = std::move(_pending_body);
+        _pending_body.clear();
+        if (!_on_body) {
+            return;
+        }
+        for (auto &buf : pending) {
+            _on_body(buf);
         }
     }
 
-    void onResponseCompleted(const SockException &ex) override {
+    void emitFailure(int http_code, const std::string &message, const SockException &ex) {
+        if (_completed) {
+            return;
+        }
+        HttpHeader header;
+        if (!message.empty()) {
+            header["Content-Type"] = "text/plain; charset=utf-8";
+        }
+        ensureHeaderReady(http_code, header);
+        emitPayload(message);
+        finish(ex);
+    }
+
+    void finish(const SockException &ex) {
+        if (_completed.exchange(true)) {
+            return;
+        }
+        cleanupTask();
         if (_on_complete) {
             _on_complete(ex);
         }
     }
 
-private:
+    void cleanupTask() {
+        if (!_task_registered.exchange(false) || _task_id.empty()) {
+            return;
+        }
+        InfoL << "play channel cleanup task, task_id:" << _task_id
+              << " completed:" << _completed.load()
+              << " header_emitted:" << _header_emitted;
+        NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("del"));
+        EsFileFerryUnPacker::Instance().removeTask(_task_id);
+    }
+
     HeaderCB _on_header;
     BodyCB _on_body;
     CompleteCB _on_complete;
+    EventPoller::Ptr _poller;
+    PlayChannelRequestContext _ctx;
+    std::string _method = "GET";
+    uint64_t _timeout_ms = 30 * 1000;
+    std::string _task_id;
+    int _response_code = 200;
+    HttpHeader _response_header;
+    bool _header_emitted = false;
+    std::deque<Buffer::Ptr> _pending_body;
+    std::atomic_bool _task_registered{false};
+    std::atomic_bool _completed{false};
+
+    FILE * _fp_test = nullptr;
 };
 }
+#endif
 
 HttpStringBody::HttpStringBody(string str) {
     _str = std::move(str);
@@ -421,11 +727,6 @@ HttpUrlBody::HttpUrlBody(const std::string &url, const StrCaseMap &request_heade
     client->setClientPoller(EventPollerPool::Instance().getPoller(false));
     client->setMethod("GET");
     client->setCompleteTimeout(30 * 1000);
-    for (auto &pr : _request_header) {
-        if (pr.first == "Range" || pr.first == "User-Agent" || pr.first == "Accept" || pr.first == "Authorization") {
-            client->addHeader(pr.first, pr.second, true);
-        }
-    }
     client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
         if (weak_alive.expired()) {
             return;
@@ -590,6 +891,7 @@ bool HttpUrlBody::requestSuccess() const {
     return _success;
 }
 
+#if ENABLE_FERRY
 // play-channel-url
 PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url, const StrCaseMap &request_header) {
     _url = url;
@@ -597,16 +899,11 @@ PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url, const StrCaseMap 
     _alive_token = std::make_shared<char>(0);
     std::weak_ptr<void> weak_alive = _alive_token;
     auto self = this;
-    auto client = std::make_shared<PlayChannelUrlClient>();
+    auto client = std::make_shared<PlayChannelClientImp>();
     _client_holder = client;
     client->setClientPoller(EventPollerPool::Instance().getPoller(false));
     client->setMethod("GET");
     client->setCompleteTimeout(30 * 1000);
-    for (auto &pr : _request_header) {
-        if (pr.first == "Range" || pr.first == "User-Agent" || pr.first == "Accept" || pr.first == "Authorization") {
-            client->addHeader(pr.first, pr.second, true);
-        }
-    }
     client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
         if (weak_alive.expired()) {
             return;
@@ -683,7 +980,7 @@ PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url, const StrCaseMap 
         }
     });
     client->setClientPoller(EventPollerPool::Instance().getPoller(false));
-    client->sendRequest(_url);
+    client->start(_url, _request_header);
 }
 
 void PlayChannelUrlBody::setHeaderReadyCB(HeaderReadyCB cb) {
@@ -770,6 +1067,7 @@ bool PlayChannelUrlBody::requestSuccess() const {
     std::lock_guard<std::mutex> lck(_mtx);
     return _success;
 }
+#endif
 //////////////////////////////////////////////////////////////////
 
 HttpMultiFormBody::HttpMultiFormBody(const HttpArgs &args, const string &filePath, const string &boundary) {

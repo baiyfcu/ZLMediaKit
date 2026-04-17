@@ -85,6 +85,34 @@ public:
     std::vector<EsFilePackTaskInfo> getTaskInfos() const;
     // 获取最近一次错误信息
     std::string getLastError() const;
+    std::vector<std::string> testPickFairRound(const std::vector<std::string> &active_ids) {
+        return pickFairRound(active_ids);
+    }
+
+    uint64_t testComputeTaskQuota(uint64_t total_payload_quota_bytes, size_t active_count, size_t index) const {
+        return computeTaskQuota(total_payload_quota_bytes, active_count, index);
+    }
+
+    uint64_t testGetTotalHttpBufferedBytes() const {
+        std::lock_guard<std::mutex> lock(_mtx);
+        return _total_http_buffered_bytes;
+    }
+
+    static constexpr size_t testDefaultHttpFetchConcurrency() {
+        return kDefaultHttpFetchConcurrency;
+    }
+
+    static constexpr uint64_t testDefaultMaxHttpBufferedBytesPerTask() {
+        return kDefaultMaxHttpBufferedBytesPerTask;
+    }
+
+    static constexpr uint64_t testDefaultMaxHttpBufferedBytes() {
+        return kDefaultMaxHttpBufferedBytes;
+    }
+
+    static constexpr size_t testDefaultHttpBufferChunkBytes() {
+        return kDefaultHttpBufferChunkBytes;
+    }
 
 private:
     struct HttpChunkBuffer {

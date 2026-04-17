@@ -1,6 +1,4 @@
-#define private public
-#include "../EsFileFerryPacker.h"
-#undef private
+﻿#include "../EsFileFerryPacker.h"
 #include "../EsFilePayloadProtocol.h"
 #include <algorithm>
 #include <atomic>
@@ -18,6 +16,7 @@
 #include <vector>
 
 #include "Util/logger.h"
+#include "Util/File.h"
 #include "Network/TcpServer.h"
 #include "Http/HttpSession.h"
 #include "Util/NoticeCenter.h"
@@ -90,6 +89,14 @@ void writeFile(const std::string &path, char fill, size_t size) {
     std::string payload(size, fill);
     ofs.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     ofs.flush();
+}
+
+std::string makeTempFilePath() {
+    const auto unique_name =
+        "esfileferry_packer_test_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+        ".bin";
+    return "./" + unique_name;
 }
 }
 
@@ -267,20 +274,20 @@ int main() {
     clearCollectedPackets();
     const std::vector<std::string> fair_active_ids = {
         "fair_task_3", "fair_task_1", "fair_task_2"};
-    const std::vector<std::string> fair_round_1 = packer.pickFairRound(fair_active_ids);
-    const std::vector<std::string> fair_round_2 = packer.pickFairRound(fair_active_ids);
-    const std::vector<std::string> fair_round_3 = packer.pickFairRound(fair_active_ids);
-    const std::vector<std::string> fair_round_4 = packer.pickFairRound(fair_active_ids);
+    const std::vector<std::string> fair_round_1 = packer.testPickFairRound(fair_active_ids);
+    const std::vector<std::string> fair_round_2 = packer.testPickFairRound(fair_active_ids);
+    const std::vector<std::string> fair_round_3 = packer.testPickFairRound(fair_active_ids);
+    const std::vector<std::string> fair_round_4 = packer.testPickFairRound(fair_active_ids);
     assert((fair_round_1 == std::vector<std::string>{"fair_task_1", "fair_task_2", "fair_task_3"}));
     assert((fair_round_2 == std::vector<std::string>{"fair_task_2", "fair_task_3", "fair_task_1"}));
     assert((fair_round_3 == std::vector<std::string>{"fair_task_3", "fair_task_1", "fair_task_2"}));
     assert((fair_round_4 == std::vector<std::string>{"fair_task_1", "fair_task_2", "fair_task_3"}));
-    assert(packer.computeTaskQuota(64 * 3, 3, 0) == 64);
-    assert(packer.computeTaskQuota(64 * 3, 3, 1) == 64);
-    assert(packer.computeTaskQuota(64 * 3, 3, 2) == 64);
-    assert(packer.computeTaskQuota(64 * 3 + 2, 3, 0) == 65);
-    assert(packer.computeTaskQuota(64 * 3 + 2, 3, 1) == 65);
-    assert(packer.computeTaskQuota(64 * 3 + 2, 3, 2) == 64);
+    assert(packer.testComputeTaskQuota(64 * 3, 3, 0) == 64);
+    assert(packer.testComputeTaskQuota(64 * 3, 3, 1) == 64);
+    assert(packer.testComputeTaskQuota(64 * 3, 3, 2) == 64);
+    assert(packer.testComputeTaskQuota(64 * 3 + 2, 3, 0) == 65);
+    assert(packer.testComputeTaskQuota(64 * 3 + 2, 3, 1) == 65);
+    assert(packer.testComputeTaskQuota(64 * 3 + 2, 3, 2) == 64);
 
     packer.clearTasks();
     clearCollectedPackets();
@@ -354,18 +361,16 @@ int main() {
     uint64_t sim_max_total_buffered_bytes = 0;
     const bool sim_http_completed = waitUntil(std::chrono::milliseconds(60000), [&]() {
         {
-            std::lock_guard<std::mutex> lock(packer._mtx);
             sim_max_total_buffered_bytes = std::max(
-                sim_max_total_buffered_bytes, packer._total_http_buffered_bytes);
+                sim_max_total_buffered_bytes, packer.testGetTotalHttpBufferedBytes());
         }
         return sim_http_request_count.load() == 50 &&
                sim_http_post_count.load() == 15 &&
                sim_chunk_packet_count.load() > 0;
     }, std::chrono::milliseconds(20));
     {
-        std::lock_guard<std::mutex> lock(packer._mtx);
         sim_max_total_buffered_bytes = std::max(
-            sim_max_total_buffered_bytes, packer._total_http_buffered_bytes);
+            sim_max_total_buffered_bytes, packer.testGetTotalHttpBufferedBytes());
     }
     assert(sim_http_completed);
     const bool sim_infos_ready = waitUntil(std::chrono::milliseconds(60000), [&]() {
@@ -384,12 +389,12 @@ int main() {
     assert(sim_http_request_count.load() == 50);
     assert(sim_http_post_count.load() == 15);
     assert(sim_http_max_active.load() <=
-           static_cast<int>(EsFileFerryPacker::kDefaultHttpFetchConcurrency));
+           static_cast<int>(EsFileFerryPacker::testDefaultHttpFetchConcurrency()));
     assert(sim_max_total_buffered_bytes >
-           EsFileFerryPacker::kDefaultMaxHttpBufferedBytesPerTask);
+           EsFileFerryPacker::testDefaultMaxHttpBufferedBytesPerTask());
     assert(sim_max_total_buffered_bytes <=
-           EsFileFerryPacker::kDefaultMaxHttpBufferedBytes +
-               EsFileFerryPacker::kDefaultHttpBufferChunkBytes);
+           EsFileFerryPacker::testDefaultMaxHttpBufferedBytes() +
+               EsFileFerryPacker::testDefaultHttpBufferChunkBytes());
     assert(sim_chunk_packet_count.load() > 0);
     {
         auto infos = packer.getTaskInfos();
@@ -418,7 +423,7 @@ int main() {
     packer.setMaxHttpFetchConcurrency(0);
     clearCollectedPackets();
 
-    const std::string tmp_file = "/tmp/esfileferry_packer_test.bin";
+    const std::string tmp_file = makeTempFilePath();
     writeFile(tmp_file, 'x', 400);
 
     assert(!packer.addTask("", tmp_file));
@@ -700,6 +705,6 @@ int main() {
 
     packer.clearTasks();
     assert(packer.getTaskInfos().empty());
-    std::remove(tmp_file.c_str());
+    File::delete_file(tmp_file, false);
     return 0;
 }

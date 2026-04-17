@@ -20,6 +20,7 @@
 namespace mediakit {
 
 class ProtocolOption;
+struct PlayChannelRequestContext;
 
 // 加载配置文件，如果配置文件不存在，那么会导出默认配置并生成配置文件  [AUTO-TRANSLATED:16d0b898]
 // Load the configuration file. If the configuration file does not exist, the default configuration will be exported and the configuration file will be generated.
@@ -132,6 +133,10 @@ extern ZLMEDIAKIT_API const std::string kBroadcastSendRtpStopped;
 // Update configuration file event broadcast. This broadcast will be triggered after the loadIniConfig function loads the configuration file successfully.
 extern ZLMEDIAKIT_API const std::string kBroadcastReloadConfig;
 #define BroadcastReloadConfigArgs void
+
+// PlayChannel 任务事件广播，便于业务层同步 add/del 等动作
+extern ZLMEDIAKIT_API const std::string kBroadcastPlayChannelTaskEvent;
+#define BroadcastPlayChannelTaskEventArgs const PlayChannelRequestContext &ctx, const std::string &action
 
 // rtp server 超时  [AUTO-TRANSLATED:a65573fd]
 // Rtp server timeout

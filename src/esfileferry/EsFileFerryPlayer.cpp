@@ -92,6 +92,7 @@ void EsFileFerryUnPacker::setTaskCallback(const std::string &task_id,
   if (task_id.empty()) {
     return;
   }
+  DebugL << "set task callback, task_id:" << task_id << " cb:" << (void *)&cb << " this:" << this;
   if (cb) {
     _task_callbacks[task_id] = std::move(cb);
     if (_task_states.find(task_id) == _task_states.end()) {
@@ -253,6 +254,7 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet) {
     std::lock_guard<std::mutex> lock(_mtx);
     auto it = _task_callbacks.find(packet.task_id);
     if (it == _task_callbacks.end()) {
+      ErrorL << "task_id not found, task_id:" << packet.task_id << " this:" << this;
       return;
     }
     on_task_data = it->second;

@@ -12,10 +12,12 @@
 #define ZLMEDIAKIT_FILEREADER_H
 
 #include <stdlib.h>
-#include <memory>
-#include <deque>
-#include <mutex>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include "Network/Buffer.h"
 #include "Util/ResourcePool.h"
 #include "Util/logger.h"
@@ -27,6 +29,16 @@
 #endif //MIN
 
 namespace mediakit {
+
+struct PlayChannelRequestContext {
+    std::string url;
+    std::string source_url;
+    std::string scheme;
+    std::string method = "GET";
+    StrCaseMap request_header;
+    std::string task_id;
+    uint64_t timeout_ms = 30 * 1000;
+};
 
 /**
  * http content部分基类定义
@@ -214,6 +226,7 @@ private:
     mutable std::condition_variable _header_cv;
 };
 
+#if ENABLE_FERRY
 class PlayChannelUrlBody : public HttpBody {
 public:
     using Ptr = std::shared_ptr<PlayChannelUrlBody>;
@@ -250,6 +263,7 @@ private:
     HeaderReadyCB _header_ready_cb;
     mutable std::condition_variable _header_cv;
 };
+#endif
 
 class HttpArgs;
 

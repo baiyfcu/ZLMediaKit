@@ -53,6 +53,7 @@ ZLMEDIAKIT_API const string kBroadcastMediaPlayed = "kBroadcastMediaPlayed";
 ZLMEDIAKIT_API const string kBroadcastMediaPublish = "kBroadcastMediaPublish";
 ZLMEDIAKIT_API const string kBroadcastFlowReport = "kBroadcastFlowReport";
 ZLMEDIAKIT_API const string kBroadcastReloadConfig = "kBroadcastReloadConfig";
+ZLMEDIAKIT_API const string kBroadcastPlayChannelTaskEvent = "kBroadcastPlayChannelTaskEvent";
 ZLMEDIAKIT_API const string kBroadcastShellLogin = "kBroadcastShellLogin";
 ZLMEDIAKIT_API const string kBroadcastNotFoundStream = "kBroadcastNotFoundStream";
 ZLMEDIAKIT_API const string kBroadcastStreamNoneReader = "kBroadcastStreamNoneReader";

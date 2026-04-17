@@ -34,6 +34,14 @@ if(NOT ENABLE_SRT)
     list(REMOVE_ITEM MediaKit_SRC_LIST ${SRT_SRC_LIST})
 endif()
 
+#if(NOT ENABLE_FERRY)
+#    file(GLOB FERRY_SRC_LIST
+#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.c
+#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.cpp
+#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.h)
+#    list(REMOVE_ITEM MediaKit_SRC_LIST ${FERRY_SRC_LIST})
+#endif()
+
 if(USE_SOLUTION_FOLDERS AND (NOT GROUP_BY_EXPLORER))
   # 在 IDE 中对文件进行分组, 源文件和头文件分开
   set_file_group("${CMAKE_CURRENT_SOURCE_DIR}" ${MediaKit_SRC_LIST})

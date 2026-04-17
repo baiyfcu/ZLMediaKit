@@ -35,7 +35,9 @@ public:
 
     void responseFile(const StrCaseMap &requestHeader,const StrCaseMap &responseHeader,const std::string &file, bool use_mmap = true, bool is_path = true) const;
     void responseUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
+#if ENABLE_FERRY
     void responsePlayChannelUrl(const StrCaseMap &requestHeader, const StrCaseMap &responseHeader, const std::string &url) const;
+#endif
 	operator bool();
 private:
     HttpResponseInvokerLambda0 _lambad;
