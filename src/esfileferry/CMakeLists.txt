@@ -17,22 +17,9 @@ endif()
 target_include_directories(esfileferry
     PUBLIC
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../src>"
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../3rdpart/ZLToolKit/src>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../3rdpart/ZLToolKit/src>"
 )
 
 update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FERRY)
 #update_cached_list(MK_LINK_LIBRARIES ZLMediaKit::EsFileFerry)
-
-if(ESFILEFERRY_BUILD_TESTS)
-    find_package(CURL REQUIRED)
-    add_executable(esfileferry_packer_tests tests/test_packer.cpp)
-    target_sources(esfileferry_packer_tests PRIVATE $<TARGET_OBJECTS:esfileferry>)
-    target_link_libraries(esfileferry_packer_tests PRIVATE ext-codec mk_api)
-    add_executable(esfileferry_http_fetcher_tests tests/test_http_fetcher.cpp)
-    target_sources(esfileferry_http_fetcher_tests PRIVATE $<TARGET_OBJECTS:esfileferry>)
-    target_link_libraries(esfileferry_http_fetcher_tests PRIVATE ext-codec mk_api)
-    add_executable(esfileferry_unpacker_tests tests/test_unpacker.cpp)
-    target_sources(esfileferry_unpacker_tests PRIVATE $<TARGET_OBJECTS:esfileferry>)
-    target_link_libraries(esfileferry_unpacker_tests PRIVATE ext-codec mk_api CURL::libcurl)
-endif()

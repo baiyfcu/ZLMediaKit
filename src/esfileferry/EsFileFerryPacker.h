@@ -4,7 +4,7 @@
 #include "EsFilePayloadProtocol.h"
 #include "Poller/Timer.h"
 #include "Util/ResourcePool.h"
-#include "Util/util.h"
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -38,6 +38,39 @@ struct EsFilePackTaskInfo {
     bool completed = false;
 };
 
+enum class EsFileTaskType {
+    HttpApiRequest = 0,
+    HttpMp4Vod = 1,
+    HttpResourceDownload = 2,
+};
+
+enum class EsFileTaskPriority {
+    High = 0,
+    Medium = 1,
+    Low = 2,
+};
+
+struct EsFileGlobalOptions {
+    // 单个 FileChunk 的默认业务分片大小。
+    // 取 128KB：兼顾多路并发时的平滑度与包数量。
+    size_t packet_chunk_bytes = 128 * 1024;
+    // 单轮调度的默认总发送预算。
+    // 取 8MB：兼顾 API/MP4 优先发送与下载类任务保底吞吐。
+    uint64_t scheduler_tick_budget_bytes = 8 * 1024 * 1024;
+    // HTTP 回源的默认最大并发窗口。
+    // 取 6：适合作为 50 路以内混合任务的默认保护值。
+    size_t http_pull_concurrency_limit = 6;
+    // HTTP 回源的默认全局缓冲上限。
+    // 取 24MB：与默认并发窗口一起控制瞬时内存占用。
+    uint64_t http_pull_total_buffer_limit_bytes = 24 * 1024 * 1024;
+    // MP4 点播任务的默认拉取上限。
+    // 取 3MB/s：降低上层缓存积压风险，同时保持点播平滑性。
+    uint64_t mp4_vod_default_pull_rate_bps = 3 * 1024 * 1024;
+    // 资源下载任务的默认输出上限。
+    // 取 10MB/s：允许较高吞吐，但避免抢占 API/MP4。
+    uint64_t resource_download_default_emit_rate_bps = 10 * 1024 * 1024;
+};
+
 class EsFileFerryPacker {
 public:
     static constexpr const char *kBootstrapTaskId = "__bootstrap__";
@@ -66,6 +99,8 @@ public:
     // 设置 HTTP 全局缓冲上限，0 表示恢复默认值。
     // 用法：与单任务缓冲上限、HTTP 并发数共同决定进程的瞬时内存占用。
     void setMaxTotalHttpBufferedBytes(uint64_t max_buffered_bytes);
+    // 批量设置全局保护参数。
+    void setGlobalOptions(const EsFileGlobalOptions &opts);
 
     // 设置发包回调
     void setPacketCallback(PacketCallback cb);
@@ -86,7 +121,7 @@ public:
     // 获取最近一次错误信息
     std::string getLastError() const;
     std::vector<std::string> testPickFairRound(const std::vector<std::string> &active_ids) {
-        return pickFairRound(active_ids);
+        return pickFairRound(active_ids, EsFileTaskPriority::High);
     }
 
     uint64_t testComputeTaskQuota(uint64_t total_payload_quota_bytes, size_t active_count, size_t index) const {
@@ -95,7 +130,7 @@ public:
 
     uint64_t testGetTotalHttpBufferedBytes() const {
         std::lock_guard<std::mutex> lock(_mtx);
-        return _total_http_buffered_bytes;
+        return _http_runtime.total_buffered_bytes;
     }
 
     static constexpr size_t testDefaultHttpFetchConcurrency() {
@@ -112,6 +147,32 @@ public:
 
     static constexpr size_t testDefaultHttpBufferChunkBytes() {
         return kDefaultHttpBufferChunkBytes;
+    }
+
+    EsFileTaskType testGetTaskType(const std::string &task_id) const {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        return it != _task_registry.tasks.end() ? it->second.control.task_type
+                                  : EsFileTaskType::HttpResourceDownload;
+    }
+
+    EsFileTaskPriority testGetTaskPriority(const std::string &task_id) const {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        return it != _task_registry.tasks.end() ? it->second.control.priority
+                                  : EsFileTaskPriority::Low;
+    }
+
+    uint64_t testGetTaskFetchRateBps(const std::string &task_id) const {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        return it != _task_registry.tasks.end() ? it->second.control.fetch_bucket.rate_bps : 0;
+    }
+
+    uint64_t testGetTaskEmitRateBps(const std::string &task_id) const {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        return it != _task_registry.tasks.end() ? it->second.control.emit_bucket.rate_bps : 0;
     }
 
 private:
@@ -137,7 +198,23 @@ private:
         std::shared_ptr<std::condition_variable> cv;
     };
 
-    struct TaskHttpState {
+    struct TokenBucket {
+        uint64_t rate_bps = 0;
+        uint64_t burst_bytes = 0;
+        uint64_t tokens = 0;
+        std::chrono::steady_clock::time_point last_refill;
+    };
+
+    struct TaskControlState {
+        EsFileTaskType task_type = EsFileTaskType::HttpResourceDownload;
+        EsFileTaskPriority priority = EsFileTaskPriority::Low;
+        uint64_t max_buffered_bytes = 0;
+        uint64_t resume_buffered_bytes = 0;
+        TokenBucket fetch_bucket;
+        TokenBucket emit_bucket;
+    };
+
+    struct TaskHttpRuntimeState {
         bool source = false;
         bool queued = false;
         bool active = false;
@@ -151,6 +228,22 @@ private:
         HttpHeaders request_headers;
         std::string request_body;
         std::vector<uint8_t> response_meta_payload;
+        TaskHttpBufferState buffer;
+    };
+
+    struct TaskSourceState {
+        // 数据源路径（本地路径或 URL）
+        std::string file_path;
+        // 文件名
+        std::string file_name;
+        // 文件总大小
+        uint64_t file_size = 0;
+        // 是否为内存分片模式
+        bool memory_mode = false;
+        // 内存模式下的完整数据
+        std::vector<uint8_t> memory_payload;
+        // 文件流句柄
+        std::shared_ptr<std::ifstream> stream;
     };
 
     // TaskState 只描述源数据读取与协议分片发送状态。
@@ -158,26 +251,43 @@ private:
     struct TaskState {
         // 任务 ID
         std::string task_id;
-        // 数据源路径（本地路径或 URL）
-        std::string file_path;
-        // 文件名
-        std::string file_name;
-        // 文件总大小
-        uint64_t file_size = 0;
         // 任务代际版本
         uint64_t generation = 0;
-        // 是否为内存分片模式
-        bool memory_mode = false;
-        // 内存模式下的完整数据
-        std::vector<uint8_t> memory_payload;
-        // 文件流句柄
-        std::shared_ptr<std::ifstream> stream;
+        // 源数据态
+        TaskSourceState source;
         // 发送态
         TaskSendState send;
         // HTTP 拉取态
-        TaskHttpState http;
-        // HTTP 缓冲态
-        TaskHttpBufferState http_buffer;
+        TaskHttpRuntimeState http;
+        // 任务级流控态
+        TaskControlState control;
+    };
+
+    struct TaskRegistryState {
+        std::unordered_map<std::string, TaskState> tasks;
+        uint64_t generation = 0;
+        std::array<size_t, 3> priority_rr_cursor{{0, 0, 0}};
+    };
+
+    struct HttpFetchRuntimeState {
+        std::deque<std::pair<std::string, uint64_t>> pending_fetches;
+        size_t active_fetches = 0;
+        uint64_t total_buffered_bytes = 0;
+    };
+
+    struct PacketRuntimeState {
+        PacketCallback callback;
+        std::string last_error;
+        bool ts_started = false;
+        std::chrono::steady_clock::time_point ts_start_time;
+        uint32_t last_ts_ms = 0;
+        bool bootstrap_due = false;
+        toolkit::Timer::Ptr bootstrap_timer;
+        toolkit::Timer::Ptr pace_timer;
+        std::thread packet_thread;
+        bool packet_thread_running = false;
+        bool packet_thread_exit = false;
+        toolkit::semaphore packet_sem;
     };
 
     EsFileFerryPacker(const EsFileFerryPacker &) = delete;
@@ -185,11 +295,11 @@ private:
 
     // 视频专网默认单包 payload 大小。
     // 作用：决定本地文件、视频 HTTP 下载、GET/POST 大 JSON 响应在协议层拆成多大的 FileChunk。
-    // 默认取 512KB：兼顾 50 路以上并发时的吞吐、调度公平性与包数。
-    static constexpr size_t kDefaultPacketChunkBytes = 512 * 1024;
+    // 默认取 128KB：兼顾多路并发下的平滑度、吞吐与包数量。
+    static constexpr size_t kDefaultPacketChunkBytes = 128 * 1024;
     // HTTP 拉取侧内部缓冲块大小。
     // 作用：视频流、大 JSON、普通文件等 HTTP 响应写入内部缓冲队列时使用的块尺寸。
-    // 默认与协议分片同为 512KB，减少额外拷贝和碎片。
+    // 默认取 512KB：作为内部拉取缓冲块，减少额外拷贝和碎片。
     static constexpr size_t kDefaultHttpBufferChunkBytes = 512 * 1024;
     // 单个 HTTP 任务允许累计的最大缓冲块数。
     // 作用：发送端跟不上时，对单任务施加背压，避免某一路长期占满内存。
@@ -211,10 +321,25 @@ private:
     // Bootstrap 发送间隔。
     // 作用：在建立传输后周期性发送引导 NAL，帮助接收端快速进入可解码态。
     static constexpr uint32_t kDefaultBootstrapIntervalMs = 2000;
+    // 速率整形的基础唤醒间隔，帮助令牌桶按较平滑的节拍恢复发送。
+    static constexpr uint32_t kDefaultPaceIntervalMs = 20;
     // 视频专网每个 tick 的默认全局发送预算。
     // 作用：限制单轮调度的总出流量，保障多路公平轮转而不是被大视频或大 JSON 长时间独占。
-    // 默认取 12MB：适合作为 50 路以上并发场景的吞吐/公平折中值。
-    static constexpr uint64_t kDefaultTickPayloadBudgetBytes = 12 * 1024 * 1024;
+    // 默认取 8MB：适合作为 API/MP4 优先、下载保底场景的吞吐/公平折中值。
+    static constexpr uint64_t kDefaultTickPayloadBudgetBytes = 8 * 1024 * 1024;
+    // 三档优先级默认预算权重：高优 API，中优 MP4 点播，低优下载。
+    static constexpr uint32_t kHighPriorityWeight = 50;
+    static constexpr uint32_t kMediumPriorityWeight = 35;
+    static constexpr uint32_t kLowPriorityWeight = 15;
+    // 三类任务的默认单任务缓冲上限。
+    static constexpr uint64_t kDefaultApiBufferedBytes = 512 * 1024;
+    static constexpr uint64_t kDefaultMp4BufferedBytes = 1024 * 1024;
+    static constexpr uint64_t kDefaultDownloadBufferedBytes =
+        kDefaultMaxHttpBufferedBytesPerTask;
+    static constexpr uint64_t kDefaultMp4VodPullRateBytesPerSec =
+        3 * 1024 * 1024;
+    static constexpr uint64_t kDefaultResourceDownloadEmitRateBytesPerSec =
+        10 * 1024 * 1024;
 
     // 获取本地文件大小
     static bool getFileSize(const std::string &file_path, uint64_t &size);
@@ -234,10 +359,16 @@ private:
     void packetThreadLoop();
     // bootstrap 定时器回调
     bool onBootstrapTimer();
+    // 速率整形定时器回调
+    bool onPaceTimer();
     // 启动 bootstrap 定时器（调用方需已持锁）
     void startBootstrapTimerLocked();
     // 停止 bootstrap 定时器（调用方需已持锁）
     void stopBootstrapTimerLocked();
+    // 启动速率整形定时器（调用方需已持锁）
+    void startPaceTimerLocked();
+    // 停止速率整形定时器（调用方需已持锁）
+    void stopPaceTimerLocked();
 
     // 组装完整协议包（含起始码 + 固定头 + 变长字段）
     std::vector<uint8_t> buildPacket(const TaskState &task, EsFilePacketHeader &header, const std::vector<uint8_t> &payload) const;
@@ -248,14 +379,44 @@ private:
     bool emitPacket(const std::string &task_id, std::vector<uint8_t> &&packet, const EsFilePacketHeader &header) const;
     // 更新最近一次错误信息
     void setLastError(const std::string &err);
-    // 获取仍活跃任务列表
-    std::vector<std::string> snapshotActiveTasks() const;
-    // 任务公平轮转顺序计算
-    std::vector<std::string> pickFairRound(const std::vector<std::string> &active_ids);
+    // 按优先级获取活跃任务列表
+    std::array<std::vector<std::string>, 3> snapshotActiveTasksByPriority() const;
+    // 指定优先级下的任务公平轮转顺序计算
+    std::vector<std::string> pickFairRound(const std::vector<std::string> &active_ids,
+                                           EsFileTaskPriority priority);
     // 计算单任务本 tick 负载预算
     uint64_t computeTaskQuota(uint64_t total_payload_quota_bytes, size_t active_count, size_t index) const;
+    // 计算某个优先级本 tick 的预算
+    uint64_t computePriorityQuota(uint64_t total_payload_quota_bytes,
+                                  EsFileTaskPriority priority,
+                                  const std::array<std::vector<std::string>, 3> &active_groups) const;
     // 判断任务是否已具备发送 FileEnd 的条件
     static bool isTaskReadyToEmitEnd(const TaskState &task);
+    // 判断 HTTP 任务内部缓冲是否已完全排空
+    static bool isHttpTaskBufferDrained(const TaskState &task);
+    // 根据请求信息推断任务类型。
+    static EsFileTaskType inferTaskTypeFromRequest(const std::string &url,
+                                                   const std::string &method_upper,
+                                                   const HttpHeaders &headers,
+                                                   const std::string &body);
+    // 根据响应头修正任务类型。
+    static EsFileTaskType inferTaskTypeFromResponse(EsFileTaskType current_type,
+                                                    const std::string &url,
+                                                    uint32_t status_code,
+                                                    const HttpHeaders &headers);
+    // 按任务类型应用内部策略（调用方需已持锁）
+    void applyTaskProfileLocked(TaskState &task,
+                                EsFileTaskType task_type,
+                                bool reset_buckets);
+    // 更新令牌桶
+    static void refillTokenBucket(TokenBucket &bucket);
+    // 当前令牌桶可用的字节数
+    static uint64_t peekTokenBucketBytes(TokenBucket &bucket);
+    // 从令牌桶消费字节数
+    static void consumeTokenBucketBytes(TokenBucket &bucket, uint64_t bytes);
+    // 估算至少获取指定令牌所需等待时间
+    static std::chrono::milliseconds estimateTokenWait(const TokenBucket &bucket,
+                                                       uint64_t min_bytes);
     // 清理任务 HTTP 缓冲并同步更新全局缓冲统计（调用方需已持锁）
     void clearTaskHttpBufferLocked(TaskState &task);
     // 清理待启动 HTTP 拉取队列中的指定任务（调用方需已持锁）
@@ -270,47 +431,10 @@ private:
 private:
     // 全局互斥锁
     mutable std::mutex _mtx;
-    // 当前分片大小
-    size_t _chunk_size = kDefaultPacketChunkBytes;
+    // 全局业务配置
+    EsFileGlobalOptions _global_options;
     HttpChunkPool _http_chunk_pool;
-    // 包输出回调
-    PacketCallback _packet_cb;
-    // task_id -> 任务状态
-    std::unordered_map<std::string, TaskState> _tasks;
-    // 任务代际计数器
-    uint64_t _task_generation = 0;
-    // 轮转游标
-    size_t _rr_cursor = 0;
-    // 待启动的 HTTP 拉取任务队列(task_id, generation)
-    std::deque<std::pair<std::string, uint64_t>> _pending_http_fetches;
-    // 当前活跃的 HTTP 拉取任务数
-    size_t _active_http_fetches = 0;
-    // 当前 HTTP 全局缓冲字节数
-    uint64_t _total_http_buffered_bytes = 0;
-    // HTTP 拉取最大并发数
-    size_t _max_http_fetch_concurrency = kDefaultHttpFetchConcurrency;
-    // HTTP 全局缓冲上限
-    uint64_t _max_total_http_buffered_bytes = kDefaultMaxHttpBufferedBytes;
-    // 最近一次错误信息
-    std::string _last_error;
-    // 每个 tick 的全局发送预算
-    uint64_t _tick_payload_quota_bytes = kDefaultTickPayloadBudgetBytes;
-    // 相对时间戳是否已初始化
-    bool _ts_started = false;
-    // 相对时间戳起始时刻
-    std::chrono::steady_clock::time_point _ts_start_time;
-    // 最近一次相对时间戳
-    uint32_t _last_ts_ms = 0;
-    // bootstrap 是否待发送
-    bool _bootstrap_due = false;
-    // bootstrap 定时器
-    toolkit::Timer::Ptr _bootstrap_timer;
-    // 发包线程
-    std::thread _packet_thread;
-    // 发包线程是否在运行
-    bool _packet_thread_running = false;
-    // 发包线程退出标记
-    bool _packet_thread_exit = false;
-    // 发包事件信号
-    toolkit::semaphore _packet_sem;
+    TaskRegistryState _task_registry;
+    HttpFetchRuntimeState _http_runtime;
+    PacketRuntimeState _packet_runtime;
 };

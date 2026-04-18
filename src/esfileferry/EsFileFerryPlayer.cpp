@@ -1,6 +1,8 @@
 ﻿#include "EsFileFerryPlayer.h"
 #include "Util/logger.h"
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 using namespace toolkit;
 
@@ -22,6 +24,41 @@ size_t scanPacketStart(const uint8_t *data, size_t size, uint32_t packet_magic,
 }
 
 enum class PacketDecodeStatus { Success, NeedMoreData, Invalid };
+
+const char *packetDecodeStatusName(PacketDecodeStatus status) {
+  switch (status) {
+  case PacketDecodeStatus::Success:
+    return "success";
+  case PacketDecodeStatus::NeedMoreData:
+    return "need_more_data";
+  case PacketDecodeStatus::Invalid:
+    return "invalid";
+  }
+  return "unknown";
+}
+
+bool shouldLogFrameCandidate(const uint8_t *data, size_t size) {
+  return data && size > 0 &&
+         (size >= 64 * 1024 || HasEsFileCarrierPrefix(data, size));
+}
+
+bool tryDecodeCandidateHeader(const uint8_t *data, size_t size,
+                              EsFilePacketHeader &header) {
+  if (!data || size < kEsFileCarrierPrefixSize + kEsFileFixedHeaderSize ||
+      !HasEsFileCarrierPrefix(data, size)) {
+    return false;
+  }
+  return DecodeEsFilePacketHeader(data + kEsFileCarrierPrefixSize,
+                                  size - kEsFileCarrierPrefixSize, header);
+}
+
+bool shouldLogMissingTask(const std::string &task_id, size_t &count) {
+  static std::mutex s_mtx;
+  static std::unordered_map<std::string, size_t> s_missing_counts;
+  std::lock_guard<std::mutex> lock(s_mtx);
+  count = ++s_missing_counts[task_id];
+  return count <= 5 || count % 100 == 0;
+}
 
 PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
                                   uint32_t packet_magic,
@@ -136,36 +173,91 @@ void EsFileFerryUnPacker::setOnError(OnError cb) {
   _on_error = std::move(cb);
 }
 
+
+static const char *memfind_ferry(const char *buf, ssize_t len, const char *subbuf, ssize_t sublen) {
+    for (auto i = 0; i < len - sublen; ++i) {
+        if (memcmp(buf + i, subbuf, sublen) == 0) {
+            return buf + i;
+        }
+    }
+    return NULL;
+}
+
+#define H264_TYPE(v) ((uint8_t)(v) & 0x1F)
+
+void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::function<void(const char *, size_t, size_t)> &cb) {
+    auto start = ptr + prefix;
+    auto last_start = ptr + prefix;
+    auto end = ptr + len;
+    size_t next_prefix;
+    while (true) {
+        auto next_start = memfind_ferry(start, end - start, "\x00\x00\x01", 3);
+        if (next_start) {
+            // 找到下一帧  [AUTO-TRANSLATED:7161f54a]
+            // Find the next frame
+            if (*(next_start - 1) == 0x00) {
+                // 这个是00 00 00 01开头  [AUTO-TRANSLATED:b0d79e9e]
+                // This starts with 00 00 00 01
+                next_start -= 1;
+                next_prefix = 4;
+            } else {
+                // 这个是00 00 01开头  [AUTO-TRANSLATED:18ae81d8]
+                // This starts with 00 00 01
+                next_prefix = 3;
+            }
+            // 记得加上本帧prefix长度  [AUTO-TRANSLATED:8bde5d52]
+            // Remember to add the prefix length of this frame
+            auto nal_type = H264_TYPE((uint8_t)*start);
+            if (nal_type == 6 || nal_type == 7 || nal_type == 8 || nal_type == 5 || nal_type == 1) {
+                cb(start - prefix, next_start - start + prefix, prefix);
+                // 搜索下一帧末尾的起始位置  [AUTO-TRANSLATED:8976b719]
+                // Search for the starting position of the end of the next frame
+                last_start = start = next_start + next_prefix;
+                // 记录下一帧的prefix长度  [AUTO-TRANSLATED:756aee4e]
+                // Record the prefix length of the next frame
+                prefix = next_prefix;
+            } else {
+                start = next_start + next_prefix;
+                // 记录下一帧的prefix长度  [AUTO-TRANSLATED:756aee4e]
+                // Record the prefix length of the next frame
+                prefix = next_prefix;
+            }
+            continue;
+        }
+        // 未找到下一帧,这是最后一帧  [AUTO-TRANSLATED:58365453]
+        // The next frame was not found, this is the last frame
+        cb(start - prefix, end - start + prefix, prefix);
+        break;
+    }
+}
+
+#ifndef MIN
+#define MIN(A, B) ((A) < (B) ? (A) : (B))
+#endif
+#ifndef MAX
+#define MAX(A, B) ((A) > (B) ? (A) : (B))
+#endif
+
 bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
   if (!data || size == 0) {
+    return false;
+  }
+
+  // Fast path: a complete ferry packet arrives in one frame.
+  EsFilePacket packet;
+  size_t consumed = 0;
+  if (parseOnePacketFromRaw(data, size, packet, consumed) && consumed == size) {
+    dispatchPacket(std::move(packet));
     return true;
   }
-//  DebugL << " hex:" << toolkit::hexmem(data, 8)  << " size:" << size;
 
-  size_t offset = 0;
-  while (offset < size) {
-    EsFilePacket packet;
-    size_t consumed = 0;
-    if (!parseOnePacketFromRaw(data + offset, size - offset, packet,
-                               consumed) ||
-        consumed == 0) {
-      break;
-    }
-    offset += consumed;
-    if (packet.task_id == kBootstrapTaskId) {
-      continue;
-    }
-    dispatchPacket(std::move(packet));
-  }
-  if (offset < size) {
+  {
     std::lock_guard<std::mutex> lock(_mtx);
-    _buffer.insert(_buffer.end(), data + offset, data + size);
-    compactBufferLocked();
+    _buffer.insert(_buffer.end(), data, data + size);
   }
   parseBuffer();
   return true;
 }
-
 void EsFileFerryUnPacker::parseBuffer() {
   while (true) {
     EsFilePacket packet;
@@ -210,6 +302,33 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
     compactBufferLocked();
     return true;
   }
+  if (shouldLogFrameCandidate(_buffer.data() + _buffer_start, packet_available)) {
+    EsFilePacketHeader header;
+    const auto has_header = tryDecodeCandidateHeader(_buffer.data() + _buffer_start,
+                                                     packet_available, header);
+    const auto sample_size = packet_available > 8 ? 8 : packet_available;
+    if (status == PacketDecodeStatus::Invalid || packet_available >= 64 * 1024) {
+      WarnL << "parse buffered packet, status:" << packetDecodeStatusName(status)
+            << " available:" << packet_available
+            << " buffer_start:" << _buffer_start
+            << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start, sample_size)
+            << " has_header:" << has_header
+            << " total_len:" << (has_header ? header.total_len : 0)
+            << " payload_len:" << (has_header ? header.payload_len : 0)
+            << " task_id_len:" << (has_header ? header.task_id_len : 0)
+            << " file_name_len:" << (has_header ? header.file_name_len : 0);
+    } else {
+      DebugL << "parse buffered packet, status:" << packetDecodeStatusName(status)
+             << " available:" << packet_available
+             << " buffer_start:" << _buffer_start
+             << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start, sample_size)
+             << " has_header:" << has_header
+             << " total_len:" << (has_header ? header.total_len : 0)
+             << " payload_len:" << (has_header ? header.payload_len : 0)
+             << " task_id_len:" << (has_header ? header.task_id_len : 0)
+             << " file_name_len:" << (has_header ? header.file_name_len : 0);
+    }
+  }
   if (status == PacketDecodeStatus::Invalid) {
     ++_buffer_start;
     compactBufferLocked();
@@ -239,6 +358,23 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
                      kEsFileFixedHeaderSize, kMaxPacketSize, packet,
                      local_consumed);
   if (status != PacketDecodeStatus::Success) {
+    const auto *candidate = data + start;
+    const auto candidate_size = size - start;
+    if (shouldLogFrameCandidate(candidate, candidate_size)) {
+      EsFilePacketHeader header;
+      const auto has_header =
+          tryDecodeCandidateHeader(candidate, candidate_size, header);
+      const auto sample_size = candidate_size > 8 ? 8 : candidate_size;
+      DebugL << "parse raw frame, status:" << packetDecodeStatusName(status)
+             << " size:" << candidate_size
+             << " start:" << start
+             << " hex:" << toolkit::hexmem(candidate, sample_size)
+             << " has_header:" << has_header
+             << " total_len:" << (has_header ? header.total_len : 0)
+             << " payload_len:" << (has_header ? header.payload_len : 0)
+             << " task_id_len:" << (has_header ? header.task_id_len : 0)
+             << " file_name_len:" << (has_header ? header.file_name_len : 0);
+    }
     return false;
   }
   consumed = start + local_consumed;
@@ -254,8 +390,26 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet) {
     std::lock_guard<std::mutex> lock(_mtx);
     auto it = _task_callbacks.find(packet.task_id);
     if (it == _task_callbacks.end()) {
-      ErrorL << "task_id not found, task_id:" << packet.task_id << " this:" << this;
+      size_t miss_count = 0;
+      if (shouldLogMissingTask(packet.task_id, miss_count)) {
+        WarnL << "task_id not found, task_id:" << packet.task_id
+              << " packet_type:" << EsFilePacketTypeToString(packet.header.type)
+              << " seq:" << packet.header.seq
+              << " payload_len:" << packet.header.payload_len
+              << " file_size:" << packet.header.file_size
+              << " miss_count:" << miss_count
+              << " this:" << this;
+      }
       return;
+    }
+    if (packet.header.type == EsFilePacketType::FileInfo) {
+      DebugL << "dispatch file info, task_id:" << packet.task_id
+             << " seq:" << packet.header.seq
+             << " payload_len:" << packet.header.payload_len
+             << " file_size:" << packet.header.file_size
+             << " flags:" << packet.header.flags
+             << " callback_count:" << _task_callbacks.size()
+             << " this:" << this;
     }
     on_task_data = it->second;
     if (!is_control_packet) {

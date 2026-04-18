@@ -104,6 +104,9 @@ public:
     virtual int sendFile(int fd) {
         return -1;
     }
+
+    // 连接已断开，允许响应体执行自定义清理/取消逻辑。
+    virtual void onConnectionClosed() {}
 };
 
 /**
@@ -231,7 +234,9 @@ class PlayChannelUrlBody : public HttpBody {
 public:
     using Ptr = std::shared_ptr<PlayChannelUrlBody>;
     using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
-    PlayChannelUrlBody(const std::string &url, const StrCaseMap &request_header = StrCaseMap());
+    PlayChannelUrlBody(const std::string &url,
+                       const StrCaseMap &request_header = StrCaseMap(),
+                       const toolkit::EventPoller::Ptr &poller = nullptr);
 
     int64_t remainSize() override;
     toolkit::Buffer::Ptr readData(size_t size) override;
@@ -242,6 +247,7 @@ public:
     bool requestCompleted() const;
     bool requestSuccess() const;
     void setHeaderReadyCB(HeaderReadyCB cb);
+    void onConnectionClosed() override;
 
 private:
     void waitHeaderReady() const;
@@ -260,6 +266,7 @@ private:
     StrCaseMap _request_header;
     std::shared_ptr<void> _alive_token;
     std::shared_ptr<void> _client_holder;
+    std::function<void()> _on_connection_closed;
     HeaderReadyCB _header_ready_cb;
     mutable std::condition_variable _header_cv;
 };

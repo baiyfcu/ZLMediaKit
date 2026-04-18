@@ -174,6 +174,7 @@ private:
     toolkit::Ticker _ticker;
     TSMediaSource::RingType::RingReader::Ptr _ts_reader;
     FMP4MediaSource::RingType::RingReader::Ptr _fmp4_reader;
+    HttpBody::Ptr _response_body;
     // 处理content数据的callback  [AUTO-TRANSLATED:38890e8d]
     // Callback to handle content data
     std::function<bool (const char *data,size_t len) > _on_recv_body;

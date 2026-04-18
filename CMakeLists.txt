@@ -530,7 +530,6 @@ add_subdirectory(3rdpart)
 if(ENABLE_SRT)
   add_subdirectory(srt)
 endif()
-
 message(STATUS "MK_LINK_LIBRARIES1: ${MK_LINK_LIBRARIES}")
 add_subdirectory(src)
 
@@ -544,6 +543,10 @@ endif()
 
 if(ENABLE_API)
   add_subdirectory(api)
+endif()
+
+if(ENABLE_TESTS AND ENABLE_FERRY AND ESFILEFERRY_BUILD_TESTS)
+  add_subdirectory(src/esfileferry/tests)
 endif()
 
 ##############################################################################

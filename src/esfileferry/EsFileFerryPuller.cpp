@@ -30,9 +30,9 @@ bool EsFileFerryPuller::startPull(const std::string &url, int rtp_type) {
   std::weak_ptr<MediaPlayer> weak_player = player;
   player->setOnPlayResult([this](const SockException &ex) { onPlayResult(ex); });
   player->setOnShutdown([this](const SockException &ex) { onShutdown(ex); });
-  (*player)["rtp_type"] = rtp_type;
-  (*player)["wait_track_ready"] = false;
-  (*player)["protocol_timeout_ms"] = 15000;
+  (*player)[Client::kRtpType] = rtp_type;
+  (*player)[Client::kWaitTrackReady] = false;
+  (*player)[Client::kTimeoutMS] = 15000;
 
   {
     std::lock_guard<std::mutex> lock(_mtx);
@@ -195,8 +195,9 @@ void EsFileFerryPuller::attachTrackDelegates() {
                 return true;
             }
             const auto *data = reinterpret_cast<const uint8_t *>(frame->data());
+            const auto frame_size = static_cast<size_t>(frame->size());
             return EsFileFerryUnPacker::Instance().inputFrame(
-                data, static_cast<size_t>(frame->size()));
+                data, frame_size);
         });
         delegates.emplace_back(track, ptr);
     }

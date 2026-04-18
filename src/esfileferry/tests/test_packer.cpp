@@ -155,6 +155,29 @@ int main() {
             invoker(200, header_out, std::string("HTTP_BIN_PAYLOAD"));
             return;
         }
+        if (parser.url() == "/test/attachment.mp4" && parser.method() == "GET") {
+            consumed = true;
+            HttpSession::KeyValue header_out;
+            header_out["Content-Type"] = "application/octet-stream";
+            header_out["Content-Disposition"] = "attachment; filename=\"attachment.mp4\"";
+            invoker(200, header_out, std::string("HTTP_ATTACHMENT_PAYLOAD"));
+            return;
+        }
+        if (parser.url() == "/test/video-noext" && parser.method() == "GET") {
+            consumed = true;
+            HttpSession::KeyValue header_out;
+            header_out["Content-Type"] = "video/mp4";
+            invoker(200, header_out, std::string("HTTP_VIDEO_NOEXT_PAYLOAD"));
+            return;
+        }
+        if (parser.url() == "/test/api-opaque" && parser.method() == "GET") {
+            consumed = true;
+            HttpSession::KeyValue header_out;
+            header_out["Content-Type"] = "application/json; charset=utf-8";
+            invoker(200, header_out,
+                    std::string("{\"code\":0,\"msg\":\"opaque api\"}"));
+            return;
+        }
         if (parser.url() == "/test/large.mp4" && parser.method() == "GET") {
             consumed = true;
             HttpSession::KeyValue header_out;
@@ -236,22 +259,36 @@ int main() {
     packer.clearTasks();
     packer.setChunkSize(64);
 
+    {
+        EsFileGlobalOptions defaults;
+        assert(defaults.packet_chunk_bytes == 128 * 1024);
+        assert(defaults.scheduler_tick_budget_bytes == 8 * 1024 * 1024);
+        assert(defaults.http_pull_concurrency_limit == 6);
+        assert(defaults.http_pull_total_buffer_limit_bytes == 24 * 1024 * 1024);
+        assert(defaults.mp4_vod_default_pull_rate_bps == 3 * 1024 * 1024);
+        assert(defaults.resource_download_default_emit_rate_bps ==
+               10 * 1024 * 1024);
+    }
+
     std::mutex mtx;
     std::condition_variable cv;
     size_t bootstrap_count = 0;
+    std::vector<std::vector<uint8_t>> bootstrap_packets;
     std::vector<std::vector<uint8_t>> task_packets;
 
     auto packet_collector = [&](const std::string &task_id,
                                 std::vector<uint8_t> &&packet,
                                 const EsFilePacketHeader &header) {
-        (void)header;
         const auto packet_size = packet.size();
         const auto packet_hex = packet.empty() ? std::string() : hexmem(packet.data(), 6);
         std::lock_guard<std::mutex> lock(mtx);
         if (task_id == EsFileFerryPacker::kBootstrapTaskId) {
             ++bootstrap_count;
+            bootstrap_packets.emplace_back(std::move(packet));
+            assert(packet_size >= 4);
         } else {
             task_packets.emplace_back(std::move(packet));
+            assert(header.magic == kEsFilePacketMagic);
         }
         DebugL << "task_id: " << task_id << ", packet size: " << packet_size << ",hex:" << packet_hex;
         cv.notify_all();
@@ -317,10 +354,63 @@ int main() {
 
     packer.clearTasks();
     clearCollectedPackets();
-    packer.setChunkSize(0);
-    packer.setTickPayloadQuotaBytes(0);
-    packer.setMaxHttpFetchConcurrency(0);
-    packer.setMaxTotalHttpBufferedBytes(0);
+    slow_http_active.store(0);
+    slow_http_max_active.store(0);
+    slow_http_request_count.store(0);
+    EsFileGlobalOptions tuned_options;
+    tuned_options.packet_chunk_bytes = 32 * 1024;
+    tuned_options.scheduler_tick_budget_bytes = 2 * 1024 * 1024;
+    tuned_options.http_pull_concurrency_limit = 1;
+    tuned_options.http_pull_total_buffer_limit_bytes = 4 * 1024 * 1024;
+    tuned_options.mp4_vod_default_pull_rate_bps = 512 * 1024;
+    tuned_options.resource_download_default_emit_rate_bps = 2 * 1024 * 1024;
+    packer.setGlobalOptions(tuned_options);
+    assert(packer.addHttpTask("strategy_slow_http_1", http_base + "/test/slow.bin",
+                              "GET", {}, "", "slow_1.bin"));
+    assert(packer.addHttpTask("strategy_slow_http_2", http_base + "/test/slow.bin",
+                              "GET", {}, "", "slow_2.bin"));
+    assert(packer.addHttpTask("strategy_mp4_task", http_base + "/test/1.mp4",
+                              "GET", {}, "", "video.mp4"));
+    assert(packer.addHttpTask("strategy_api_task", http_base + "/test/api-opaque",
+                              "GET", {}, "", "api.json"));
+    assert(packer.addHttpTask("strategy_download_task",
+                              http_base + "/test/attachment.mp4", "GET", {},
+                              "", "attachment.mp4"));
+    assert(packer.addHttpTask("strategy_video_noext_task",
+                              http_base + "/test/video-noext", "GET", {}, "",
+                              "video.bin"));
+    const bool strategy_ready = waitUntil(std::chrono::milliseconds(5000), [&]() {
+        return slow_http_request_count.load() >= 2 &&
+               packer.testGetTaskType("strategy_mp4_task") ==
+                   EsFileTaskType::HttpMp4Vod &&
+               packer.testGetTaskType("strategy_api_task") ==
+                   EsFileTaskType::HttpApiRequest &&
+               packer.testGetTaskType("strategy_download_task") ==
+                   EsFileTaskType::HttpResourceDownload &&
+               packer.testGetTaskType("strategy_video_noext_task") ==
+                   EsFileTaskType::HttpMp4Vod;
+    }, std::chrono::milliseconds(20));
+    assert(strategy_ready);
+    assert(slow_http_max_active.load() <= 1);
+    assert(packer.testGetTaskPriority("strategy_mp4_task") ==
+           EsFileTaskPriority::Medium);
+    assert(packer.testGetTaskPriority("strategy_api_task") ==
+           EsFileTaskPriority::High);
+    assert(packer.testGetTaskPriority("strategy_download_task") ==
+           EsFileTaskPriority::Low);
+    assert(packer.testGetTaskFetchRateBps("strategy_mp4_task") == 512 * 1024);
+    assert(packer.testGetTaskEmitRateBps("strategy_mp4_task") == 512 * 1024);
+    assert(packer.testGetTaskFetchRateBps("strategy_api_task") == 0);
+    assert(packer.testGetTaskEmitRateBps("strategy_api_task") == 0);
+    assert(packer.testGetTaskEmitRateBps("strategy_download_task") ==
+           2 * 1024 * 1024);
+    assert(packer.testGetTaskFetchRateBps("strategy_video_noext_task") ==
+           512 * 1024);
+    packer.clearTasks();
+
+    packer.clearTasks();
+    clearCollectedPackets();
+    packer.setGlobalOptions(EsFileGlobalOptions{});
     sim_http_active.store(0);
     sim_http_max_active.store(0);
     sim_http_request_count.store(0);
@@ -511,6 +601,7 @@ int main() {
     {
         std::lock_guard<std::mutex> lock(mtx);
         stable_bootstrap_count = bootstrap_count;
+        assert(bootstrap_packets.size() >= 3);
     }
 
     packer.removeTask("api_task");

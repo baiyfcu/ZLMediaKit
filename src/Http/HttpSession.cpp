@@ -180,6 +180,11 @@ void HttpSession::onError(const SockException &err) {
         }
         return;
     }
+    auto response_body = _response_body;
+    _response_body.reset();
+    if (response_body) {
+        response_body->onConnectionClosed();
+    }
 }
 
 void HttpSession::setTimeoutSec(size_t keep_alive_sec) {
@@ -654,6 +659,8 @@ void HttpSession::sendResponse(int code,
                                bool no_content_length) {
     GET_CONFIG(string, charSet, Http::kCharSet);
     GET_CONFIG(uint32_t, keepAliveSec, Http::kKeepAliveSecond);
+
+    _response_body = body;
 
     // body默认为空  [AUTO-TRANSLATED:527ccb6f]
     // Body defaults to empty

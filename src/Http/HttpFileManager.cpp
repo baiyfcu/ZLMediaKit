@@ -695,13 +695,24 @@ static void accessPlayChannelUrl(Session &sender, const Parser &parser, const Me
             cb(401, "text/html", headerOut, std::make_shared<HttpStringBody>(err_msg));
             return;
         }
-        auto response_url = [](const HttpServerCookie::Ptr &cookie, const HttpFileManager::invoker &cb, const string &url, const Parser &parser) {
+        auto response_url = [](const HttpServerCookie::Ptr &cookie,
+                               const HttpFileManager::invoker &cb,
+                               const string &url,
+                               const Parser &parser,
+                               const toolkit::EventPoller::Ptr &poller) {
+            auto get_header = [](const StrCaseMap &headers, const char *key) {
+                auto it = headers.find(key);
+                if (it == headers.end()) {
+                    return std::string();
+                }
+                return it->second;
+            };
             StrCaseMap httpHeader;
             if (cookie) {
                 httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
             }
-            auto url_body = std::make_shared<PlayChannelUrlBody>(url, parser.getHeader());
-            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body](int code, const StrCaseMap &headerOut) mutable {
+            auto url_body = std::make_shared<PlayChannelUrlBody>(url, parser.getHeader(), poller);
+            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body, get_header](int code, const StrCaseMap &headerOut) mutable {
                 for (auto &pr : headerOut) {
                     httpHeader.emplace(pr.first, pr.second);
                 }
@@ -710,10 +721,16 @@ static void accessPlayChannelUrl(Session &sender, const Parser &parser, const Me
                 if (it != httpHeader.end() && !it->second.empty()) {
                     type = it->second;
                 }
+                InfoL << "play channel http response ready, url:" << url
+                      << " code:" << code
+                      << " content_type:" << type
+                      << " content_length:" << get_header(httpHeader, "Content-Length")
+                      << " content_range:" << get_header(httpHeader, "Content-Range")
+                      << " debug_task_id:" << get_header(httpHeader, "X-Play-Channel-Task-Id");
                 cb(code, type, httpHeader, url_body);
             });
         };
-        response_url(cookie, cb, url, parser);
+        response_url(cookie, cb, url, parser, strongSession->getPoller());
     });
 }
 #endif
