@@ -123,10 +123,14 @@ private:
     void emitError(EsFileUnpackErrorEvent event);
 
 private:
+    void appendToBufferLocked(const uint8_t *data, size_t size);
+    void resetBufferIfFullyConsumedLocked();
     void compactBufferLocked();
 
 private:
     static constexpr size_t kMaxPacketSize = 2 * 1024 * 1024;
+    static constexpr size_t kInitialBufferReserveBytes = 256 * 1024;
+    static constexpr size_t kCompactThresholdBytes = 64 * 1024;
     // 控制流 task_id
     static constexpr const char *kBootstrapTaskId = "__bootstrap__";
 
@@ -143,7 +147,5 @@ private:
     std::unordered_map<std::string, TaskRuntimeState> _task_states;
     // 错误回调
     OnError _on_error;
-
-    FILE * _fp_test = nullptr;
 
 };

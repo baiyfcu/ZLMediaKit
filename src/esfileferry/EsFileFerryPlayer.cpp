@@ -1,13 +1,15 @@
 ﻿#include "EsFileFerryPlayer.h"
 
-#include "Util/File.h"
-#include "Util/TimeTicker.h"
 #include "Util/logger.h"
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
 
 using namespace toolkit;
+
+constexpr size_t EsFileFerryUnPacker::kInitialBufferReserveBytes;
+constexpr size_t EsFileFerryUnPacker::kCompactThresholdBytes;
 
 namespace {
 size_t scanPacketStart(const uint8_t *data, size_t size, uint32_t packet_magic,
@@ -59,8 +61,14 @@ bool shouldLogMissingTask(const std::string &task_id, size_t &count) {
   static std::mutex s_mtx;
   static std::unordered_map<std::string, size_t> s_missing_counts;
   std::lock_guard<std::mutex> lock(s_mtx);
-  count = ++s_missing_counts[task_id];
-  return count <= 5 || count % 100 == 0;
+  count = s_missing_counts[task_id]++;
+  return count % 1000 == 0;
+}
+
+bool shouldLogSampled(std::atomic<size_t> &counter, size_t interval,
+                      size_t &count) {
+  count = ++counter;
+  return count <= 5 || count % interval == 0;
 }
 
 const char *unpackErrorTypeName(EsFileUnpackErrorType type) {
@@ -216,7 +224,6 @@ static const char *memfind_ferry(const char *buf, ssize_t len, const char *subbu
 
 void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::function<void(const char *, size_t, size_t)> &cb) {
     auto start = ptr + prefix;
-    auto last_start = ptr + prefix;
     auto end = ptr + len;
     size_t next_prefix;
     while (true) {
@@ -241,7 +248,7 @@ void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::funct
                 cb(start - prefix, next_start - start + prefix, prefix);
                 // 搜索下一帧末尾的起始位置  [AUTO-TRANSLATED:8976b719]
                 // Search for the starting position of the end of the next frame
-                last_start = start = next_start + next_prefix;
+                start = next_start + next_prefix;
                 // 记录下一帧的prefix长度  [AUTO-TRANSLATED:756aee4e]
                 // Record the prefix length of the next frame
                 prefix = next_prefix;
@@ -268,32 +275,21 @@ void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::funct
 #endif
 
 bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
-  //fwrite(data, 1, size, _fp_test);
   if (!data || size <= 48) {
-    if (data || size > 5) {
-        if (size > 8 && (data[5] == 0x42 && data[6] == 0x51)) {
-            return false;
-        }
-        if (data[4] == 0x67)
-            WarnL << "inputFrame sps,hex:" << toolkit::hexmem(data, size);
-        else if (data[4] == 0x68)
-            WarnL << "inputFrame pps,hex:" << toolkit::hexmem(data, size);
-        else if (data[4] == 0x65) {
-            WarnL << "inputFrame idr,hex:" << toolkit::hexmem(data, size);
-        }else
-            ErrorL << "inputFrame err,hex:" << toolkit::hexmem(data, size);
-      // EsFileUnpackErrorEvent event;
-      // event.type = EsFileUnpackErrorType::FrameTooSmall;
-      // event.message = "input frame too small";
-      // event.frame_size = size;
-      // emitError(std::move(event));
+    if (data && size > 8 && !(data[5] == 0x42 && data[6] == 0x51)) {
+      static std::atomic<size_t> s_small_frame_count{0};
+      size_t count = 0;
+      if (shouldLogSampled(s_small_frame_count, 1000, count)) {
+        WarnL << "inputFrame ignore small frame, size:" << size
+              << " sample_count:" << count;
+      }
     }
     return false;
   }
-  TimeTicker1(20);
   // Fast path: a complete ferry packet arrives in one frame.
   EsFilePacket packet;
   size_t consumed = 0;
+  
   if (parseOnePacketFromRaw(data, size, packet, consumed) && consumed == size) {
     dispatchPacket(std::move(packet));
     return true;
@@ -301,14 +297,14 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
 
   {
     std::lock_guard<std::mutex> lock(_mtx);
-    _buffer.insert(_buffer.end(), data, data + size);
+    appendToBufferLocked(data, size);
   }
   parseBuffer();
   return true;
 }
 
 EsFileFerryUnPacker::EsFileFerryUnPacker() {
-    _fp_test = File::create_file("./tem/abc.h264", "wb");
+  _buffer.reserve(kInitialBufferReserveBytes);
 }
 
 void EsFileFerryUnPacker::parseBuffer() {
@@ -340,14 +336,14 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
     if (!found) {
       if (start > 0) {
         _buffer_start += start;
-        compactBufferLocked();
+        resetBufferIfFullyConsumedLocked();
       }
       return false;
     }
 
     if (start > 0) {
       _buffer_start += start;
-      compactBufferLocked();
+      resetBufferIfFullyConsumedLocked();
     }
 
     size_t consumed = 0;
@@ -358,7 +354,7 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
                        kMaxPacketSize, packet, consumed);
     if (status == PacketDecodeStatus::Success) {
       _buffer_start += consumed;
-      compactBufferLocked();
+      resetBufferIfFullyConsumedLocked();
       parsed = true;
     } else {
       if (status == PacketDecodeStatus::Invalid) {
@@ -367,41 +363,33 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
         pending_error.frame_size = packet_available;
         has_pending_error = true;
       }
-      if (shouldLogFrameCandidate(_buffer.data() + _buffer_start,
-                                  packet_available)) {
+    if (shouldLogFrameCandidate(_buffer.data() + _buffer_start,
+                                packet_available)) {
+      static std::atomic<size_t> s_buffered_decode_log_count{0};
+      size_t log_count = 0;
+      const bool should_log =
+          status == PacketDecodeStatus::Invalid &&
+          shouldLogSampled(s_buffered_decode_log_count, 200, log_count);
+      if (should_log) {
         EsFilePacketHeader header;
         const auto has_header = tryDecodeCandidateHeader(
             _buffer.data() + _buffer_start, packet_available, header);
         const auto sample_size = packet_available > 8 ? 8 : packet_available;
-        if (status == PacketDecodeStatus::Invalid || packet_available >= 64 * 1024) {
-          WarnL << "parse buffered packet, status:"
-                << packetDecodeStatusName(status)
-                << " available:" << packet_available
-                << " buffer_start:" << _buffer_start
-                << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start,
-                                              sample_size)
-                << " has_header:" << has_header
-                << " total_len:" << (has_header ? header.total_len : 0)
-                << " payload_len:" << (has_header ? header.payload_len : 0)
-                << " task_id_len:" << (has_header ? header.task_id_len : 0)
-                << " file_name_len:" << (has_header ? header.file_name_len : 0);
-        } else {
-          DebugL << "parse buffered packet, status:"
-                 << packetDecodeStatusName(status)
-                 << " available:" << packet_available
-                 << " buffer_start:" << _buffer_start
-                 << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start,
-                                               sample_size)
-                 << " has_header:" << has_header
-                 << " total_len:" << (has_header ? header.total_len : 0)
-                 << " payload_len:" << (has_header ? header.payload_len : 0)
-                 << " task_id_len:" << (has_header ? header.task_id_len : 0)
-                 << " file_name_len:" << (has_header ? header.file_name_len : 0);
-        }
+        WarnL << "parse buffered packet invalid, available:" << packet_available
+              << " buffer_start:" << _buffer_start
+              << " sample_count:" << log_count
+              << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start,
+                                            sample_size)
+              << " has_header:" << has_header
+              << " total_len:" << (has_header ? header.total_len : 0)
+              << " payload_len:" << (has_header ? header.payload_len : 0)
+              << " task_id_len:" << (has_header ? header.task_id_len : 0)
+              << " file_name_len:" << (has_header ? header.file_name_len : 0);
+      }
       }
       if (status == PacketDecodeStatus::Invalid) {
         ++_buffer_start;
-        compactBufferLocked();
+        resetBufferIfFullyConsumedLocked();
       }
     }
   }
@@ -416,11 +404,9 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
                                                 EsFilePacket &packet,
                                                 size_t &consumed) {
   consumed = 0;
-    if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
-        ErrorL << "inputFrame1,hex:" << toolkit::hexmem(data, size);
-        return false;
-    }else
-        DebugL << "inputFrame2,hex:" << toolkit::hexmem(data, 25);
+  if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+    return false;
+  }
 
   bool found = false;
   const auto start = scanPacketStart(data, size, kEsFilePacketMagic, found);
@@ -445,19 +431,24 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
       emitError(std::move(event));
     }
     if (shouldLogFrameCandidate(candidate, candidate_size)) {
-      EsFilePacketHeader header;
-      const auto has_header =
-          tryDecodeCandidateHeader(candidate, candidate_size, header);
-      const auto sample_size = candidate_size > 8 ? 8 : candidate_size;
-      DebugL << "parse raw frame, status:" << packetDecodeStatusName(status)
-             << " size:" << candidate_size
-             << " start:" << start
-             << " hex:" << toolkit::hexmem(candidate, sample_size)
-             << " has_header:" << has_header
-             << " total_len:" << (has_header ? header.total_len : 0)
-             << " payload_len:" << (has_header ? header.payload_len : 0)
-             << " task_id_len:" << (has_header ? header.task_id_len : 0)
-             << " file_name_len:" << (has_header ? header.file_name_len : 0);
+      static std::atomic<size_t> s_raw_decode_log_count{0};
+      size_t log_count = 0;
+      if (status == PacketDecodeStatus::Invalid &&
+          shouldLogSampled(s_raw_decode_log_count, 200, log_count)) {
+        EsFilePacketHeader header;
+        const auto has_header =
+            tryDecodeCandidateHeader(candidate, candidate_size, header);
+        const auto sample_size = candidate_size > 8 ? 8 : candidate_size;
+        WarnL << "parse raw frame invalid, size:" << candidate_size
+              << " start:" << start
+              << " sample_count:" << log_count
+              << " hex:" << toolkit::hexmem(candidate, sample_size)
+              << " has_header:" << has_header
+              << " total_len:" << (has_header ? header.total_len : 0)
+              << " payload_len:" << (has_header ? header.payload_len : 0)
+              << " task_id_len:" << (has_header ? header.task_id_len : 0)
+              << " file_name_len:" << (has_header ? header.file_name_len : 0);
+      }
     }
     return false;
   }
@@ -637,8 +628,43 @@ void EsFileFerryUnPacker::compactBufferLocked() {
     _buffer_start = 0;
     return;
   }
-  if (_buffer_start >= 4096 && _buffer_start * 2 >= _buffer.size()) {
-    _buffer.erase(_buffer.begin(), _buffer.begin() + static_cast<long>(_buffer_start));
-    _buffer_start = 0;
+  const auto remaining = _buffer.size() - _buffer_start;
+  if (_buffer_start < kCompactThresholdBytes && remaining >= _buffer_start) {
+    return;
   }
+  std::memmove(_buffer.data(), _buffer.data() + _buffer_start, remaining);
+  _buffer.resize(remaining);
+  _buffer_start = 0;
+}
+
+void EsFileFerryUnPacker::appendToBufferLocked(const uint8_t *data, size_t size) {
+  if (!data || size == 0) {
+    return;
+  }
+  resetBufferIfFullyConsumedLocked();
+  if (_buffer.capacity() == 0) {
+    _buffer.reserve(std::max(kInitialBufferReserveBytes, size));
+  }
+  const auto tail_free = _buffer.capacity() - _buffer.size();
+  if (tail_free < size && _buffer_start > 0) {
+    compactBufferLocked();
+  }
+  const auto required_size = _buffer.size() + size;
+  if (_buffer.capacity() < required_size) {
+    const auto grown_capacity =
+        std::max(required_size, std::max(_buffer.capacity() * 2,
+                                         kInitialBufferReserveBytes));
+    _buffer.reserve(grown_capacity);
+  }
+  const auto old_size = _buffer.size();
+  _buffer.resize(required_size);
+  std::memcpy(_buffer.data() + old_size, data, size);
+}
+
+void EsFileFerryUnPacker::resetBufferIfFullyConsumedLocked() {
+  if (_buffer_start < _buffer.size()) {
+    return;
+  }
+  _buffer.clear();
+  _buffer_start = 0;
 }

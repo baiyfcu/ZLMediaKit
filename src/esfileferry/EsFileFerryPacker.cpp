@@ -15,10 +15,7 @@ constexpr size_t EsFileFerryPacker::kDefaultHttpFetchConcurrency;
 constexpr uint64_t EsFileFerryPacker::kDefaultMaxHttpBufferedBytes;
 constexpr uint32_t EsFileFerryPacker::kDefaultBootstrapIntervalMs;
 constexpr uint32_t EsFileFerryPacker::kDefaultPaceIntervalMs;
-constexpr uint64_t EsFileFerryPacker::kDefaultTickPayloadBudgetBytes;
-constexpr uint32_t EsFileFerryPacker::kHighPriorityWeight;
-constexpr uint32_t EsFileFerryPacker::kMediumPriorityWeight;
-constexpr uint32_t EsFileFerryPacker::kLowPriorityWeight;
+constexpr uint64_t EsFileFerryPacker::kDefaultSchedulerRoundBudgetBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultApiBufferedBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultMp4BufferedBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultDownloadBufferedBytes;
@@ -56,7 +53,6 @@ namespace {
 constexpr int64_t kHttpBufferWaitSlowLogMs = 1000;
 constexpr int64_t kEmitPacketSlowLogMs = 1000;
 constexpr int64_t kRateLimitWaitStepMs = 20;
-constexpr std::array<uint32_t, 3> kPriorityWeights = {50, 35, 15};
 
 bool isHttpUrl(const std::string &value) {
   return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
@@ -186,10 +182,10 @@ void EsFileFerryPacker::setChunkSize(size_t chunk_size) {
       chunk_size == 0 ? kDefaultPacketChunkBytes : chunk_size;
 }
 
-void EsFileFerryPacker::setTickPayloadQuotaBytes(uint64_t quota_bytes) {
+void EsFileFerryPacker::setSchedulerRoundBudgetBytes(uint64_t budget_bytes) {
   std::lock_guard<std::mutex> lock(_mtx);
-  _global_options.scheduler_tick_budget_bytes =
-      quota_bytes == 0 ? kDefaultTickPayloadBudgetBytes : quota_bytes;
+  _global_options.scheduler_round_budget_bytes =
+      budget_bytes == 0 ? kDefaultSchedulerRoundBudgetBytes : budget_bytes;
   _packet_runtime.packet_sem.post();
 }
 
@@ -215,17 +211,41 @@ void EsFileFerryPacker::setMaxTotalHttpBufferedBytes(uint64_t max_buffered_bytes
 }
 
 void EsFileFerryPacker::setGlobalOptions(const EsFileGlobalOptions &opts) {
-  setChunkSize(opts.packet_chunk_bytes);
-  setTickPayloadQuotaBytes(opts.scheduler_tick_budget_bytes);
-  setMaxHttpFetchConcurrency(opts.http_pull_concurrency_limit);
-  setMaxTotalHttpBufferedBytes(opts.http_pull_total_buffer_limit_bytes);
+  bool should_try_start_http = false;
   {
     std::lock_guard<std::mutex> lock(_mtx);
-    _global_options.mp4_vod_default_pull_rate_bps =
-        opts.mp4_vod_default_pull_rate_bps;
-    _global_options.resource_download_default_emit_rate_bps =
-        opts.resource_download_default_emit_rate_bps;
+    _global_options.packet_chunk_bytes =
+        opts.packet_chunk_bytes == 0 ? kDefaultPacketChunkBytes
+                                     : opts.packet_chunk_bytes;
+    _global_options.scheduler_round_budget_bytes =
+        opts.scheduler_round_budget_bytes == 0
+            ? kDefaultSchedulerRoundBudgetBytes
+            : opts.scheduler_round_budget_bytes;
+    _global_options.http_pull_concurrency_limit =
+        opts.http_pull_concurrency_limit == 0 ? kDefaultHttpFetchConcurrency
+                                              : opts.http_pull_concurrency_limit;
+    _global_options.http_pull_total_buffer_limit_bytes =
+        opts.http_pull_total_buffer_limit_bytes == 0
+            ? kDefaultMaxHttpBufferedBytes
+            : opts.http_pull_total_buffer_limit_bytes;
+    _global_options.http_pull_total_rate_bps = opts.http_pull_total_rate_bps;
+    _global_options.http_api_rate_share = opts.http_api_rate_share;
+    _global_options.http_mp4_rate_share = opts.http_mp4_rate_share;
+    _global_options.http_download_rate_share = opts.http_download_rate_share;
+    if (_global_options.http_api_rate_share == 0 &&
+        _global_options.http_mp4_rate_share == 0 &&
+        _global_options.http_download_rate_share == 0) {
+      _global_options.http_api_rate_share = 50;
+      _global_options.http_mp4_rate_share = 35;
+      _global_options.http_download_rate_share = 15;
+    }
+    recomputeAllTaskRateProfilesLocked(false);
+    should_try_start_http = !_http_runtime.pending_fetches.empty();
   }
+  if (should_try_start_http) {
+    maybeStartPendingHttpFetches();
+  }
+  _packet_runtime.packet_sem.post();
 }
 
 void EsFileFerryPacker::setPacketCallback(PacketCallback cb) {
@@ -305,6 +325,7 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
       generation = ++_task_registry.generation;
       state.generation = generation;
       _task_registry.tasks[task_id] = std::move(state);
+      recomputeAllTaskRateProfilesLocked(false);
       _http_runtime.pending_fetches.emplace_back(task_id, generation);
     }
     maybeStartPendingHttpFetches();
@@ -330,6 +351,7 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     applyTaskProfileLocked(state, EsFileTaskType::HttpResourceDownload, true);
     state.generation = ++_task_registry.generation;
     _task_registry.tasks[task_id] = std::move(state);
+    recomputeAllTaskRateProfilesLocked(false);
     _packet_runtime.packet_sem.post();
     return true;
   }
@@ -360,6 +382,7 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
       clearTaskHttpBufferLocked(it->second);
     }
     _task_registry.tasks.erase(task_id);
+    recomputeAllTaskRateProfilesLocked(false);
     should_schedule_http = !_http_runtime.pending_fetches.empty();
   }
   InfoL << "remove ferry task, task_id:" << task_id
@@ -393,6 +416,7 @@ void EsFileFerryPacker::clearTasks() {
     _http_runtime.total_buffered_bytes = 0;
     _task_registry.tasks.clear();
     _task_registry.priority_rr_cursor = {{0, 0, 0}};
+    recomputeAllTaskRateProfilesLocked(false);
     should_schedule_http = !_http_runtime.pending_fetches.empty();
   }
   for (const auto &buffer_cv : buffer_cvs) {
@@ -479,7 +503,7 @@ void EsFileFerryPacker::packetThreadLoop() {
       PacketCallback bootstrap_cb;
       bool should_exit = false;
       bool should_emit_bootstrap = false;
-      uint64_t tick_payload_quota_bytes = 0;
+      uint64_t round_payload_budget_bytes = 0;
       {
         std::lock_guard<std::mutex> lock(_mtx);
         should_exit = _packet_runtime.packet_thread_exit;
@@ -491,12 +515,12 @@ void EsFileFerryPacker::packetThreadLoop() {
           _packet_runtime.bootstrap_due = false;
           bootstrap_cb = _packet_runtime.callback;
         }
-        tick_payload_quota_bytes = _global_options.scheduler_tick_budget_bytes;
+        round_payload_budget_bytes = _global_options.scheduler_round_budget_bytes;
       }
       if (should_emit_bootstrap && bootstrap_cb) {
         emitBootstrapPackets(bootstrap_cb);
       }
-      const auto packet_count = processTickPackets(tick_payload_quota_bytes);
+      const auto packet_count = processTickPackets(round_payload_budget_bytes);
       if (!should_emit_bootstrap && packet_count == 0) {
         break;
       }
@@ -602,6 +626,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           it->second.send.info_sent = true;
           it->second.send.end_sent = true;
           it->second.send.next_seq++;
+          recomputeAllTaskRateProfilesLocked(false);
         }
         continue;
       }
@@ -860,6 +885,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           clearTaskHttpBufferLocked(it->second);
           it->second.source.memory_payload.clear();
           it->second.source.memory_payload.shrink_to_fit();
+          recomputeAllTaskRateProfilesLocked(false);
         }
       }
       if (should_end) {
@@ -1097,6 +1123,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           const auto inferred_type = inferTaskTypeFromResponse(
               task.control.task_type, task.source.file_path, status_code, headers_in);
           applyTaskProfileLocked(task, inferred_type, false);
+        recomputeAllTaskRateProfilesLocked(false);
           task.http.status_code = status_code;
           task.http.response_meta_payload =
               buildHttpResponseMetaPayload(status_code, headers_in);
@@ -1191,6 +1218,10 @@ std::vector<EsFilePackTaskInfo> EsFileFerryPacker::getTaskInfos() const {
 std::string EsFileFerryPacker::getLastError() const {
   std::lock_guard<std::mutex> lock(_mtx);
   return _packet_runtime.last_error;
+}
+
+size_t EsFileFerryPacker::taskTypeToIndex(EsFileTaskType type) {
+  return static_cast<size_t>(type);
 }
 
 bool EsFileFerryPacker::getFileSize(const std::string &file_path,
@@ -1416,20 +1447,9 @@ void EsFileFerryPacker::applyTaskProfileLocked(TaskState &task,
       inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
   const auto emit_burst =
       inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
-  const auto fetch_rate =
-      task_type == EsFileTaskType::HttpMp4Vod
-          ? _global_options.mp4_vod_default_pull_rate_bps
-          : 0;
-  const auto emit_rate =
-      task_type == EsFileTaskType::HttpResourceDownload
-          ? _global_options.resource_download_default_emit_rate_bps
-          : (task_type == EsFileTaskType::HttpMp4Vod
-                 ? _global_options.mp4_vod_default_pull_rate_bps
-                 : 0);
-
-  task.control.fetch_bucket.rate_bps = fetch_rate;
+  task.control.fetch_bucket.rate_bps = 0;
   task.control.fetch_bucket.burst_bytes = fetch_burst;
-  task.control.emit_bucket.rate_bps = emit_rate;
+  task.control.emit_bucket.rate_bps = 0;
   task.control.emit_bucket.burst_bytes = emit_burst;
 
   if (reset_buckets ||
@@ -1450,6 +1470,93 @@ void EsFileFerryPacker::applyTaskProfileLocked(TaskState &task,
   } else {
     task.control.emit_bucket.tokens =
         std::min(task.control.emit_bucket.tokens, emit_burst);
+  }
+}
+
+uint32_t EsFileFerryPacker::rateShareForTaskType(EsFileTaskType type) const {
+  switch (type) {
+  case EsFileTaskType::HttpApiRequest:
+    return _global_options.http_api_rate_share;
+  case EsFileTaskType::HttpMp4Vod:
+    return _global_options.http_mp4_rate_share;
+  case EsFileTaskType::HttpResourceDownload:
+  default:
+    return _global_options.http_download_rate_share;
+  }
+}
+
+void EsFileFerryPacker::recomputeAllTaskRateProfilesLocked(bool reset_buckets) {
+  std::array<size_t, 3> active_counts{{0, 0, 0}};
+  size_t active_type_count = 0;
+  uint32_t active_share_sum = 0;
+  for (auto &item : _task_registry.tasks) {
+    auto &task = item.second;
+    if (task.send.end_sent) {
+      continue;
+    }
+    ++active_counts[taskTypeToIndex(task.control.task_type)];
+  }
+  for (size_t i = 0; i < active_counts.size(); ++i) {
+    if (active_counts[i] == 0) {
+      continue;
+    }
+    ++active_type_count;
+    active_share_sum += rateShareForTaskType(static_cast<EsFileTaskType>(i));
+  }
+  for (auto &item : _task_registry.tasks) {
+    refreshTaskRateBucketsLocked(item.second, active_counts, active_type_count,
+                                 active_share_sum, reset_buckets);
+  }
+}
+
+void EsFileFerryPacker::refreshTaskRateBucketsLocked(
+    TaskState &task, const std::array<size_t, 3> &active_counts,
+    size_t active_type_count, uint32_t active_share_sum, bool reset_buckets) {
+  const auto now = std::chrono::steady_clock::now();
+  const auto task_type = task.control.task_type;
+  const auto type_idx = taskTypeToIndex(task_type);
+  const auto active_count = active_counts[type_idx];
+  uint64_t task_rate_bps = 0;
+
+  if (!task.send.end_sent && active_count > 0) {
+    uint64_t type_rate_bps = 0;
+    if (_global_options.http_pull_total_rate_bps > 0) {
+      if (active_share_sum > 0) {
+        type_rate_bps = (_global_options.http_pull_total_rate_bps *
+                         rateShareForTaskType(task_type)) /
+                        active_share_sum;
+      } else if (active_type_count > 0) {
+        type_rate_bps =
+            _global_options.http_pull_total_rate_bps / active_type_count;
+      }
+    }
+    task_rate_bps = type_rate_bps / active_count;
+  }
+
+  task.control.fetch_bucket.rate_bps = task.http.source ? task_rate_bps : 0;
+  task.control.emit_bucket.rate_bps = task_rate_bps;
+  task.control.fetch_bucket.burst_bytes =
+      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+  task.control.emit_bucket.burst_bytes =
+      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+
+  if (reset_buckets ||
+      task.control.fetch_bucket.last_refill ==
+          std::chrono::steady_clock::time_point{}) {
+    task.control.fetch_bucket.tokens = task.control.fetch_bucket.burst_bytes;
+    task.control.fetch_bucket.last_refill = now;
+  } else {
+    task.control.fetch_bucket.tokens = std::min(
+        task.control.fetch_bucket.tokens, task.control.fetch_bucket.burst_bytes);
+  }
+  if (reset_buckets ||
+      task.control.emit_bucket.last_refill ==
+          std::chrono::steady_clock::time_point{}) {
+    task.control.emit_bucket.tokens = task.control.emit_bucket.burst_bytes;
+    task.control.emit_bucket.last_refill = now;
+  } else {
+    task.control.emit_bucket.tokens = std::min(
+        task.control.emit_bucket.tokens, task.control.emit_bucket.burst_bytes);
   }
 }
 
@@ -1556,7 +1663,7 @@ uint64_t EsFileFerryPacker::computePriorityQuota(
   uint64_t total_weight = 0;
   for (size_t i = 0; i < active_groups.size(); ++i) {
     if (!active_groups[i].empty()) {
-      total_weight += kPriorityWeights[i];
+      total_weight += rateShareForTaskType(static_cast<EsFileTaskType>(i));
     }
   }
   if (total_weight == 0) {
@@ -1567,13 +1674,17 @@ uint64_t EsFileFerryPacker::computePriorityQuota(
     return 0;
   }
   uint64_t quota =
-      (total_payload_quota_bytes * kPriorityWeights[idx]) / total_weight;
+      (total_payload_quota_bytes *
+       rateShareForTaskType(static_cast<EsFileTaskType>(idx))) /
+      total_weight;
   if (priority == EsFileTaskPriority::High) {
     uint64_t distributed = 0;
     for (size_t i = 0; i < active_groups.size(); ++i) {
       if (!active_groups[i].empty()) {
         distributed +=
-            (total_payload_quota_bytes * kPriorityWeights[i]) / total_weight;
+            (total_payload_quota_bytes *
+             rateShareForTaskType(static_cast<EsFileTaskType>(i))) /
+            total_weight;
       }
     }
     quota += total_payload_quota_bytes - distributed;

@@ -44,7 +44,7 @@ struct EsFilePacketHeader {
     // 文件总大小
     uint64_t file_size = 0;
     // payload 的 CRC32，可选
-    uint32_t crc32 = 0;
+    uint32_t crc32 = 0xFFFFFFFF;
     // 包总长度：48 + task_id_len + file_name_len + payload_len
     uint32_t total_len = 0;
     // 预留字段

@@ -54,21 +54,24 @@ struct EsFileGlobalOptions {
     // 单个 FileChunk 的默认业务分片大小。
     // 取 128KB：兼顾多路并发时的平滑度与包数量。
     size_t packet_chunk_bytes = 128 * 1024;
-    // 单轮调度的默认总发送预算。
-    // 取 8MB：兼顾 API/MP4 优先发送与下载类任务保底吞吐。
-    uint64_t scheduler_tick_budget_bytes = 8 * 1024 * 1024;
+    // 单轮调度的默认发送预算。
+    // 该值只控制单轮调度粒度与线程占用时长，不承担总体限速语义。
+    uint64_t scheduler_round_budget_bytes = 8 * 1024 * 1024;
     // HTTP 回源的默认最大并发窗口。
     // 取 6：适合作为 50 路以内混合任务的默认保护值。
     size_t http_pull_concurrency_limit = 6;
     // HTTP 回源的默认全局缓冲上限。
     // 取 24MB：与默认并发窗口一起控制瞬时内存占用。
     uint64_t http_pull_total_buffer_limit_bytes = 24 * 1024 * 1024;
-    // MP4 点播任务的默认拉取上限。
-    // 取 3MB/s：降低上层缓存积压风险，同时保持点播平滑性。
-    uint64_t mp4_vod_default_pull_rate_bps = 3 * 1024 * 1024;
-    // 资源下载任务的默认输出上限。
-    // 取 10MB/s：允许较高吞吐，但避免抢占 API/MP4。
-    uint64_t resource_download_default_emit_rate_bps = 10 * 1024 * 1024;
+    // 全部 HTTP 任务共享的总体拉流速率上限。
+    // 在稳态下，发送速率与该值保持同量级一致，上层无需再做独立业务限速。
+    uint64_t http_pull_total_rate_bps = 12 * 1024 * 1024;
+    // API 请求在总速率中的默认占比权重。
+    uint32_t http_api_rate_share = 50;
+    // MP4 点播在总速率中的默认占比权重。
+    uint32_t http_mp4_rate_share = 35;
+    // 资源下载在总速率中的默认占比权重。
+    uint32_t http_download_rate_share = 15;
 };
 
 class EsFileFerryPacker {
@@ -90,9 +93,9 @@ public:
     // 用法：下游回调/发送链路较快时可适当调大以减少包数；
     // 多路并发较高、希望调度更平滑时可适当调小。
     void setChunkSize(size_t chunk_size);
-    // 设置每个 tick 的全局发送预算，0 表示恢复默认值。
-    // 用法：用于限制单次调度周期内的总发送量，避免单轮发送占用线程过久。
-    void setTickPayloadQuotaBytes(uint64_t quota_bytes);
+    // 设置单轮调度的全局发送预算，0 表示恢复默认值。
+    // 用法：用于限制单次调度循环内的总发送量，避免单轮发送占用线程过久。
+    void setSchedulerRoundBudgetBytes(uint64_t budget_bytes);
     // 设置 HTTP 拉取最大并发数，0 表示恢复默认值。
     // 用法：该值限制同时处于拉取态的 HTTP 任务数，不建议直接设为总任务数。
     void setMaxHttpFetchConcurrency(size_t max_concurrency);
@@ -323,26 +326,21 @@ private:
     static constexpr uint32_t kDefaultBootstrapIntervalMs = 2000;
     // 速率整形的基础唤醒间隔，帮助令牌桶按较平滑的节拍恢复发送。
     static constexpr uint32_t kDefaultPaceIntervalMs = 20;
-    // 视频专网每个 tick 的默认全局发送预算。
+    // 视频专网默认的单轮调度发送预算。
     // 作用：限制单轮调度的总出流量，保障多路公平轮转而不是被大视频或大 JSON 长时间独占。
     // 默认取 8MB：适合作为 API/MP4 优先、下载保底场景的吞吐/公平折中值。
-    static constexpr uint64_t kDefaultTickPayloadBudgetBytes = 8 * 1024 * 1024;
+    static constexpr uint64_t kDefaultSchedulerRoundBudgetBytes =
+        8 * 1024 * 1024;
     // 三档优先级默认预算权重：高优 API，中优 MP4 点播，低优下载。
-    static constexpr uint32_t kHighPriorityWeight = 50;
-    static constexpr uint32_t kMediumPriorityWeight = 35;
-    static constexpr uint32_t kLowPriorityWeight = 15;
     // 三类任务的默认单任务缓冲上限。
     static constexpr uint64_t kDefaultApiBufferedBytes = 512 * 1024;
     static constexpr uint64_t kDefaultMp4BufferedBytes = 1024 * 1024;
     static constexpr uint64_t kDefaultDownloadBufferedBytes =
         kDefaultMaxHttpBufferedBytesPerTask;
-    static constexpr uint64_t kDefaultMp4VodPullRateBytesPerSec =
-        3 * 1024 * 1024;
-    static constexpr uint64_t kDefaultResourceDownloadEmitRateBytesPerSec =
-        10 * 1024 * 1024;
 
     // 获取本地文件大小
     static bool getFileSize(const std::string &file_path, uint64_t &size);
+    static size_t taskTypeToIndex(EsFileTaskType type);
     // 选择输出文件名（优先显式传入）
     static std::string pickFileName(const std::string &file_path, const std::string &file_name);
     // 组装协议头
@@ -408,6 +406,17 @@ private:
     void applyTaskProfileLocked(TaskState &task,
                                 EsFileTaskType task_type,
                                 bool reset_buckets);
+    // 获取指定任务类型的全局带宽占比
+    uint32_t rateShareForTaskType(EsFileTaskType type) const;
+    // 根据当前活跃任务重新分配全局共享速率（调用方需已持锁）
+    void recomputeAllTaskRateProfilesLocked(bool reset_buckets);
+    // 基于类型占比和活跃数刷新单任务令牌桶（调用方需已持锁）
+    void refreshTaskRateBucketsLocked(
+        TaskState &task,
+        const std::array<size_t, 3> &active_counts,
+        size_t active_type_count,
+        uint32_t active_share_sum,
+        bool reset_buckets);
     // 更新令牌桶
     static void refillTokenBucket(TokenBucket &bucket);
     // 当前令牌桶可用的字节数

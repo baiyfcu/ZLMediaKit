@@ -482,6 +482,12 @@ private:
             return;
         }
         if (!_header_emitted) {
+            if (!_pending_body.empty()) {
+                WarnL << "replace play channel pending body before header, task_id:" << _task_id
+                      << " old_count:" << _pending_body.size()
+                      << " new_size:" << buf->size();
+                _pending_body.clear();
+            }
             _pending_body.emplace_back(buf);
             return;
         }
@@ -534,6 +540,7 @@ private:
         InfoL << "play channel cleanup task, task_id:" << _task_id
               << " completed:" << _completed.load()
               << " header_emitted:" << _header_emitted;
+        _pending_body.clear();
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("del"));
         EsFileFerryUnPacker::Instance().removeTask(_task_id);
         if (_fp_test) {
