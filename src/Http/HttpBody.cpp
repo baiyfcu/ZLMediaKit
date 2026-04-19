@@ -286,25 +286,13 @@ public:
                 return;
             }
             if (event.type == EsFilePacketType::FileInfo) {
-                if (self->_fp_test == nullptr) {
-                    auto path = ("./tem/" + self->_task_id + ".mp4");
-                    //self->_fp_test = File::create_file(path.c_str(), "wb");
-                }
             } else if (event.type == EsFilePacketType::FileChunk) {
                 if (!self->_received_file_info) {
                     DebugL << "test,hex:" << toolkit::hexmem(event.payload.data(), 12);
                     int i = 0;
                     i++;
                 }
-                // 写入文件
-                if (self->_fp_test) {
-                    fwrite(event.payload.data(), 1, event.payload.size(), self->_fp_test);
-                }
             } else if (event.type == EsFilePacketType::FileEnd) {
-                if (self->_fp_test) {
-                    fclose(self->_fp_test);
-                    self->_fp_test = nullptr;
-                }
             }
 
             self->_poller->async([self, event]() {
@@ -545,10 +533,6 @@ private:
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("del"));
         EsFileFerryPuller::Instance().removeTaskFrames(_task_id);
         EsFileFerryUnPacker::Instance().removeTask(_task_id);
-        if (_fp_test) {
-            fclose(_fp_test);
-            _fp_test = nullptr;
-        }
     }
 
     HeaderCB _on_header;
@@ -565,7 +549,6 @@ private:
     std::deque<Buffer::Ptr> _pending_body;
     std::atomic_bool _task_registered{false};
     std::atomic_bool _completed{false};
-    FILE * _fp_test = nullptr;
     std::atomic<uint64_t> _last_activity_ms{0};
     std::atomic_bool _saw_task_event{false};
     bool _received_file_info = false;

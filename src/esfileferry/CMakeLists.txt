@@ -2,6 +2,8 @@
 
 option(ESFILEFERRY_BUILD_TESTS "Build esfileferry tests" ON)
 
+find_package(CURL REQUIRED)
+
 set(esfileferry_Root ${CMAKE_CURRENT_SOURCE_DIR})
 #收集源代码
 file(GLOB esfileferry_src_list ${esfileferry_Root}/*.h ${esfileferry_Root}/*.cpp)
@@ -20,6 +22,8 @@ target_include_directories(esfileferry
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>"
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../3rdpart/ZLToolKit/src>"
 )
+target_link_libraries(esfileferry
+    PRIVATE CURL::libcurl)
 
 update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FERRY)
 #update_cached_list(MK_LINK_LIBRARIES ZLMediaKit::EsFileFerry)

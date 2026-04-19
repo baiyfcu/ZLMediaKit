@@ -491,7 +491,9 @@ if(ENABLE_SRT)
 endif()
 
 if(ENABLE_FERRY)
+  find_package(CURL REQUIRED)
   update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FERRY)
+  update_cached_list(MK_LINK_LIBRARIES CURL::libcurl)
 endif()
 
 # ----------------------------------------------------------------------------
