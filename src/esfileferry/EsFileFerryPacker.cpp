@@ -1236,7 +1236,7 @@ EsFilePacketHeader EsFileFerryPacker::makePacketHeader(
   header.data_offset = data_offset;
   header.payload_len = payload_len;
   header.file_size = task.source.file_size;
-  header.crc32 = 0;
+  header.crc32 = 0xFFFFFFFF;
   header.total_len = static_cast<uint32_t>(
       kEsFileFixedHeaderSize + header.task_id_len + header.file_name_len + payload_len);
   header.reserved = timestamp_ms;

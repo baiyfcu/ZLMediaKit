@@ -35,10 +35,31 @@ struct EsTaskDataEvent {
     std::string status;
 };
 
+enum class EsFileUnpackErrorType {
+    Unknown = 0,
+    FrameTooSmall,
+    RawPacketDecodeFailed,
+    BufferedPacketInvalid,
+    MissingTask,
+};
+
+struct EsFileUnpackErrorEvent {
+    EsFileUnpackErrorType type = EsFileUnpackErrorType::Unknown;
+    std::string message;
+    std::string task_id;
+    EsFilePacketType packet_type = EsFilePacketType::Unknown;
+    uint32_t seq = 0;
+    uint32_t payload_len = 0;
+    uint64_t file_size = 0;
+    size_t miss_count = 0;
+    size_t frame_size = 0;
+};
+
 class EsFileFerryUnPacker {
 public:
     using OnTaskData = std::function<void(const EsTaskDataEvent &)>;
-    using OnError = std::function<void(const std::string &)>;
+    using OnError = std::function<void(const EsFileUnpackErrorEvent &)>;
+    using LegacyOnError = std::function<void(const std::string &)>;
 
     // 单例入口
     static EsFileFerryUnPacker &Instance();
@@ -59,6 +80,8 @@ public:
 
     // 设置统一错误回调
     void setOnError(OnError cb);
+    // 兼容旧版仅字符串错误描述回调
+    void setOnError(LegacyOnError cb);
 
 private:
     struct TaskRuntimeState {
@@ -82,7 +105,7 @@ private:
         uint64_t out_of_order_seq_count = 0;
     };
 
-    EsFileFerryUnPacker() = default;
+    EsFileFerryUnPacker();
     EsFileFerryUnPacker(const EsFileFerryUnPacker &) = delete;
     EsFileFerryUnPacker &operator=(const EsFileFerryUnPacker &) = delete;
 
@@ -91,13 +114,13 @@ private:
     // 从内部缓冲区解析一个完整协议包
     bool parseOnePacket(EsFilePacket &packet);
     // 从外部原始字节解析一个完整协议包（不修改内部缓冲）
-    bool parseOnePacketFromRaw(const uint8_t *data, size_t size, EsFilePacket &packet, size_t &consumed) const;
+    bool parseOnePacketFromRaw(const uint8_t *data, size_t size, EsFilePacket &packet, size_t &consumed);
     // 分发协议包到对应 task 回调并更新运行态
     void dispatchPacket(EsFilePacket packet);
     // 更新最近错误信息
     void setLastError(const std::string &err);
     // 触发错误回调
-    void emitError(const std::string &err);
+    void emitError(EsFileUnpackErrorEvent event);
 
 private:
     void compactBufferLocked();
@@ -120,4 +143,7 @@ private:
     std::unordered_map<std::string, TaskRuntimeState> _task_states;
     // 错误回调
     OnError _on_error;
+
+    FILE * _fp_test = nullptr;
+
 };

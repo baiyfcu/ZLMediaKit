@@ -287,9 +287,14 @@ public:
             if (event.type == EsFilePacketType::FileInfo) {
                 if (self->_fp_test == nullptr) {
                     auto path = ("./tem/" + self->_task_id + ".mp4");
-                    self->_fp_test = File::create_file(path.c_str(), "wb");
+                    //self->_fp_test = File::create_file(path.c_str(), "wb");
                 }
             } else if (event.type == EsFilePacketType::FileChunk) {
+                if (!self->_received_file_info) {
+                    DebugL << "test,hex:" << toolkit::hexmem(event.payload.data(), 12);
+                    int i = 0;
+                    i++;
+                }
                 // 写入文件
                 if (self->_fp_test) {
                     fwrite(event.payload.data(), 1, event.payload.size(), self->_fp_test);
@@ -320,7 +325,7 @@ public:
     }
 
 private:
-    static constexpr uint64_t kInitialHeaderTimeoutMs = 90 * 1000;
+    static constexpr uint64_t kInitialHeaderTimeoutMs = 10 * 1000;
 
     HttpHeader buildDebugResponseHeader(HttpHeader header) const {
         if (!_task_id.empty()) {
@@ -531,6 +536,10 @@ private:
               << " header_emitted:" << _header_emitted;
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("del"));
         EsFileFerryUnPacker::Instance().removeTask(_task_id);
+        if (_fp_test) {
+            fclose(_fp_test);
+            _fp_test = nullptr;
+        }
     }
 
     HeaderCB _on_header;
@@ -539,7 +548,7 @@ private:
     EventPoller::Ptr _poller;
     PlayChannelRequestContext _ctx;
     std::string _method = "GET";
-    uint64_t _timeout_ms = 30 * 1000;
+    uint64_t _timeout_ms = 10 * 1000;
     std::string _task_id;
     int _response_code = 200;
     HttpHeader _response_header;

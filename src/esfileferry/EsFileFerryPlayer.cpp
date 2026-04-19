@@ -1,4 +1,7 @@
 ﻿#include "EsFileFerryPlayer.h"
+
+#include "Util/File.h"
+#include "Util/TimeTicker.h"
 #include "Util/logger.h"
 #include <cstring>
 #include <mutex>
@@ -58,6 +61,22 @@ bool shouldLogMissingTask(const std::string &task_id, size_t &count) {
   std::lock_guard<std::mutex> lock(s_mtx);
   count = ++s_missing_counts[task_id];
   return count <= 5 || count % 100 == 0;
+}
+
+const char *unpackErrorTypeName(EsFileUnpackErrorType type) {
+  switch (type) {
+  case EsFileUnpackErrorType::FrameTooSmall:
+    return "frame_too_small";
+  case EsFileUnpackErrorType::RawPacketDecodeFailed:
+    return "raw_packet_decode_failed";
+  case EsFileUnpackErrorType::BufferedPacketInvalid:
+    return "buffered_packet_invalid";
+  case EsFileUnpackErrorType::MissingTask:
+    return "missing_task";
+  case EsFileUnpackErrorType::Unknown:
+  default:
+    return "unknown";
+  }
 }
 
 PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
@@ -173,6 +192,16 @@ void EsFileFerryUnPacker::setOnError(OnError cb) {
   _on_error = std::move(cb);
 }
 
+void EsFileFerryUnPacker::setOnError(LegacyOnError cb) {
+  if (!cb) {
+    setOnError(OnError{});
+    return;
+  }
+  setOnError([cb = std::move(cb)](const EsFileUnpackErrorEvent &event) {
+    cb(event.message);
+  });
+}
+
 
 static const char *memfind_ferry(const char *buf, ssize_t len, const char *subbuf, ssize_t sublen) {
     for (auto i = 0; i < len - sublen; ++i) {
@@ -239,10 +268,29 @@ void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::funct
 #endif
 
 bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
-  if (!data || size == 0) {
+  //fwrite(data, 1, size, _fp_test);
+  if (!data || size <= 48) {
+    if (data || size > 5) {
+        if (size > 8 && (data[5] == 0x42 && data[6] == 0x51)) {
+            return false;
+        }
+        if (data[4] == 0x67)
+            WarnL << "inputFrame sps,hex:" << toolkit::hexmem(data, size);
+        else if (data[4] == 0x68)
+            WarnL << "inputFrame pps,hex:" << toolkit::hexmem(data, size);
+        else if (data[4] == 0x65) {
+            WarnL << "inputFrame idr,hex:" << toolkit::hexmem(data, size);
+        }else
+            ErrorL << "inputFrame err,hex:" << toolkit::hexmem(data, size);
+      // EsFileUnpackErrorEvent event;
+      // event.type = EsFileUnpackErrorType::FrameTooSmall;
+      // event.message = "input frame too small";
+      // event.frame_size = size;
+      // emitError(std::move(event));
+    }
     return false;
   }
-
+  TimeTicker1(20);
   // Fast path: a complete ferry packet arrives in one frame.
   EsFilePacket packet;
   size_t consumed = 0;
@@ -258,6 +306,11 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
   parseBuffer();
   return true;
 }
+
+EsFileFerryUnPacker::EsFileFerryUnPacker() {
+    _fp_test = File::create_file("./tem/abc.h264", "wb");
+}
+
 void EsFileFerryUnPacker::parseBuffer() {
   while (true) {
     EsFilePacket packet;
@@ -269,81 +322,105 @@ void EsFileFerryUnPacker::parseBuffer() {
 }
 
 bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
-  std::lock_guard<std::mutex> lock(_mtx);
-  const auto available = _buffer.size() - _buffer_start;
-  if (available < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
-    return false;
-  }
-  const auto *buffer_data = _buffer.data() + _buffer_start;
+  EsFileUnpackErrorEvent pending_error;
+  bool has_pending_error = false;
+  bool parsed = false;
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    const auto available = _buffer.size() - _buffer_start;
+    if (available < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+      return false;
+    }
+    const auto *buffer_data = _buffer.data() + _buffer_start;
 
-  bool found = false;
-  const auto start = scanPacketStart(buffer_data, available, kEsFilePacketMagic, found);
+    bool found = false;
+    const auto start =
+        scanPacketStart(buffer_data, available, kEsFilePacketMagic, found);
 
-  if (!found) {
+    if (!found) {
+      if (start > 0) {
+        _buffer_start += start;
+        compactBufferLocked();
+      }
+      return false;
+    }
+
     if (start > 0) {
       _buffer_start += start;
       compactBufferLocked();
     }
-    return false;
-  }
 
-  if (start > 0) {
-    _buffer_start += start;
-    compactBufferLocked();
-  }
-
-  size_t consumed = 0;
-  const auto packet_available = _buffer.size() - _buffer_start;
-  const auto status = decodePacketAt(_buffer.data() + _buffer_start, packet_available,
-                                     kEsFilePacketMagic, kEsFileFixedHeaderSize,
-                                     kMaxPacketSize, packet, consumed);
-  if (status == PacketDecodeStatus::Success) {
-    _buffer_start += consumed;
-    compactBufferLocked();
-    return true;
-  }
-  if (shouldLogFrameCandidate(_buffer.data() + _buffer_start, packet_available)) {
-    EsFilePacketHeader header;
-    const auto has_header = tryDecodeCandidateHeader(_buffer.data() + _buffer_start,
-                                                     packet_available, header);
-    const auto sample_size = packet_available > 8 ? 8 : packet_available;
-    if (status == PacketDecodeStatus::Invalid || packet_available >= 64 * 1024) {
-      WarnL << "parse buffered packet, status:" << packetDecodeStatusName(status)
-            << " available:" << packet_available
-            << " buffer_start:" << _buffer_start
-            << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start, sample_size)
-            << " has_header:" << has_header
-            << " total_len:" << (has_header ? header.total_len : 0)
-            << " payload_len:" << (has_header ? header.payload_len : 0)
-            << " task_id_len:" << (has_header ? header.task_id_len : 0)
-            << " file_name_len:" << (has_header ? header.file_name_len : 0);
+    size_t consumed = 0;
+    const auto packet_available = _buffer.size() - _buffer_start;
+    const auto status =
+        decodePacketAt(_buffer.data() + _buffer_start, packet_available,
+                       kEsFilePacketMagic, kEsFileFixedHeaderSize,
+                       kMaxPacketSize, packet, consumed);
+    if (status == PacketDecodeStatus::Success) {
+      _buffer_start += consumed;
+      compactBufferLocked();
+      parsed = true;
     } else {
-      DebugL << "parse buffered packet, status:" << packetDecodeStatusName(status)
-             << " available:" << packet_available
-             << " buffer_start:" << _buffer_start
-             << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start, sample_size)
-             << " has_header:" << has_header
-             << " total_len:" << (has_header ? header.total_len : 0)
-             << " payload_len:" << (has_header ? header.payload_len : 0)
-             << " task_id_len:" << (has_header ? header.task_id_len : 0)
-             << " file_name_len:" << (has_header ? header.file_name_len : 0);
+      if (status == PacketDecodeStatus::Invalid) {
+        pending_error.type = EsFileUnpackErrorType::BufferedPacketInvalid;
+        pending_error.message = "decode buffered packet failed";
+        pending_error.frame_size = packet_available;
+        has_pending_error = true;
+      }
+      if (shouldLogFrameCandidate(_buffer.data() + _buffer_start,
+                                  packet_available)) {
+        EsFilePacketHeader header;
+        const auto has_header = tryDecodeCandidateHeader(
+            _buffer.data() + _buffer_start, packet_available, header);
+        const auto sample_size = packet_available > 8 ? 8 : packet_available;
+        if (status == PacketDecodeStatus::Invalid || packet_available >= 64 * 1024) {
+          WarnL << "parse buffered packet, status:"
+                << packetDecodeStatusName(status)
+                << " available:" << packet_available
+                << " buffer_start:" << _buffer_start
+                << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start,
+                                              sample_size)
+                << " has_header:" << has_header
+                << " total_len:" << (has_header ? header.total_len : 0)
+                << " payload_len:" << (has_header ? header.payload_len : 0)
+                << " task_id_len:" << (has_header ? header.task_id_len : 0)
+                << " file_name_len:" << (has_header ? header.file_name_len : 0);
+        } else {
+          DebugL << "parse buffered packet, status:"
+                 << packetDecodeStatusName(status)
+                 << " available:" << packet_available
+                 << " buffer_start:" << _buffer_start
+                 << " hex:" << toolkit::hexmem(_buffer.data() + _buffer_start,
+                                               sample_size)
+                 << " has_header:" << has_header
+                 << " total_len:" << (has_header ? header.total_len : 0)
+                 << " payload_len:" << (has_header ? header.payload_len : 0)
+                 << " task_id_len:" << (has_header ? header.task_id_len : 0)
+                 << " file_name_len:" << (has_header ? header.file_name_len : 0);
+        }
+      }
+      if (status == PacketDecodeStatus::Invalid) {
+        ++_buffer_start;
+        compactBufferLocked();
+      }
     }
   }
-  if (status == PacketDecodeStatus::Invalid) {
-    ++_buffer_start;
-    compactBufferLocked();
+  if (has_pending_error) {
+    emitError(std::move(pending_error));
   }
-  return false;
+  return parsed;
 }
 
 bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
                                                 size_t size,
                                                 EsFilePacket &packet,
-                                                size_t &consumed) const {
+                                                size_t &consumed) {
   consumed = 0;
-  if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
-    return false;
-  }
+    if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+        ErrorL << "inputFrame1,hex:" << toolkit::hexmem(data, size);
+        return false;
+    }else
+        DebugL << "inputFrame2,hex:" << toolkit::hexmem(data, 25);
 
   bool found = false;
   const auto start = scanPacketStart(data, size, kEsFilePacketMagic, found);
@@ -360,6 +437,13 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
   if (status != PacketDecodeStatus::Success) {
     const auto *candidate = data + start;
     const auto candidate_size = size - start;
+    if (status == PacketDecodeStatus::Invalid) {
+      EsFileUnpackErrorEvent event;
+      event.type = EsFileUnpackErrorType::RawPacketDecodeFailed;
+      event.message = "decode raw packet failed";
+      event.frame_size = candidate_size;
+      emitError(std::move(event));
+    }
     if (shouldLogFrameCandidate(candidate, candidate_size)) {
       EsFilePacketHeader header;
       const auto has_header =
@@ -386,72 +470,88 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet) {
   TaskRuntimeState state_snapshot;
   bool has_state = false;
   const bool is_control_packet = packet.task_id == kBootstrapTaskId;
+  EsFileUnpackErrorEvent pending_error;
+  bool has_pending_error = false;
   {
     std::lock_guard<std::mutex> lock(_mtx);
     auto it = _task_callbacks.find(packet.task_id);
     if (it == _task_callbacks.end()) {
       size_t miss_count = 0;
       if (shouldLogMissingTask(packet.task_id, miss_count)) {
-        WarnL << "task_id not found, task_id:" << packet.task_id
-              << " packet_type:" << EsFilePacketTypeToString(packet.header.type)
-              << " seq:" << packet.header.seq
-              << " payload_len:" << packet.header.payload_len
-              << " file_size:" << packet.header.file_size
-              << " miss_count:" << miss_count
-              << " this:" << this;
+        pending_error.type = EsFileUnpackErrorType::MissingTask;
+        pending_error.message =
+            StrPrinter << "task_id not found, task_id:" << packet.task_id
+                       << " packet_type:"
+                       << EsFilePacketTypeToString(packet.header.type)
+                       << " seq:" << packet.header.seq
+                       << " payload_len:" << packet.header.payload_len
+                       << " file_size:" << packet.header.file_size
+                       << " miss_count:" << miss_count;
+        pending_error.task_id = packet.task_id;
+        pending_error.packet_type = packet.header.type;
+        pending_error.seq = packet.header.seq;
+        pending_error.payload_len = packet.header.payload_len;
+        pending_error.file_size = packet.header.file_size;
+        pending_error.miss_count = miss_count;
+        pending_error.frame_size = packet.payload.size();
+        has_pending_error = true;
       }
-      return;
-    }
-    if (packet.header.type == EsFilePacketType::FileInfo) {
-      DebugL << "dispatch file info, task_id:" << packet.task_id
-             << " seq:" << packet.header.seq
-             << " payload_len:" << packet.header.payload_len
-             << " file_size:" << packet.header.file_size
-             << " flags:" << packet.header.flags
-             << " callback_count:" << _task_callbacks.size()
-             << " this:" << this;
-    }
-    on_task_data = it->second;
-    if (!is_control_packet) {
-      auto &state = _task_states[packet.task_id];
-      state.matched_packet_count++;
-      state.matched_bytes += packet.header.payload_len;
-      if (packet.header.file_size > 0) {
-        state.file_size = packet.header.file_size;
-      }
+    } else {
       if (packet.header.type == EsFilePacketType::FileInfo) {
-        state.received_size = 0;
-        state.completed = false;
-        state.has_seq = false;
-      } else if (packet.header.type == EsFilePacketType::FileChunk) {
-        const auto current =
-            packet.header.data_offset + packet.header.payload_len;
-        if (current > state.received_size) {
-          state.received_size = current;
-        }
-      } else if (packet.header.type == EsFilePacketType::FileEnd) {
-        const auto current =
-            packet.header.data_offset + packet.header.payload_len;
-        if (current > state.received_size) {
-          state.received_size = current;
-        }
-        if (state.file_size > 0) {
-          state.received_size = state.file_size;
-        }
-        state.completed = true;
+        DebugL << "dispatch file info, task_id:" << packet.task_id
+               << " seq:" << packet.header.seq
+               << " payload_len:" << packet.header.payload_len
+               << " file_size:" << packet.header.file_size
+               << " flags:" << packet.header.flags
+               << " callback_count:" << _task_callbacks.size()
+               << " this:" << this;
       }
-      if (state.has_seq) {
-        if (packet.header.seq == state.last_seq) {
-          state.duplicate_seq_count++;
-        } else if (packet.header.seq < state.last_seq) {
-          state.out_of_order_seq_count++;
+      on_task_data = it->second;
+      if (!is_control_packet) {
+        auto &state = _task_states[packet.task_id];
+        state.matched_packet_count++;
+        state.matched_bytes += packet.header.payload_len;
+        if (packet.header.file_size > 0) {
+          state.file_size = packet.header.file_size;
         }
+        if (packet.header.type == EsFilePacketType::FileInfo) {
+          state.received_size = 0;
+          state.completed = false;
+          state.has_seq = false;
+        } else if (packet.header.type == EsFilePacketType::FileChunk) {
+          const auto current =
+              packet.header.data_offset + packet.header.payload_len;
+          if (current > state.received_size) {
+            state.received_size = current;
+          }
+        } else if (packet.header.type == EsFilePacketType::FileEnd) {
+          const auto current =
+              packet.header.data_offset + packet.header.payload_len;
+          if (current > state.received_size) {
+            state.received_size = current;
+          }
+          if (state.file_size > 0) {
+            state.received_size = state.file_size;
+          }
+          state.completed = true;
+        }
+        if (state.has_seq) {
+          if (packet.header.seq == state.last_seq) {
+            state.duplicate_seq_count++;
+          } else if (packet.header.seq < state.last_seq) {
+            state.out_of_order_seq_count++;
+          }
+        }
+        state.last_seq = packet.header.seq;
+        state.has_seq = true;
+        state_snapshot = state;
+        has_state = true;
       }
-      state.last_seq = packet.header.seq;
-      state.has_seq = true;
-      state_snapshot = state;
-      has_state = true;
     }
+  }
+  if (has_pending_error) {
+    emitError(std::move(pending_error));
+    return;
   }
 
   if (!on_task_data) {
@@ -513,14 +613,18 @@ void EsFileFerryUnPacker::setLastError(const std::string &err) {
   _last_error = err;
 }
 
-void EsFileFerryUnPacker::emitError(const std::string &err) {
+void EsFileFerryUnPacker::emitError(EsFileUnpackErrorEvent event) {
   OnError cb;
   {
     std::lock_guard<std::mutex> lock(_mtx);
+    if (event.message.empty()) {
+      event.message = unpackErrorTypeName(event.type);
+    }
+    _last_error = event.message;
     cb = _on_error;
   }
   if (cb) {
-    cb(err);
+    cb(event);
   }
 }
 
