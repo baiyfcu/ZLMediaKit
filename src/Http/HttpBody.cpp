@@ -27,6 +27,7 @@
 #include "Util/uv_errno.h"
 
 #include "Common/config.h"
+#include "esfileferry/EsFileFerryPuller.h"
 #include "esfileferry/EsFileFerryPlayer.h"
 #include "HttpBody.h"
 #include "HttpClient.h"
@@ -542,6 +543,7 @@ private:
               << " header_emitted:" << _header_emitted;
         _pending_body.clear();
         NoticeCenter::Instance().emitEvent(Broadcast::kBroadcastPlayChannelTaskEvent, _ctx, std::string("del"));
+        EsFileFerryPuller::Instance().removeTaskFrames(_task_id);
         EsFileFerryUnPacker::Instance().removeTask(_task_id);
         if (_fp_test) {
             fclose(_fp_test);
