@@ -6,6 +6,9 @@ const size_t kEsFileFixedHeaderSize = 48;
 const uint16_t kEsFileFlagFileInfoHasHttpResponseHeaders = 0x0001;
 const uint8_t kEsFileCarrierNalHeader = 0x61;
 const size_t kEsFileCarrierPrefixSize = 5;
+const size_t kEsFileCarrierShortPrefixSize = 4;
+const uint16_t kEsFileMaxTaskIdLen = 1024;
+const uint16_t kEsFileMaxFileNameLen = 1024;
 
 void WriteEsFileU16BE(std::vector<uint8_t> &out, uint16_t value) {
     out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
@@ -62,10 +65,30 @@ void AppendEsFileCarrierPrefix(std::vector<uint8_t> &out) {
 }
 
 bool HasEsFileCarrierPrefix(const uint8_t *data, size_t size) {
-    return data && size >= kEsFileCarrierPrefixSize &&
-           data[0] == 0x00 && data[1] == 0x00 &&
-           data[2] == 0x00 && data[3] == 0x01 &&
-           data[4] == kEsFileCarrierNalHeader;
+    size_t prefix_size = 0;
+    return DetectEsFileCarrierPrefixSize(data, size, prefix_size);
+}
+
+bool DetectEsFileCarrierPrefixSize(const uint8_t *data, size_t size,
+                                   size_t &prefix_size) {
+    prefix_size = 0;
+    if (!data) {
+        return false;
+    }
+    if (size >= kEsFileCarrierPrefixSize &&
+        data[0] == 0x00 && data[1] == 0x00 &&
+        data[2] == 0x00 && data[3] == 0x01 &&
+        data[4] == kEsFileCarrierNalHeader) {
+        prefix_size = kEsFileCarrierPrefixSize;
+        return true;
+    }
+    if (size >= kEsFileCarrierShortPrefixSize &&
+        data[0] == 0x00 && data[1] == 0x00 &&
+        data[2] == 0x01 && data[3] == kEsFileCarrierNalHeader) {
+        prefix_size = kEsFileCarrierShortPrefixSize;
+        return true;
+    }
+    return false;
 }
 
 void AppendEsFilePacketHeader(std::vector<uint8_t> &out,
@@ -104,6 +127,19 @@ bool DecodeEsFilePacketHeader(const uint8_t *data, size_t size,
     header.total_len = ReadEsFileU32BE(data + 40);
     header.reserved = ReadEsFileU32BE(data + 44);
     return true;
+}
+
+bool IsEsFilePacketTypeKnown(EsFilePacketType type) {
+    switch (type) {
+    case EsFilePacketType::Unknown:
+    case EsFilePacketType::FileInfo:
+    case EsFilePacketType::FileChunk:
+    case EsFilePacketType::FileEnd:
+    case EsFilePacketType::TaskStatus:
+        return true;
+    default:
+        return false;
+    }
 }
 
 std::string EsFilePacketTypeToString(EsFilePacketType type){

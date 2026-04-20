@@ -16,6 +16,7 @@ constexpr uint64_t EsFileFerryPacker::kDefaultMaxHttpBufferedBytes;
 constexpr uint32_t EsFileFerryPacker::kDefaultBootstrapIntervalMs;
 constexpr uint32_t EsFileFerryPacker::kDefaultPaceIntervalMs;
 constexpr uint64_t EsFileFerryPacker::kDefaultSchedulerRoundBudgetBytes;
+constexpr uint64_t EsFileFerryPacker::kDefaultMinEmitPayloadBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultApiBufferedBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultMp4BufferedBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultDownloadBufferedBytes;
@@ -189,6 +190,12 @@ void EsFileFerryPacker::setSchedulerRoundBudgetBytes(uint64_t budget_bytes) {
   _packet_runtime.packet_sem.post();
 }
 
+void EsFileFerryPacker::setMinEmitPayloadBytes(uint64_t min_payload_bytes) {
+  std::lock_guard<std::mutex> lock(_mtx);
+  _global_options.min_emit_payload_bytes = min_payload_bytes;
+  _packet_runtime.packet_sem.post();
+}
+
 void EsFileFerryPacker::setMaxHttpFetchConcurrency(size_t max_concurrency) {
   {
     std::lock_guard<std::mutex> lock(_mtx);
@@ -221,6 +228,7 @@ void EsFileFerryPacker::setGlobalOptions(const EsFileGlobalOptions &opts) {
         opts.scheduler_round_budget_bytes == 0
             ? kDefaultSchedulerRoundBudgetBytes
             : opts.scheduler_round_budget_bytes;
+    _global_options.min_emit_payload_bytes = opts.min_emit_payload_bytes;
     _global_options.http_pull_concurrency_limit =
         opts.http_pull_concurrency_limit == 0 ? kDefaultHttpFetchConcurrency
                                               : opts.http_pull_concurrency_limit;
@@ -282,14 +290,7 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
                                 const HttpHeaders &headers,
                                 const std::string &body,
                                 const std::string &file_name) {
-  if (task_id.empty()) {
-    setLastError("task_id is empty");
-    return false;
-  }
-  if (source.empty()) {
-    setLastError("source is empty");
-    return false;
-  }
+
   TaskState state;
   state.task_id = task_id;
   if (isHttpUrl(source)) {
@@ -669,6 +670,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
         uint64_t generation = 0;
         size_t read_len = 0;
         uint64_t emit_token_quota = 0;
+        uint64_t min_emit_payload_bytes = 0;
         const auto packet_ts = nextRelativeTimestampMs();
         std::shared_ptr<std::ifstream> file_stream;
         std::shared_ptr<std::condition_variable> buffer_cv;
@@ -692,19 +694,36 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           seq = task.send.next_seq;
           refillTokenBucket(task.control.emit_bucket);
           emit_token_quota = peekTokenBucketBytes(task.control.emit_bucket);
+          min_emit_payload_bytes = _global_options.min_emit_payload_bytes;
           if (emit_token_quota == 0) {
             break;
           }
           if (task.http.source) {
-            if (!task.http.buffer.chunks.empty()) {
-              auto &front_chunk = task.http.buffer.chunks.front();
-              const auto available =
-                  front_chunk->size - task.http.buffer.front_chunk_offset;
+            if (task.http.buffer.buffered_bytes == 0 ||
+                task.http.buffer.chunks.empty()) {
+              no_data = true;
+            } else {
+              const auto buffered = task.http.buffer.buffered_bytes;
+              const bool http_stream_finished = !task.http.queued && !task.http.active;
+              const bool allow_tail_emit =
+                  http_stream_finished &&
+                  min_emit_payload_bytes > 0 &&
+                  buffered <= min_emit_payload_bytes;
+              if (min_emit_payload_bytes > 0 &&
+                  emit_token_quota < min_emit_payload_bytes &&
+                  !allow_tail_emit) {
+                break;
+              }
+              if (min_emit_payload_bytes > 0 &&
+                  buffered < min_emit_payload_bytes &&
+                  !allow_tail_emit) {
+                break;
+              }
               read_len = static_cast<size_t>(std::min<uint64_t>(
                   std::min<uint64_t>(
                       std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),
-                                     emit_token_quota),
-                  available));
+                      emit_token_quota),
+                  buffered));
               if (read_len == 0) {
                 no_data = true;
               } else {
@@ -716,38 +735,72 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                     static_cast<uint32_t>(read_len), 0, seq, packet_ts);
                 packet = buildPacket(packet_task, packet_header, read_len,
                                      &payload_offset);
-                std::memcpy(packet.data() + payload_offset,
-                            front_chunk->data.data() +
-                                task.http.buffer.front_chunk_offset,
-                            read_len);
-                consumeTokenBucketBytes(task.control.emit_bucket, read_len);
-                task.send.sent_bytes += read_len;
-                task.send.next_seq++;
-                task.http.buffer.front_chunk_offset += read_len;
-                task.http.buffer.buffered_bytes -= read_len;
-                _http_runtime.total_buffered_bytes -= read_len;
-                if (task.http.buffer.front_chunk_offset >= front_chunk->size) {
-                  task.http.buffer.chunks.pop_front();
-                  task.http.buffer.front_chunk_offset = 0;
+                size_t copied = 0;
+                while (copied < read_len && !task.http.buffer.chunks.empty()) {
+                  auto &front_chunk = task.http.buffer.chunks.front();
+                  const auto available =
+                      front_chunk->size - task.http.buffer.front_chunk_offset;
+                  const auto need = read_len - copied;
+                  const auto step = std::min(available, need);
+                  if (step == 0) {
+                    break;
+                  }
+                  std::memcpy(packet.data() + payload_offset + copied,
+                              front_chunk->data.data() +
+                                  task.http.buffer.front_chunk_offset,
+                              step);
+                  copied += step;
+                  task.http.buffer.front_chunk_offset += step;
+                  task.http.buffer.buffered_bytes -= step;
+                  _http_runtime.total_buffered_bytes -= step;
+                  if (task.http.buffer.front_chunk_offset >= front_chunk->size) {
+                    task.http.buffer.chunks.pop_front();
+                    task.http.buffer.front_chunk_offset = 0;
+                  }
                 }
-                quota -= read_len;
-                buffer_cv = task.http.buffer.cv;
-                can_emit_packet = true;
-                should_try_start_http =
-                    !_http_runtime.pending_fetches.empty() &&
-                    _http_runtime.active_fetches <
-                        _global_options.http_pull_concurrency_limit &&
-                    _http_runtime.total_buffered_bytes <
-                        _global_options.http_pull_total_buffer_limit_bytes;
+                if (copied == 0) {
+                  no_data = true;
+                } else {
+                  if (copied < read_len) {
+                    read_len = copied;
+                    packet_header.payload_len = static_cast<uint32_t>(copied);
+                    packet_header.total_len = static_cast<uint32_t>(
+                        kEsFileFixedHeaderSize + packet_header.task_id_len +
+                        packet_header.file_name_len + packet_header.payload_len);
+                    const auto payload_len_pos =
+                        static_cast<size_t>(kEsFileCarrierPrefixSize + 24);
+                    const auto total_len_pos =
+                        static_cast<size_t>(kEsFileCarrierPrefixSize + 40);
+                    writeU32BEAt(packet, payload_len_pos, packet_header.payload_len);
+                    writeU32BEAt(packet, total_len_pos, packet_header.total_len);
+                    packet.resize(payload_offset + copied);
+                  }
+                  consumeTokenBucketBytes(task.control.emit_bucket, read_len);
+                  task.send.sent_bytes += read_len;
+                  task.send.next_seq++;
+                  quota -= read_len;
+                  buffer_cv = task.http.buffer.cv;
+                  can_emit_packet = true;
+                  should_try_start_http =
+                      !_http_runtime.pending_fetches.empty() &&
+                      _http_runtime.active_fetches <
+                          _global_options.http_pull_concurrency_limit &&
+                      _http_runtime.total_buffered_bytes <
+                          _global_options.http_pull_total_buffer_limit_bytes;
+                }
               }
-            } else {
-              no_data = true;
             }
           } else {
             if (task.send.sent_bytes >= task.source.file_size) {
               no_data = true;
             } else {
               auto remain = task.source.file_size - task.send.sent_bytes;
+              const bool allow_tail_emit = remain <= min_emit_payload_bytes;
+              if (min_emit_payload_bytes > 0 &&
+                  emit_token_quota < min_emit_payload_bytes &&
+                  !allow_tail_emit) {
+                break;
+              }
               read_len = static_cast<size_t>(std::min<uint64_t>(
                   std::min<uint64_t>(
                       std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),

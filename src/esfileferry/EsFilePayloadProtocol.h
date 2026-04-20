@@ -47,7 +47,7 @@ struct EsFilePacketHeader {
     uint32_t crc32 = 0xFFFFFFFF;
     // 包总长度：48 + task_id_len + file_name_len + payload_len
     uint32_t total_len = 0;
-    // 预留字段
+    // 预留字段（接收端仅透传/记录，不能依赖其具体语义）
     uint32_t reserved = 0;
 };
 
@@ -68,6 +68,9 @@ extern const size_t kEsFileFixedHeaderSize;
 extern const uint16_t kEsFileFlagFileInfoHasHttpResponseHeaders;
 extern const uint8_t kEsFileCarrierNalHeader;
 extern const size_t kEsFileCarrierPrefixSize;
+extern const size_t kEsFileCarrierShortPrefixSize;
+extern const uint16_t kEsFileMaxTaskIdLen;
+extern const uint16_t kEsFileMaxFileNameLen;
 
 void WriteEsFileU16BE(std::vector<uint8_t> &out, uint16_t value);
 void WriteEsFileU32BE(std::vector<uint8_t> &out, uint32_t value);
@@ -76,10 +79,13 @@ uint16_t ReadEsFileU16BE(const uint8_t *p);
 uint32_t ReadEsFileU32BE(const uint8_t *p);
 uint64_t ReadEsFileU64BE(const uint8_t *p);
 void AppendEsFileCarrierPrefix(std::vector<uint8_t> &out);
+bool DetectEsFileCarrierPrefixSize(const uint8_t *data, size_t size,
+                                   size_t &prefix_size);
 bool HasEsFileCarrierPrefix(const uint8_t *data, size_t size);
 void AppendEsFilePacketHeader(std::vector<uint8_t> &out,
                               const EsFilePacketHeader &header);
 bool DecodeEsFilePacketHeader(const uint8_t *data, size_t size,
                               EsFilePacketHeader &header);
+bool IsEsFilePacketTypeKnown(EsFilePacketType type);
 
 std::string EsFilePacketTypeToString(EsFilePacketType type);

@@ -7,10 +7,7 @@ using namespace mediakit;
 using namespace toolkit;
 
 namespace {
-constexpr size_t kMaxPendingFrameBytesSoftLimit = 32 * 1024 * 1024;
-constexpr size_t kMaxPendingFrameBytesHardLimit = 64 * 1024 * 1024;
-constexpr int64_t kQueueSpaceWaitStepMs = 20;
-constexpr int64_t kQueueSpaceWaitSlowLogMs = 1000;
+constexpr size_t kPendingFrameCountWarnThreshold = 2000;
 constexpr const char *kUnknownTaskBucketKey = "__unknown__";
 
 struct FramePacketMeta {
@@ -28,19 +25,19 @@ FramePacketMeta tryDecodeFramePacketMeta(const Frame::Ptr &frame) {
     const auto *data =
         reinterpret_cast<const uint8_t *>(frame->data());
     const auto size = static_cast<size_t>(frame->size());
-    if (!HasEsFileCarrierPrefix(data, size) ||
-        size < kEsFileCarrierPrefixSize + kEsFileFixedHeaderSize) {
+    size_t prefix_size = 0;
+    if (!DetectEsFileCarrierPrefixSize(data, size, prefix_size) ||
+        size < prefix_size + kEsFileFixedHeaderSize) {
         return meta;
     }
 
     EsFilePacketHeader header;
-    if (!DecodeEsFilePacketHeader(data + kEsFileCarrierPrefixSize,
-                                  size - kEsFileCarrierPrefixSize, header)) {
+    if (!DecodeEsFilePacketHeader(data + prefix_size, size - prefix_size,
+                                  header)) {
         return meta;
     }
 
-    const auto payload_offset =
-        kEsFileCarrierPrefixSize + kEsFileFixedHeaderSize;
+    const auto payload_offset = prefix_size + kEsFileFixedHeaderSize;
     const auto task_end =
         payload_offset + static_cast<size_t>(header.task_id_len);
     if (task_end > size) {
@@ -90,8 +87,8 @@ bool EsFileFerryPuller::startPull(const std::string &url, int rtp_type) {
   stopPull();
   startUnpackWorker();
   DebugL << "startPull, url:" << url << " rtp_type:" << rtp_type;
-  auto poller = WorkThreadPool::Instance().getPoller();
-  MediaPlayer::Ptr player = std::make_shared<MediaPlayer>(poller);
+  //auto poller = WorkThreadPool::Instance().getPoller();
+  MediaPlayer::Ptr player = std::make_shared<MediaPlayer>();
   std::weak_ptr<MediaPlayer> weak_player = player;
   player->setOnPlayResult([this](const SockException &ex) { onPlayResult(ex); });
   player->setOnShutdown([this](const SockException &ex) { onShutdown(ex); });
@@ -155,33 +152,27 @@ void EsFileFerryPuller::removeTaskFrames(const std::string &task_id) {
     if (task_id.empty()) {
         return;
     }
-    size_t removed_frames = 0;
-    size_t removed_bytes = 0;
-    {
-        std::lock_guard<std::mutex> lock(_mtx);
-        auto it = _task_buckets.find(task_id);
-        if (it == _task_buckets.end()) {
-            return;
+    // removed_bucket 使用 std::move 到线程池中析构，避免在主线程中析构导致的占用网络线程资源
+    WorkThreadPool::Instance().getPoller()->async([=]() {
+        size_t removed_frames = 0;
+        size_t removed_bytes = 0;
+        PendingTaskBucket removed_bucket;
+        {
+            std::lock_guard<std::mutex> lock(_mtx);
+            auto it = _task_buckets.find(task_id);
+            if (it == _task_buckets.end()) {
+                return;
+            }
+            removed_frames = it->second.frames.size();
+            removed_bytes = it->second.buffered_bytes;
+            removed_bucket = std::move(it->second);
+            _task_buckets.erase(it);
+            _ready_task_ids.erase(std::remove(_ready_task_ids.begin(), _ready_task_ids.end(), task_id), _ready_task_ids.end());
         }
-        removed_frames = it->second.frames.size();
-        removed_bytes = it->second.buffered_bytes;
-        if (_pending_frame_bytes >= removed_bytes) {
-            _pending_frame_bytes -= removed_bytes;
-        } else {
-            _pending_frame_bytes = 0;
+        if (removed_frames > 0 || removed_bytes > 0) {
+            InfoL << "remove puller task bucket, task_id:" << task_id << " removed_frames:" << removed_frames << " removed_bytes:" << removed_bytes;
         }
-        _task_buckets.erase(it);
-        _ready_task_ids.erase(
-            std::remove(_ready_task_ids.begin(), _ready_task_ids.end(), task_id),
-            _ready_task_ids.end());
-    }
-    if (removed_frames > 0 || removed_bytes > 0) {
-        InfoL << "remove puller task bucket, task_id:" << task_id
-              << " removed_frames:" << removed_frames
-              << " removed_bytes:" << removed_bytes
-              << " remain_pending_bytes:" << _pending_frame_bytes;
-    }
-    _queue_space_cv.notify_all();
+    });
 }
 
 std::string EsFileFerryPuller::getStreamUrl() const {
@@ -276,7 +267,6 @@ void EsFileFerryPuller::startUnpackWorker() {
     }
     _task_buckets.clear();
     _ready_task_ids.clear();
-    _pending_frame_bytes = 0;
     _unpack_stop = false;
     _unpack_thread = std::thread([this]() { unpackWorkerLoop(); });
 }
@@ -288,13 +278,11 @@ void EsFileFerryPuller::stopUnpackWorker() {
         _unpack_stop = true;
         _task_buckets.clear();
         _ready_task_ids.clear();
-        _pending_frame_bytes = 0;
         if (_unpack_thread.joinable()) {
             join_thread = std::move(_unpack_thread);
         }
     }
     _frame_cv.notify_all();
-    _queue_space_cv.notify_all();
     if (join_thread.joinable()) {
         join_thread.join();
     }
@@ -314,57 +302,11 @@ bool EsFileFerryPuller::enqueueFrame(const Frame::Ptr &frame) {
     pending.meta.seq = decodedIncomingMeta.seq;
 
     size_t pending_bytes = 0;
-    bool over_soft_limit = false;
-    bool waited_for_space = false;
-    auto wait_start = std::chrono::steady_clock::time_point{};
+    size_t pending_frames = 0;
     {
         std::unique_lock<std::mutex> lock(_mtx);
         if (_unpack_stop) {
             return false;
-        }
-        if (pending.size > kMaxPendingFrameBytesHardLimit) {
-            WarnL << "drop oversize frame before enqueue, frame_size:" << pending.size
-                  << " task_id:" << (pending.meta.valid ? pending.meta.task_id : std::string("unknown"))
-                  << " type:" << (pending.meta.valid ? packetTypeToString(pending.meta.packet_type) : "unknown")
-                  << " seq:" << (pending.meta.valid ? pending.meta.seq : 0)
-                  << " hard_limit:" << kMaxPendingFrameBytesHardLimit;
-            return true;
-        }
-        while (!_unpack_stop &&
-               _pending_frame_bytes + pending.size > kMaxPendingFrameBytesHardLimit) {
-            if (wait_start == std::chrono::steady_clock::time_point{}) {
-                wait_start = std::chrono::steady_clock::now();
-            }
-            waited_for_space = true;
-            _queue_space_cv.wait_for(lock, std::chrono::milliseconds(kQueueSpaceWaitStepMs));
-            if (!_unpack_stop) {
-                const auto waited_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - wait_start)
-                        .count();
-                if (waited_ms >= kQueueSpaceWaitSlowLogMs &&
-                    waited_ms % kQueueSpaceWaitSlowLogMs < kQueueSpaceWaitStepMs) {
-                    WarnL << "puller unpack queue wait for total space, frame_size:"
-                          << pending.size
-                          << " task_id:" << (pending.meta.valid ? pending.meta.task_id : std::string("unknown"))
-                          << " type:" << (pending.meta.valid ? packetTypeToString(pending.meta.packet_type) : "unknown")
-                          << " seq:" << (pending.meta.valid ? pending.meta.seq : 0)
-                          << " pending_bytes:" << _pending_frame_bytes
-                          << " wait_ms:" << waited_ms;
-                }
-            }
-        }
-        if (_unpack_stop) {
-            return false;
-        }
-        if (_pending_frame_bytes + pending.size > kMaxPendingFrameBytesHardLimit) {
-            WarnL << "drop frame after trim, frame_size:" << pending.size
-                  << " task_id:" << (pending.meta.valid ? pending.meta.task_id : std::string("unknown"))
-                  << " type:" << (pending.meta.valid ? packetTypeToString(pending.meta.packet_type) : "unknown")
-                  << " seq:" << (pending.meta.valid ? pending.meta.seq : 0)
-                  << " pending_bytes:" << _pending_frame_bytes
-                  << " hard_limit:" << kMaxPendingFrameBytesHardLimit;
-            return true;
         }
         const auto task_key = bucketKeyForMeta(pending.meta);
         auto &bucket = _task_buckets[task_key];
@@ -374,31 +316,20 @@ bool EsFileFerryPuller::enqueueFrame(const Frame::Ptr &frame) {
         }
         bucket.buffered_bytes += pending.size;
         bucket.frames.emplace_back(std::move(pending));
-        _pending_frame_bytes += pending.size;
-        pending_bytes = _pending_frame_bytes;
-        over_soft_limit = pending_bytes > kMaxPendingFrameBytesSoftLimit;
-    }
-    if (waited_for_space) {
-        const auto waited_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - wait_start)
-                .count();
-        if (waited_ms >= kQueueSpaceWaitStepMs) {
-            DebugL << "puller unpack queue resumed after wait, frame_size:" << frame->size()
-                   << " task_id:" << (decodedIncomingMeta.valid ? decodedIncomingMeta.task_id : std::string("unknown"))
-                   << " type:" << (decodedIncomingMeta.valid ? EsFilePacketTypeToString(decodedIncomingMeta.type) : "unknown")
-                   << " seq:" << (decodedIncomingMeta.valid ? decodedIncomingMeta.seq : 0)
-                   << " pending_bytes:" << pending_bytes
-                   << " wait_ms:" << waited_ms;
+        for (const auto &entry : _task_buckets) {
+            pending_bytes += entry.second.buffered_bytes;
+            pending_frames += entry.second.frames.size();
         }
     }
-    if (over_soft_limit) {
+    if (pending_frames > kPendingFrameCountWarnThreshold) {
         static std::atomic<size_t> s_overflow_count{0};
         const auto overflow_count = ++s_overflow_count;
         if (overflow_count <= 5 || overflow_count % 100 == 0) {
-            WarnL << "puller unpack queue over soft limit, frame_size:" << pending.size
+            WarnL << "puller unpack queue frame count over threshold, frame_size:" << pending.size
                   << " task_id:" << (decodedIncomingMeta.valid ? decodedIncomingMeta.task_id : std::string("unknown"))
+                  << " pending_frames:" << pending_frames
                   << " pending_bytes:" << pending_bytes
+                  << " threshold:" << kPendingFrameCountWarnThreshold
                   << " overflow_count:" << overflow_count;
         }
     }
@@ -441,17 +372,25 @@ void EsFileFerryPuller::unpackWorkerLoop() {
             } else {
                 _task_buckets.erase(bucket_it);
             }
-            if (_pending_frame_bytes >= pending.size) {
-                _pending_frame_bytes -= pending.size;
-            } else {
-                _pending_frame_bytes = 0;
-            }
         }
-        _queue_space_cv.notify_all();
         if (pending.frame && pending.frame->data() && pending.frame->size() > 0) {
-            EsFileFerryUnPacker::Instance().inputFrame(
-                reinterpret_cast<const uint8_t *>(pending.frame->data()),
-                static_cast<size_t>(pending.frame->size()));
+            //uint8_t tembuf[]
+            //    = { 00,   0x00, 0x00, 0x01, 0x61, 0x47, 0x54, 0x46, 0x59, 0x01, 0x01, 0x00, 0x17, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            //        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0x00, 0x00, 0x00, 0x00, 0x16, 0x14, 0x37, 0xb8, 0xff, 0xff, 0xff, 0xff, 0x00,
+            //        0x00, 0x01, 0x3b, 0x00, 0x10, 0xe2, 0x58, 0x70, 0x6c, 0x61, 0x79, 0x5f, 0x63, 0x68, 0x61, 0x6e, 0x6e, 0x65, 0x6c, 0x5f, 0x31, 0x34, 0x5f,
+            //        0x31, 0x36, 0x35, 0x32, 0x35, 0x39, 0x39, 0x31, 0x2e, 0x6d, 0x70, 0x34, 0x3a, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x3a, 0x20, 0x32, 0x30,
+            //        0x30, 0x0a, 0x43, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x3a, 0x20, 0x6b, 0x65, 0x65, 0x70, 0x2d, 0x61, 0x6c, 0x69, 0x76,
+            //        0x65, 0x0a, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x2d, 0x4c, 0x65, 0x6e, 0x67, 0x74, 0x68, 0x3a, 0x20, 0x33, 0x37, 0x30, 0x34, 0x32,
+            //        0x33, 0x37, 0x33, 0x36, 0x0a, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x2d, 0x54, 0x79, 0x70, 0x65, 0x3a, 0x20, 0x76, 0x69, 0x64, 0x65,
+            //        0x6f, 0x2f, 0x6d, 0x70, 0x34, 0x3b, 0x20, 0x63, 0x68, 0x61, 0x72, 0x73, 0x65, 0x74, 0x3d, 0x75, 0x74, 0x66, 0x2d, 0x38, 0x0a, 0x44, 0x61,
+            //        0x74, 0x65, 0x3a, 0x20, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x41, 0x70, 0x72, 0x20, 0x32, 0x30, 0x20, 0x32, 0x30, 0x32, 0x36, 0x20, 0x31, 0x31,
+            //        0x3a, 0x35, 0x31, 0x3a, 0x35, 0x38, 0x20, 0x47, 0x4d, 0x54, 0x0a, 0x4b, 0x65, 0x65, 0x70, 0x2d, 0x41, 0x6c, 0x69, 0x76, 0x65, 0x3a, 0x20,
+            //        0x74, 0x69, 0x6d, 0x65, 0x6f, 0x75, 0x74, 0x3d, 0x31, 0x35, 0x2c, 0x20, 0x6d, 0x61, 0x78, 0x3d, 0x31, 0x30, 0x30, 0x0a, 0x53, 0x65, 0x72,
+            //        0x76, 0x65, 0x72, 0x3a, 0x20, 0x5a, 0x4c, 0x4d, 0x65, 0x64, 0x69, 0x61, 0x4b, 0x69, 0x74, 0x28, 0x67, 0x69, 0x74, 0x20, 0x68, 0x61, 0x73,
+            //        0x68, 0x3a, 0x2f, 0x2c, 0x62, 0x72, 0x61, 0x6e, 0x63, 0x68, 0x3a, 0x2c, 0x62, 0x75, 0x69, 0x6c, 0x64, 0x20, 0x74, 0x69, 0x6d, 0x65, 0x3a,
+            //        0x32, 0x30, 0x32, 0x36, 0x2d, 0x30, 0x34, 0x2d, 0x32, 0x30, 0x54, 0x30, 0x30, 0x3a, 0x33, 0x30, 0x3a, 0x31, 0x38, 0x29, 0x0a };
+            //EsFileFerryUnPacker::Instance().inputFrame(tembuf, sizeof(tembuf));
+            EsFileFerryUnPacker::Instance().inputFrame(reinterpret_cast<const uint8_t *>(pending.frame->data()), static_cast<size_t>(pending.frame->size()));
         }
     }
 }
@@ -482,6 +421,10 @@ void EsFileFerryPuller::attachTrackDelegates() {
             if (frame->getTrackType() == TrackType::TrackAudio) {
                 return true;
             }
+            auto len = frame->size();
+            auto data = frame->data();
+            if(len > 200 && len < 500)
+                ErrorL << "video dts:" << frame->dts() << " size:" << len << " hex:" << hexmem(data, 50);
             enqueueFrame(frame);
             return true;
         });

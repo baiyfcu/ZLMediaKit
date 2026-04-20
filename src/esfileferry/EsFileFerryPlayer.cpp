@@ -16,10 +16,11 @@ size_t scanPacketStart(const uint8_t *data, size_t size, uint32_t packet_magic,
                        bool &found) {
   size_t start = 0;
   found = false;
-  while (start + 9 <= size) {
-    if (HasEsFileCarrierPrefix(data + start, size - start) &&
-        ReadEsFileU32BE(data + start + kEsFileCarrierPrefixSize) ==
-            packet_magic) {
+  while (start + (kEsFileCarrierShortPrefixSize + sizeof(uint32_t)) <= size) {
+    size_t prefix_size = 0;
+    if (DetectEsFileCarrierPrefixSize(data + start, size - start, prefix_size) &&
+        size - start >= prefix_size + sizeof(uint32_t) &&
+        ReadEsFileU32BE(data + start + prefix_size) == packet_magic) {
       found = true;
       break;
     }
@@ -49,12 +50,13 @@ bool shouldLogFrameCandidate(const uint8_t *data, size_t size) {
 
 bool tryDecodeCandidateHeader(const uint8_t *data, size_t size,
                               EsFilePacketHeader &header) {
-  if (!data || size < kEsFileCarrierPrefixSize + kEsFileFixedHeaderSize ||
-      !HasEsFileCarrierPrefix(data, size)) {
+  size_t prefix_size = 0;
+  if (!data || size < kEsFileCarrierShortPrefixSize + kEsFileFixedHeaderSize ||
+      !DetectEsFileCarrierPrefixSize(data, size, prefix_size)) {
     return false;
   }
-  return DecodeEsFilePacketHeader(data + kEsFileCarrierPrefixSize,
-                                  size - kEsFileCarrierPrefixSize, header);
+  return DecodeEsFilePacketHeader(data + prefix_size, size - prefix_size,
+                                  header);
 }
 
 bool shouldLogMissingTask(const std::string &task_id, size_t &count) {
@@ -62,7 +64,7 @@ bool shouldLogMissingTask(const std::string &task_id, size_t &count) {
   static std::unordered_map<std::string, size_t> s_missing_counts;
   std::lock_guard<std::mutex> lock(s_mtx);
   count = s_missing_counts[task_id]++;
-  return count % 1000 == 0;
+  return count % 10000 == 0;
 }
 
 bool shouldLogSampled(std::atomic<size_t> &counter, size_t interval,
@@ -94,17 +96,28 @@ PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
                                   size_t &consumed) {
   consumed = 0;
   packet = EsFilePacket{};
-  if (!data || size < fixed_header_size + kEsFileCarrierPrefixSize) {
+  if (!data || size < fixed_header_size + kEsFileCarrierShortPrefixSize) {
     return PacketDecodeStatus::NeedMoreData;
   }
-  if (!HasEsFileCarrierPrefix(data, size) ||
-      ReadEsFileU32BE(data + kEsFileCarrierPrefixSize) != packet_magic) {
+  size_t prefix_size = 0;
+  if (!DetectEsFileCarrierPrefixSize(data, size, prefix_size) ||
+      size < prefix_size + sizeof(uint32_t) ||
+      ReadEsFileU32BE(data + prefix_size) != packet_magic) {
     return PacketDecodeStatus::Invalid;
   }
-  const uint8_t *p = data + kEsFileCarrierPrefixSize;
-  if (!DecodeEsFilePacketHeader(p, size - kEsFileCarrierPrefixSize,
-                                packet.header)) {
+  const uint8_t *p = data + prefix_size;
+  if (!DecodeEsFilePacketHeader(p, size - prefix_size, packet.header)) {
     return PacketDecodeStatus::NeedMoreData;
+  }
+  if (packet.header.version != kEsFilePacketVersion) {
+    return PacketDecodeStatus::Invalid;
+  }
+  if (!IsEsFilePacketTypeKnown(packet.header.type)) {
+    return PacketDecodeStatus::Invalid;
+  }
+  if (packet.header.task_id_len > kEsFileMaxTaskIdLen ||
+      packet.header.file_name_len > kEsFileMaxFileNameLen) {
+    return PacketDecodeStatus::Invalid;
   }
 
   if (packet.header.total_len < fixed_header_size ||
@@ -117,8 +130,7 @@ PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
   if (packet.header.total_len < min_total) {
     return PacketDecodeStatus::Invalid;
   }
-  if (size <
-      static_cast<size_t>(packet.header.total_len + kEsFileCarrierPrefixSize)) {
+  if (size < static_cast<size_t>(packet.header.total_len + prefix_size)) {
     return PacketDecodeStatus::NeedMoreData;
   }
 
@@ -137,8 +149,7 @@ PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
     packet.payload.resize(packet.header.payload_len);
     std::memcpy(packet.payload.data(), p + pos, packet.header.payload_len);
   }
-  consumed =
-      static_cast<size_t>(packet.header.total_len + kEsFileCarrierPrefixSize);
+  consumed = static_cast<size_t>(packet.header.total_len + prefix_size);
   return PacketDecodeStatus::Success;
 }
 } // namespace
@@ -291,7 +302,7 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
   size_t consumed = 0;
   
   if (parseOnePacketFromRaw(data, size, packet, consumed) && consumed == size) {
-    dispatchPacket(std::move(packet));
+    dispatchPacket(std::move(packet), data, size);
     return true;
   }
 
@@ -299,7 +310,7 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
     std::lock_guard<std::mutex> lock(_mtx);
     appendToBufferLocked(data, size);
   }
-  parseBuffer();
+  parseBuffer(data, size);
   return true;
 }
 
@@ -307,13 +318,13 @@ EsFileFerryUnPacker::EsFileFerryUnPacker() {
   _buffer.reserve(kInitialBufferReserveBytes);
 }
 
-void EsFileFerryUnPacker::parseBuffer() {
+void EsFileFerryUnPacker::parseBuffer(const uint8_t *data, size_t size) {
   while (true) {
     EsFilePacket packet;
     if (!parseOnePacket(packet)) {
       break;
     }
-    dispatchPacket(std::move(packet));
+    dispatchPacket(std::move(packet), data, size);
   }
 }
 
@@ -324,7 +335,8 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
   {
     std::lock_guard<std::mutex> lock(_mtx);
     const auto available = _buffer.size() - _buffer_start;
-    if (available < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+    if (available <
+        kEsFileFixedHeaderSize + kEsFileCarrierShortPrefixSize) {
       return false;
     }
     const auto *buffer_data = _buffer.data() + _buffer_start;
@@ -404,14 +416,15 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
                                                 EsFilePacket &packet,
                                                 size_t &consumed) {
   consumed = 0;
-  if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+  if (!data || size < kEsFileFixedHeaderSize + kEsFileCarrierShortPrefixSize) {
+      ErrorL << "frame buf size too small,size:" << size << " hex:" << hexmem(data, size);
     return false;
   }
 
   bool found = false;
   const auto start = scanPacketStart(data, size, kEsFilePacketMagic, found);
   if (!found ||
-      size < start + kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
+      size < start + kEsFileFixedHeaderSize + kEsFileCarrierShortPrefixSize) {
     return false;
   }
 
@@ -421,6 +434,8 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
                      kEsFileFixedHeaderSize, kMaxPacketSize, packet,
                      local_consumed);
   if (status != PacketDecodeStatus::Success) {
+      ErrorL << "frame invalid,size:" << size << " hex:" << hexmem(data, 100);
+
     const auto *candidate = data + start;
     const auto candidate_size = size - start;
     if (status == PacketDecodeStatus::Invalid) {
@@ -451,12 +466,15 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
       }
     }
     return false;
+  } else {
+      DebugL << "frame normal,size:" << size << " task id:" << packet.task_id << " type:" << EsFilePacketTypeToString(packet.header.type) << " seq:" << packet.header.seq
+             << " hex:" << hexmem(data, 100); 
   }
   consumed = start + local_consumed;
   return true;
 }
 
-void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet) {
+void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet,const uint8_t *data, size_t size) {
   OnTaskData on_task_data;
   TaskRuntimeState state_snapshot;
   bool has_state = false;
@@ -468,6 +486,9 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet) {
     auto it = _task_callbacks.find(packet.task_id);
     if (it == _task_callbacks.end()) {
       size_t miss_count = 0;
+        if (!toolkit::start_with(packet.task_id, "play_channel_")) {
+            ErrorL << "task id:" << packet.task_id << " unnormal" << ",total len:" << packet.header.total_len << " payload len:" << packet.header.payload_len << " packet len:" << packet.payload.size() << " hex:" << toolkit::hexmem(data, 10);
+        }
       if (shouldLogMissingTask(packet.task_id, miss_count)) {
         pending_error.type = EsFileUnpackErrorType::MissingTask;
         pending_error.message =

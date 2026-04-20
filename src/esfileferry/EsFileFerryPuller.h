@@ -71,9 +71,7 @@ private:
     std::unordered_map<std::string, PendingTaskBucket> _task_buckets;
     std::deque<std::string> _ready_task_ids;
     std::condition_variable _frame_cv;
-    std::condition_variable _queue_space_cv;
     std::thread _unpack_thread;
-    size_t _pending_frame_bytes = 0;
     bool _unpack_stop = true;
     std::atomic<bool> _running = {false};
     std::atomic<int> _rtp_type = {0};

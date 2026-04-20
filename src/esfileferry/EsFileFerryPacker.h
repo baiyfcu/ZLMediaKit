@@ -57,6 +57,9 @@ struct EsFileGlobalOptions {
     // 单轮调度的默认发送预算。
     // 该值只控制单轮调度粒度与线程占用时长，不承担总体限速语义。
     uint64_t scheduler_round_budget_bytes = 8 * 1024 * 1024;
+    // FileChunk 的最小发送门限（仅对 FileChunk 生效）。
+    // emit token 小于该值时延后发送，等待 token 累积；尾包可放行。
+    uint64_t min_emit_payload_bytes = 4 * 1024;
     // HTTP 回源的默认最大并发窗口。
     // 取 6：适合作为 50 路以内混合任务的默认保护值。
     size_t http_pull_concurrency_limit = 6;
@@ -96,6 +99,8 @@ public:
     // 设置单轮调度的全局发送预算，0 表示恢复默认值。
     // 用法：用于限制单次调度循环内的总发送量，避免单轮发送占用线程过久。
     void setSchedulerRoundBudgetBytes(uint64_t budget_bytes);
+    // 设置 FileChunk 最小发送门限，0 表示关闭门限。
+    void setMinEmitPayloadBytes(uint64_t min_payload_bytes);
     // 设置 HTTP 拉取最大并发数，0 表示恢复默认值。
     // 用法：该值限制同时处于拉取态的 HTTP 任务数，不建议直接设为总任务数。
     void setMaxHttpFetchConcurrency(size_t max_concurrency);
@@ -331,6 +336,8 @@ private:
     // 默认取 8MB：适合作为 API/MP4 优先、下载保底场景的吞吐/公平折中值。
     static constexpr uint64_t kDefaultSchedulerRoundBudgetBytes =
         8 * 1024 * 1024;
+    // FileChunk 最小发送门限默认值。
+    static constexpr uint64_t kDefaultMinEmitPayloadBytes = 4 * 1024;
     // 三档优先级默认预算权重：高优 API，中优 MP4 点播，低优下载。
     // 三类任务的默认单任务缓冲上限。
     static constexpr uint64_t kDefaultApiBufferedBytes = 512 * 1024;

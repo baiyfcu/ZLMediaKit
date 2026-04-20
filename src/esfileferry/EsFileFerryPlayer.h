@@ -110,13 +110,13 @@ private:
     EsFileFerryUnPacker &operator=(const EsFileFerryUnPacker &) = delete;
 
     // 循环解析缓冲区中的完整协议包
-    void parseBuffer();
+    void parseBuffer(const uint8_t *data, size_t size);
     // 从内部缓冲区解析一个完整协议包
     bool parseOnePacket(EsFilePacket &packet);
     // 从外部原始字节解析一个完整协议包（不修改内部缓冲）
     bool parseOnePacketFromRaw(const uint8_t *data, size_t size, EsFilePacket &packet, size_t &consumed);
     // 分发协议包到对应 task 回调并更新运行态
-    void dispatchPacket(EsFilePacket packet);
+    void dispatchPacket(EsFilePacket packet,const uint8_t *data, size_t size);
     // 更新最近错误信息
     void setLastError(const std::string &err);
     // 触发错误回调
