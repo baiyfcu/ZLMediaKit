@@ -39,14 +39,31 @@ EsFileFerryPacker::EsFileFerryPacker()
 
 EsFileFerryPacker::~EsFileFerryPacker() {
   std::thread join_thread;
+  std::vector<std::thread> http_join_threads;
+  std::vector<std::shared_ptr<std::condition_variable>> buffer_cvs;
   {
     std::lock_guard<std::mutex> lock(_mtx);
     stopPaceTimerLocked();
     stopBootstrapTimerLocked();
     stopPacketThreadLocked(join_thread);
+    buffer_cvs.reserve(_task_registry.tasks.size());
+    for (const auto &item : _task_registry.tasks) {
+      if (item.second.http.buffer.cv) {
+        buffer_cvs.emplace_back(item.second.http.buffer.cv);
+      }
+    }
+    http_join_threads.swap(_http_fetch_threads);
+  }
+  for (const auto &buffer_cv : buffer_cvs) {
+    buffer_cv->notify_all();
   }
   if (join_thread.joinable()) {
     join_thread.join();
+  }
+  for (auto &thread : http_join_threads) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
 }
 
@@ -1007,6 +1024,9 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
 void EsFileFerryPacker::maybeStartPendingHttpFetches() {
   auto launches = [&]() {
     std::lock_guard<std::mutex> lock(_mtx);
+    if (_packet_runtime.packet_thread_exit) {
+      return std::vector<std::pair<std::string, uint64_t>>{};
+    }
     return collectHttpFetchLaunchesLocked();
   }();
   for (const auto &launch : launches) {
@@ -1023,6 +1043,15 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
   {
     std::lock_guard<std::mutex> lock(_mtx);
     auto it = _task_registry.tasks.find(task_id);
+    if (_packet_runtime.packet_thread_exit) {
+      if (it != _task_registry.tasks.end() && it->second.generation == generation) {
+        it->second.http.active = false;
+      }
+      if (_http_runtime.active_fetches > 0) {
+        --_http_runtime.active_fetches;
+      }
+      return;
+    }
     if (it == _task_registry.tasks.end() || it->second.generation != generation) {
       if (_http_runtime.active_fetches > 0) {
         --_http_runtime.active_fetches;
@@ -1035,7 +1064,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
     body = it->second.http.request_body;
   }
 
-  std::thread([this, task_id, generation, source, method, headers, body]() {
+  std::thread fetch_thread([this, task_id, generation, source, method, headers, body]() {
     const auto fetch_begin = std::chrono::steady_clock::now();
     HttpHeaders response_headers;
     uint32_t response_status_code = 0;
@@ -1056,6 +1085,9 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
               const auto wait_begin = std::chrono::steady_clock::now();
               while (true) {
                 auto it = _task_registry.tasks.find(task_id);
+                if (_packet_runtime.packet_thread_exit) {
+                  return false;
+                }
                 if (it == _task_registry.tasks.end() || it->second.generation != generation) {
                   return false;
                 }
@@ -1168,6 +1200,9 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           const bool has_content_length =
               tryParseContentLength(headers_in, content_length);
           std::lock_guard<std::mutex> lock(_mtx);
+          if (_packet_runtime.packet_thread_exit) {
+            return;
+          }
           auto it = _task_registry.tasks.find(task_id);
           if (it == _task_registry.tasks.end() || it->second.generation != generation) {
             return;
@@ -1197,9 +1232,11 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
     uint64_t final_file_size = 0;
     bool final_size_known = false;
     size_t final_buffered_bytes = 0;
+    bool packet_runtime_stopped = false;
     std::shared_ptr<std::condition_variable> buffer_cv;
     {
       std::lock_guard<std::mutex> lock(_mtx);
+      packet_runtime_stopped = _packet_runtime.packet_thread_exit;
       if (_http_runtime.active_fetches > 0) {
         --_http_runtime.active_fetches;
       }
@@ -1243,9 +1280,15 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           << " buffered_bytes:" << final_buffered_bytes
           << " fetch_err:" << fetch_err << " cost_ms:" << fetch_cost_ms
           << " url:" << source;
-    maybeStartPendingHttpFetches();
-    _packet_runtime.packet_sem.post();
-  }).detach();
+    if (!packet_runtime_stopped) {
+      maybeStartPendingHttpFetches();
+      _packet_runtime.packet_sem.post();
+    }
+  });
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    _http_fetch_threads.emplace_back(std::move(fetch_thread));
+  }
 }
 
 // Query And Packet Helpers

@@ -453,4 +453,5 @@ private:
     TaskRegistryState _task_registry;
     HttpFetchRuntimeState _http_runtime;
     PacketRuntimeState _packet_runtime;
+    std::vector<std::thread> _http_fetch_threads;
 };
