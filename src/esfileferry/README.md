@@ -253,6 +253,40 @@ puller.startPull("rtsp://127.0.0.1/live/esferry", 0);
 - 接收侧错误：`EsFileFerryUnPacker::getLastError()` 与 `setOnError`
 - 拉流侧错误：`EsFileFerryPuller::getLastError()` 与 `setOnError`
 
+### 8.4 API/mp4 点播与下载业务分层
+
+结合当前 `api/mp4`、播放串点播、文件下载链路，建议按下面的层次理解 `esfileferry` 的职责边界：
+
+- HTTP 入口层：
+  - 负责接收浏览器、播放器或下载器发起的 `mp4` 点播/下载请求。
+  - 典型承载点是 `HttpFileManager` 的路由入口，以及 `HttpBody` 对外暴露的 HTTP 响应语义。
+  - 这一层只关心“收到什么 URL、回什么 HTTP 头和 body”，不直接处理摆渡协议细节。
+- 业务编排层：
+  - 负责把一次 HTTP 访问转换成“新增摆渡任务 / 删除摆渡任务”。
+  - 典型实现是 `PlayChannelRequestContext`、`GtApi`、`WebHook`、`ferry_task_event(add/del)`。
+  - 这一层决定任务 `task_id`、目标源地址、请求头透传、超时窗口和取消时机。
+- 数据摆渡发送层：
+  - 由 `EsFileFerryPacker` 负责把文件源或 HTTP 源转换成 `FileInfo/FileChunk/FileEnd/TaskStatus` 协议包。
+  - 这一层只负责“如何分片、如何打包、如何按任务发送”，不关心浏览器、下载器或 `mp4` 播放器的 HTTP 语义。
+- 媒体承载层：
+  - 负责把协议包挂到 RTP/H264/PS 等媒体承载链路上传输。
+  - 这一层是摆渡数据跨节点传输的通道层，不负责业务路由和 HTTP 收尾判定。
+- 数据摆渡接收层：
+  - 由 `EsFileFerryUnPacker` 负责从媒体字节流中恢复协议包，并输出任务事件。
+  - 输出的是 `FileInfo/FileChunk/FileEnd/TaskStatus` 事件，而不是直接输出 HTTP 响应。
+- HTTP 响应恢复层：
+  - 由 `PlayChannelClientImp` 一类适配层把 `UnPacker` 输出事件重新还原为 HTTP 语义。
+  - `FileInfo` 对应响应头准备，`FileChunk` 对应 body 数据，`FileEnd` 或 `completed=true` 对应完成，`TaskStatus` 对应失败。
+  - 历史上的关键要求是：这一层要处理“header/body 乱序容忍”“99%+ 未收到 FileEnd 时的收尾”“客户端断开后的任务取消”。
+
+按职责分工，几个容易混淆但应明确分开的点如下：
+
+- `api/mp4` 点播/下载是否成功，不能只看 `Packer` 是否还在拉源，还要看 HTTP 响应层是否正确收到了 header、body 与 complete。
+- `UnPacker` 不负责业务层超时、取消、路由映射，也不负责决定何时发 `add/del` 回调。
+- `Packer` 不负责浏览器或下载器的 HTTP 兼容细节，例如响应头恢复、header 先后顺序、客户端断开回收。
+- 路由映射问题（例如虚拟路径、`/changeprotocol=...`、静态资源路径）属于 HTTP 入口层，不属于 `esfileferry` 协议层。
+- 如果出现“下载到 99%+ 未完成”，应优先检查“HTTP 响应恢复层和业务超时层”，其次才看 `Packer/UnPacker` 是否漏发或漏收 `FileEnd`。
+
 ## 9. 性能与稳定性建议
 
 - 分片大小建议不小于 `512KB`
