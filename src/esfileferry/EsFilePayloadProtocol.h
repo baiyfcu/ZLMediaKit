@@ -66,6 +66,8 @@ extern const uint32_t kEsFilePacketMagic;
 extern const uint8_t kEsFilePacketVersion;
 extern const size_t kEsFileFixedHeaderSize;
 extern const uint16_t kEsFileFlagFileInfoHasHttpResponseHeaders;
+extern const uint16_t kEsFileFlagPayloadEscaped;
+extern const uint16_t kEsFileFlagFileInfoPayloadBase64;
 extern const uint8_t kEsFileCarrierNalHeader;
 extern const size_t kEsFileCarrierPrefixSize;
 extern const size_t kEsFileCarrierShortPrefixSize;

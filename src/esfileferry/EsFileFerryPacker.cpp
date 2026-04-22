@@ -1,5 +1,6 @@
 ﻿#include "EsFileFerryPacker.h"
 #include "Util/logger.h"
+#include "Util/base64.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -71,6 +72,7 @@ namespace {
 constexpr int64_t kHttpBufferWaitSlowLogMs = 1000;
 constexpr int64_t kEmitPacketSlowLogMs = 1000;
 constexpr int64_t kRateLimitWaitStepMs = 20;
+constexpr bool kEnableAnnexBPayloadEscape = true;
 
 bool isHttpUrl(const std::string &value) {
   return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
@@ -142,10 +144,124 @@ void writeU32BEAt(std::vector<uint8_t> &out, size_t offset, uint32_t value) {
   out[offset + 3] = static_cast<uint8_t>(value & 0xFF);
 }
 
+void writeU16BEAt(std::vector<uint8_t> &out, size_t offset, uint16_t value) {
+  out[offset + 0] = static_cast<uint8_t>((value >> 8) & 0xFF);
+  out[offset + 1] = static_cast<uint8_t>(value & 0xFF);
+}
+
 bool equalsIgnoreCase(std::string lhs, std::string rhs) {
   lhs = toLowerCopy(std::move(lhs));
   rhs = toLowerCopy(std::move(rhs));
   return lhs == rhs;
+}
+
+bool needsAnnexBEscape(const uint8_t *data, size_t size) {
+  if (!data || size < 3) {
+    return false;
+  }
+  for (size_t i = 2; i < size; ++i) {
+    if (data[i - 2] == 0x00 && data[i - 1] == 0x00 && data[i] <= 0x03) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void escapeAnnexBPayload(const uint8_t *data, size_t size,
+                         std::vector<uint8_t> &out) {
+  out.clear();
+  out.reserve(size + size / 16 + 8);
+  int zero_count = 0;
+  for (size_t i = 0; i < size; ++i) {
+    const auto byte = data[i];
+    if (zero_count >= 2 && byte <= 0x03) {
+      out.push_back(0x03);
+      zero_count = 0;
+    }
+    out.push_back(byte);
+    if (byte == 0x00) {
+      ++zero_count;
+    } else {
+      zero_count = 0;
+    }
+  }
+}
+
+bool maybeEscapeCarrierPacket(std::vector<uint8_t> &packet) {
+  size_t prefix_size = 0;
+  if (!DetectEsFileCarrierPrefixSize(packet.data(), packet.size(), prefix_size) ||
+      packet.size() < prefix_size + kEsFileFixedHeaderSize) {
+    return false;
+  }
+  EsFilePacketHeader header;
+  if (!DecodeEsFilePacketHeader(packet.data() + prefix_size,
+                                packet.size() - prefix_size, header)) {
+    return false;
+  }
+  const size_t payload_offset = prefix_size + kEsFileFixedHeaderSize +
+                                header.task_id_len + header.file_name_len;
+  if (packet.size() < payload_offset + header.payload_len) {
+    return false;
+  }
+  auto *payload = packet.data() + payload_offset;
+  const auto payload_len = static_cast<size_t>(header.payload_len);
+  if (payload_len == 0 || !needsAnnexBEscape(payload, payload_len)) {
+    return false;
+  }
+
+  std::vector<uint8_t> escaped_payload;
+  escapeAnnexBPayload(payload, payload_len, escaped_payload);
+  if (escaped_payload.size() == payload_len) {
+    return false;
+  }
+  std::vector<uint8_t> escaped_packet;
+  escaped_packet.reserve(payload_offset + escaped_payload.size());
+  escaped_packet.insert(escaped_packet.end(), packet.begin(),
+                        packet.begin() + static_cast<std::ptrdiff_t>(payload_offset));
+  escaped_packet.insert(escaped_packet.end(), escaped_payload.begin(),
+                        escaped_payload.end());
+  packet.swap(escaped_packet);
+  return true;
+}
+
+bool encodeFileInfoPayloadBase64(std::vector<uint8_t> &packet) {
+  size_t prefix_size = 0;
+  if (!DetectEsFileCarrierPrefixSize(packet.data(), packet.size(), prefix_size) ||
+      packet.size() < prefix_size + kEsFileFixedHeaderSize) {
+    return false;
+  }
+  EsFilePacketHeader header;
+  if (!DecodeEsFilePacketHeader(packet.data() + prefix_size,
+                                packet.size() - prefix_size, header) ||
+      header.type != EsFilePacketType::FileInfo) {
+    return false;
+  }
+  const size_t payload_offset = prefix_size + kEsFileFixedHeaderSize +
+                                header.task_id_len + header.file_name_len;
+  if (packet.size() < payload_offset + header.payload_len) {
+    return false;
+  }
+  const auto payload_len = static_cast<size_t>(header.payload_len);
+  if (payload_len == 0) {
+    return false;
+  }
+  const auto encoded = encodeBase64(std::string(
+      reinterpret_cast<const char *>(packet.data() + payload_offset),
+      payload_len));
+  std::vector<uint8_t> encoded_payload(encoded.begin(), encoded.end());
+  std::vector<uint8_t> rebuilt;
+  rebuilt.reserve(payload_offset + encoded_payload.size());
+  rebuilt.insert(rebuilt.end(), packet.begin(),
+                 packet.begin() + static_cast<std::ptrdiff_t>(payload_offset));
+  rebuilt.insert(rebuilt.end(), encoded_payload.begin(), encoded_payload.end());
+  const auto new_payload_len = static_cast<uint32_t>(encoded_payload.size());
+  const auto new_total_len = static_cast<uint32_t>(
+      kEsFileFixedHeaderSize + header.task_id_len + header.file_name_len +
+      new_payload_len);
+  writeU32BEAt(rebuilt, prefix_size + 24, new_payload_len);
+  writeU32BEAt(rebuilt, prefix_size + 40, new_total_len);
+  packet.swap(rebuilt);
+  return true;
 }
 
 bool headerValueContains(const EsFileFerryPacker::HttpHeaders &headers,
@@ -1450,6 +1566,36 @@ bool EsFileFerryPacker::emitPacket(
     cb = _packet_runtime.callback;
   }
   if (cb) {
+    auto header_out = header;
+    if (task_id != kBootstrapTaskId &&
+        header_out.type == EsFilePacketType::FileInfo &&
+        encodeFileInfoPayloadBase64(packet)) {
+      header_out.flags = static_cast<uint16_t>(
+          header_out.flags | kEsFileFlagFileInfoPayloadBase64);
+      size_t prefix_size = 0;
+      if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
+                                        prefix_size)) {
+        EsFilePacketHeader tmp_header;
+        if (DecodeEsFilePacketHeader(packet.data() + prefix_size,
+                                     packet.size() - prefix_size, tmp_header)) {
+          header_out.payload_len = tmp_header.payload_len;
+          header_out.total_len = tmp_header.total_len;
+        }
+      }
+    }
+    if (task_id != kBootstrapTaskId &&
+        kEnableAnnexBPayloadEscape &&
+        maybeEscapeCarrierPacket(packet)) {
+      header_out.flags =
+          static_cast<uint16_t>(header_out.flags | kEsFileFlagPayloadEscaped);
+    }
+    if (task_id != kBootstrapTaskId) {
+      size_t prefix_size = 0;
+      if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
+                                        prefix_size)) {
+        writeU16BEAt(packet, prefix_size + 10, header_out.flags);
+      }
+    }
     if (header.type == EsFilePacketType::FileInfo ||
         header.type == EsFilePacketType::FileEnd) {
       ErrorL << "emit packet callback, task_id:" << task_id
@@ -1461,16 +1607,16 @@ bool EsFileFerryPacker::emitPacket(
              << " total_packet_size:" << packet.size();
     }
     const auto emit_begin = std::chrono::steady_clock::now();
-    cb(task_id, std::move(packet), header);
+    cb(task_id, std::move(packet), header_out);
     const auto emit_cost_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - emit_begin)
             .count();
     if (emit_cost_ms >= kEmitPacketSlowLogMs) {
       WarnL << "emit packet callback slow, task_id:" << task_id
-            << " type:" << EsFilePacketTypeToString(header.type)
-            << " seq:" << header.seq
-            << " payload_len:" << header.payload_len
+            << " type:" << EsFilePacketTypeToString(header_out.type)
+            << " seq:" << header_out.seq
+            << " payload_len:" << header_out.payload_len
             << " cost_ms:" << emit_cost_ms;
     }
   }

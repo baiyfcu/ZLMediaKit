@@ -421,10 +421,6 @@ void EsFileFerryPuller::attachTrackDelegates() {
             if (frame->getTrackType() == TrackType::TrackAudio) {
                 return true;
             }
-            auto len = frame->size();
-            auto data = frame->data();
-            if(len > 200 && len < 500)
-                ErrorL << "video dts:" << frame->dts() << " size:" << len << " hex:" << hexmem(data, 50);
             enqueueFrame(frame);
             return true;
         });

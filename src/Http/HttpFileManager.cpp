@@ -8,6 +8,7 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <algorithm>
 #include <iomanip>
 #include "Util/File.h"
 #include "Common/Parser.h"
@@ -33,6 +34,51 @@ namespace mediakit {
 static size_t kHlsCookieSecond = 60;
 static size_t kFindSrcIntervalSecond = 3;
 static const string kCookieName = "ZL_COOKIE";
+static const string kVirtualPathCookieName = "X_VPATH";
+
+static string firstPathSegment(const string &path) {
+    auto start = path.find_first_not_of('/');
+    if (start == string::npos) {
+        return string();
+    }
+    auto end = path.find('/', start);
+    auto eq = path.find('=', start);
+    if (eq != string::npos && (end == string::npos || eq < end)) {
+        // Support "/key=http://..." style: virtual key is the left side of '='.
+        return path.substr(start, eq - start);
+    }
+    return path.substr(start, end == string::npos ? string::npos : end - start);
+}
+static StrCaseMap parseVirtualPathMapSafe(const string &str) {
+    auto trim_copy = [](string value) {
+        auto is_space = [](unsigned char c) {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        };
+        while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) {
+            value.pop_back();
+        }
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+        return value;
+    };
+    StrCaseMap out;
+    auto parsed = Parser::parseArgs(str, ";", ",");
+    for (auto &item : parsed) {
+        auto key = trim_copy(item.first);
+        auto val = trim_copy(item.second);
+        if (key.empty() || val.empty()) {
+            continue;
+        }
+        out.emplace(std::move(key), std::move(val));
+    }
+    return out;
+}
 static const string kHlsSuffix = "/hls.m3u8";
 static const string kHlsFMP4Suffix = "/hls.fmp4.m3u8";
 
@@ -108,6 +154,159 @@ private:
     uint8_t _bytes[16];
 };
 
+string buildMediaInfoUrl(Parser &parser) {
+    string request_url = parser.url();
+    if (request_url.empty()) {
+        request_url = "/";
+    } else if (request_url[0] != '/') {
+        request_url.insert(request_url.begin(), '/');
+    }
+    auto trim_copy = [](string value) {
+        auto is_space = [](unsigned char c) {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        };
+        while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) {
+            value.pop_back();
+        }
+        return value;
+    };
+    auto first_token = [&](const string &value) {
+        auto token = value.substr(0, value.find(','));
+        return trim_copy(token);
+    };
+    auto normalize_prefix = [](string prefix) {
+        if (prefix.empty()) {
+            return string("/");
+        }
+        if (prefix[0] != '/') {
+            prefix.insert(prefix.begin(), '/');
+        }
+        while (prefix.size() > 1 && prefix.back() == '/') {
+            prefix.pop_back();
+        }
+        return prefix;
+    };
+    auto should_apply_cookie_fallback = [&](const string &path, const string &first_seg) {
+        static const unordered_set<string> kStaticSegs = {
+            "static", "assets", "js", "css", "img", "fonts", "media", "favicon.ico"
+        };
+        if (kStaticSegs.find(first_seg) != kStaticSegs.end()) {
+            return true;
+        }
+        auto slash_pos = path.find_last_of('/');
+        auto file_name = slash_pos == string::npos ? path : path.substr(slash_pos + 1);
+        return file_name.find('.') != string::npos;
+    };
+    auto get_cookie_value = [&](const string &cookie_header, const string &key) {
+        if (cookie_header.empty() || key.empty()) {
+            return string();
+        }
+        auto items = split(cookie_header, ";");
+        for (auto &item : items) {
+            auto kv = split(item, "=");
+            if (kv.size() < 2) {
+                continue;
+            }
+            auto k = trim_copy(kv[0]);
+            if (k != key) {
+                continue;
+            }
+            auto v = trim_copy(kv[1]);
+            if (!v.empty()) {
+                return v;
+            }
+        }
+        return string();
+    };
+    GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
+        return parseVirtualPathMapSafe(str);
+    });
+    const auto request_seg = firstPathSegment(request_url);
+    const bool request_has_virtual_prefix =
+        !request_seg.empty() && virtualPathMap.find(request_seg) != virtualPathMap.end();
+
+    string referer = trim_copy(parser["Referer"]);
+    string referer_scheme;
+    string referer_host;
+    string referer_path = "/";
+    if (!referer.empty()) {
+        auto scheme_pos = referer.find("://");
+        if (scheme_pos != string::npos) {
+            referer_scheme = referer.substr(0, scheme_pos);
+            const auto host_begin = scheme_pos + 3;
+            const auto host_end = referer.find_first_of("/?#", host_begin);
+            referer_host = host_end == string::npos ? referer.substr(host_begin)
+                                                    : referer.substr(host_begin, host_end - host_begin);
+            if (host_end != string::npos) {
+                const auto path_end = referer.find_first_of("?#", host_end);
+                referer_path = referer.substr(
+                    host_end, path_end == string::npos ? string::npos : path_end - host_end);
+            }
+            referer_path = normalize_prefix(referer_path);
+        }
+    }
+
+    auto forwarded_proto = first_token(parser["X-Forwarded-Proto"]);
+    std::transform(forwarded_proto.begin(), forwarded_proto.end(), forwarded_proto.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (forwarded_proto != "http" && forwarded_proto != "https") {
+        forwarded_proto.clear();
+    }
+    auto forwarded_host = first_token(parser["X-Forwarded-Host"]);
+    auto forwarded_prefix = normalize_prefix(first_token(parser["X-Forwarded-Prefix"]));
+    if (first_token(parser["X-Forwarded-Prefix"]).empty()) {
+        forwarded_prefix.clear();
+    }
+
+    string resolved_prefix = forwarded_prefix;
+    if (!request_has_virtual_prefix && !resolved_prefix.empty()) {
+        auto seg = firstPathSegment(resolved_prefix);
+        if (seg.empty() || virtualPathMap.find(seg) == virtualPathMap.end()) {
+            resolved_prefix.clear();
+        }
+    }
+    if (!request_has_virtual_prefix &&
+        resolved_prefix.empty() &&
+        should_apply_cookie_fallback(request_url, request_seg)) {
+        if (request_seg.empty() || virtualPathMap.find(request_seg) == virtualPathMap.end()) {
+            auto vpath_cookie = get_cookie_value(parser["Cookie"], kVirtualPathCookieName);
+            if (!vpath_cookie.empty() && virtualPathMap.find(vpath_cookie) != virtualPathMap.end()) {
+                resolved_prefix = "/" + vpath_cookie;
+            }
+        }
+    }
+    if (!request_has_virtual_prefix && resolved_prefix.empty() && referer_path != "/") {
+        auto referer_seg = firstPathSegment(referer_path);
+        if (!referer_seg.empty() && virtualPathMap.find(referer_seg) != virtualPathMap.end()) {
+            resolved_prefix = "/" + referer_seg;
+        }
+    }
+    if (!resolved_prefix.empty() && resolved_prefix != "/") {
+        auto with_slash = resolved_prefix + "/";
+        if (!start_with(request_url, with_slash) && request_url != resolved_prefix) {
+            request_url = resolved_prefix + request_url;
+        }
+    }
+
+    string final_scheme = !forwarded_proto.empty() ? forwarded_proto : referer_scheme;
+    if (final_scheme.empty()) {
+        final_scheme = "http";
+    }
+    string final_host = !forwarded_host.empty() ? forwarded_host : referer_host;
+    if (final_host.empty()) {
+        final_host = trim_copy(parser["Host"]);
+    }
+    if (final_host.empty()) {
+        final_host = "localhost";
+        WarnL << "buildMediaInfoUrl host empty, fallback localhost, url:" << request_url;
+    }
+    parser.setUrl(request_url);
+    return final_scheme + "://" + final_host + request_url;
+}
+
 }
 
 static UInt128 get_ip_uint64(const std::string &ip) {
@@ -165,7 +364,7 @@ bool HttpFileManager::isIPAllowed(const std::string &ip) {
 
 static std::string fileName(const string &dir, const string &path) {
     auto ret = path.substr(dir.size());
-    if (ret.front() == '/') {
+    if (!ret.empty() && ret.front() == '/') {
         ret.erase(0, 1);
     }
     return ret;
@@ -246,7 +445,7 @@ static bool makeFolderMenu(const string &httpPath, const string &strFullPath, st
     // If it is the root directory, add a virtual directory
     if (httpPath == "/") {
         GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-            return Parser::parseArgs(str, ";", ",");
+            return parseVirtualPathMapSafe(str);
         });
         for (auto &pr : virtualPathMap) {
             file_map.emplace(pr.first, std::make_pair(string("virtual path: ") + pr.first, File::absolutePath("", pr.second)));
@@ -739,17 +938,35 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
     GET_CONFIG(string, rootPath, Http::kRootPath);
     GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-        return Parser::parseArgs(str, ";", ",");
+        return parseVirtualPathMapSafe(str);
     });
 
     string url, path, virtual_app;
-    auto it = virtualPathMap.find(media_info.app);
+    bool virtual_target_is_remote_url = false;
+    string virtual_key;
+    const auto req_seg = firstPathSegment(parser.url());
+    if (!req_seg.empty() && virtualPathMap.find(req_seg) != virtualPathMap.end()) {
+        virtual_key = req_seg;
+    }
+    auto it = virtual_key.empty() ? virtualPathMap.end() : virtualPathMap.find(virtual_key);
     if (it != virtualPathMap.end()) {
         // 访问的是virtualPath  [AUTO-TRANSLATED:a36c7b20]
         // Accessing virtualPath
         path = it->second;
-        url = parser.url().substr(1 + media_info.app.size());
-        virtual_app = media_info.app + "/";
+        virtual_target_is_remote_url =
+            start_with(path, "http://") || start_with(path, "https://") ||
+            start_with(path, "rtp-http://") || start_with(path, "rtp-https://");
+        const auto virtual_prefix = "/" + virtual_key;
+        if (parser.url() == virtual_prefix) {
+            url.clear();
+        } else if (start_with(parser.url(), virtual_prefix + "/")) {
+            url = parser.url().substr(virtual_prefix.size());
+        } else if (start_with(parser.url(), virtual_prefix + "=")) {
+            url = parser.url().substr(virtual_prefix.size());
+        } else {
+            url = parser.url();
+        }
+        virtual_app = virtual_key + "/";
     } else {
         // 访问的是rootPath  [AUTO-TRANSLATED:600765f0]
         // Accessing rootPath
@@ -762,6 +979,11 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
             // If the url contains "\", this directory is in Windows style; it needs to be converted to standard "/" in batches; prevent access to files outside the directory permissions
             ch = '/';
         }
+    }
+    if (virtual_target_is_remote_url && !url.empty() && url.front() == '=') {
+        auto ret = path + url;
+        NOTICE_EMIT(BroadcastHttpBeforeAccessArgs, Broadcast::kBroadcastHttpBeforeAccess, parser, ret, sender);
+        return ret;
     }
     auto ret = File::absolutePath(enableVhost ? media_info.vhost + url : url, path);
     auto http_root = File::absolutePath(enableVhost ? media_info.vhost + "/" : "/", path);
@@ -790,25 +1012,78 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
  * [AUTO-TRANSLATED:a79c824d]
  */
 void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFileManager::invoker &cb) {
-    auto fullUrl = "http://" + parser["Host"] + parser.fullUrl();
+    // 如果请求通过反向代理进入，优先使用 Referer 的 origin 还原完整 URL。
+    // 避免直接 "referer + fullUrl" 导致路径重复/非法 URL。
+    auto fullUrl = buildMediaInfoUrl(parser);
     MediaInfo media_info(fullUrl);
+    GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
+        return parseVirtualPathMapSafe(str);
+    });
+    string vpath_cookie_value;
+    const auto req_seg = firstPathSegment(parser.url());
+    if (!req_seg.empty() && virtualPathMap.find(req_seg) != virtualPathMap.end()) {
+        vpath_cookie_value = req_seg;
+    }
+    if (!req_seg.empty() && vpath_cookie_value.empty()) {
+        string keys;
+        for (auto &it : virtualPathMap) {
+            if (!keys.empty()) {
+                keys += ",";
+            }
+            keys += it.first;
+        }
+        WarnL << "virtual path not matched, req_seg:" << req_seg
+              << " configured_keys:" << keys
+              << " raw_virtual_path_cfg:" << mINI::Instance()[Http::kVirtualPath];
+    }
+    auto cb_with_vpath_cookie =
+        [cb, vpath_cookie_value](int code, const string &content_type, const StrCaseMap &responseHeader, const HttpBody::Ptr &body) {
+            if (vpath_cookie_value.empty()) {
+                cb(code, content_type, responseHeader, body);
+                return;
+            }
+            auto header = responseHeader;
+            // Keep existing cookies, but always refresh X_VPATH to latest explicit virtual prefix.
+            auto range = header.equal_range("Set-Cookie");
+            std::vector<StrCaseMap::iterator> erase_list;
+            for (auto it = range.first; it != range.second; ++it) {
+                if (it->second.find(kVirtualPathCookieName + "=") != string::npos) {
+                    erase_list.emplace_back(it);
+                }
+            }
+            for (auto &it : erase_list) {
+                header.erase(it);
+            }
+            header.emplace("Set-Cookie", kVirtualPathCookieName + "=" + vpath_cookie_value + "; Path=/");
+            cb(code, content_type, header, body);
+        };
     auto file_path = getFilePath(parser, media_info, sender);
     if (file_path.size() == 0) {
-        sendNotFound(cb);
+        sendNotFound(cb_with_vpath_cookie);
         return;
     }
 
     // 访问的是URL  [AUTO-TRANSLATED:79c824d]
     // Accessing URL
     if (start_with(file_path, "http://") || start_with(file_path, "https://")){
-        accessHttpUrl(sender, parser, media_info, file_path, cb);
+        auto param = parser.params();
+        if(!param.empty()){
+            file_path += "?";
+            file_path += param;
+        }
+        accessHttpUrl(sender, parser, media_info, file_path, cb_with_vpath_cookie);
         return;
     }
 #if ENABLE_FERRY
     // 访问的是基于RTP传输文件URL
     // Accessing URL base on rtp 
     if (start_with(file_path, "rtp-http://") || start_with(file_path, "rtp-https://")){
-        accessPlayChannelUrl(sender, parser, media_info, file_path, cb);
+        auto param = parser.params();
+        if (!param.empty()) {
+            file_path += "?";
+            file_path += param;
+        }
+        accessPlayChannelUrl(sender, parser, media_info, file_path, cb_with_vpath_cookie);
         return;
     }
 #endif
@@ -824,7 +1099,7 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
                 // 不是文件夹  [AUTO-TRANSLATED:af893469]
                 // Not a folder
                 parser.setUrl(pathCat(parser.url(), indexFile));
-                accessFile(sender, parser, media_info, file_path, cb);
+                accessFile(sender, parser, media_info, file_path, cb_with_vpath_cookie);
                 return;
             }
         }
@@ -834,12 +1109,12 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
         if (!makeFolderMenu(parser.url(), file_path, strMenu)) {
             // 文件夹不存在  [AUTO-TRANSLATED:a2dc6c89]
             // Folder does not exist
-            sendNotFound(cb);
+            sendNotFound(cb_with_vpath_cookie);
             return;
         }
         // 判断是否有权限访问该目录  [AUTO-TRANSLATED:963d02a6]
         // Determine if there is permission to access this directory
-        canAccessPath(sender, parser, media_info, true, [strMenu, cb](const string &err_msg, const HttpServerCookie::Ptr &cookie) mutable{
+        canAccessPath(sender, parser, media_info, true, [strMenu, cb_with_vpath_cookie](const string &err_msg, const HttpServerCookie::Ptr &cookie) mutable{
             if (!err_msg.empty()) {
                 strMenu = err_msg;
             }
@@ -847,14 +1122,14 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
             if (cookie) {
                 headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
             }
-            cb(err_msg.empty() ? 200 : 401, "text/html", headerOut, std::make_shared<HttpStringBody>(strMenu));
+            cb_with_vpath_cookie(err_msg.empty() ? 200 : 401, "text/html", headerOut, std::make_shared<HttpStringBody>(strMenu));
         });
         return;
     }
 
     // 访问的是文件  [AUTO-TRANSLATED:7a400b3c]
     // Accessing a file
-    accessFile(sender, parser, media_info, file_path, cb);
+    accessFile(sender, parser, media_info, file_path, cb_with_vpath_cookie);
 };
 
 

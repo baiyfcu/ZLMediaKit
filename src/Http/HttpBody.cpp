@@ -22,6 +22,7 @@
 
 #include "Util/File.h"
 #include "Util/NoticeCenter.h"
+#include "Util/onceToken.h"
 #include "Util/logger.h"
 #include "Util/util.h"
 #include "Util/uv_errno.h"
@@ -42,6 +43,12 @@ namespace mediakit {
 using HttpHeader = HttpClient::HttpHeader;
 
 namespace {
+const std::string kPlayChannelCompleteTimeoutMs = "http.play_channel_complete_timeout_ms";
+static onceToken s_play_channel_timeout_token([]() {
+    mINI::Instance()[kPlayChannelCompleteTimeoutMs] = 300 * 1000;
+});
+
+
 std::string getHttpHeaderValue(const StrCaseMap &headers, const char *key) {
     auto it = headers.find(key);
     if (it == headers.end()) {
@@ -285,16 +292,6 @@ public:
                       << " has_poller:" << (self && self->_poller);
                 return;
             }
-            if (event.type == EsFilePacketType::FileInfo) {
-            } else if (event.type == EsFilePacketType::FileChunk) {
-                if (!self->_received_file_info) {
-                    DebugL << "test,hex:" << toolkit::hexmem(event.payload.data(), 12);
-                    int i = 0;
-                    i++;
-                }
-            } else if (event.type == EsFilePacketType::FileEnd) {
-            }
-
             self->_poller->async([self, event]() {
                 if (event.type == EsFilePacketType::FileInfo) {
                     DebugL << "play channel async handle file info, task_id:" << self->_task_id
@@ -329,7 +326,7 @@ private:
             InfoL << "play channel first task event observed, task_id:" << _task_id
                   << " event_type:" << EsFilePacketTypeToString(event.type)
                   << " payload_len:" << event.payload.size()
-                  << " completed:" << event.completed;
+                  << " completed:" << event.completed << " seq:" << event.seq;
         }
     }
 
@@ -382,12 +379,6 @@ private:
                 parsePlayChannelResponseMetaPayload(event.payload, response_code, response_header);
                 sanitizePlayChannelResponseHeaders(response_header);
             }
-            InfoL << "play channel file info header ready, task_id:" << _task_id
-                  << " response_code:" << response_code
-                  << " content_type:" << getHttpHeaderValue(response_header, "Content-Type")
-                  << " content_length:" << getHttpHeaderValue(response_header, "Content-Length")
-                  << " content_range:" << getHttpHeaderValue(response_header, "Content-Range")
-                  << " payload_len:" << event.payload.size();
             ensureHeaderReady(response_code, response_header);
             if (event.completed) {
                 finish(SockException(Err_success, "play channel complete"));
@@ -404,13 +395,20 @@ private:
                       << " completed:" << event.completed;
             }
             if (!_received_file_info) {
-                auto message = terminal_event ? "play channel response header missing"
-                                              : "play channel file info missing before payload";
-                emitFailure(503, message, SockException(Err_other, message));
+                if (terminal_event) {
+                    emitFailure(503, "play channel response header missing",
+                                SockException(Err_other, "play channel response header missing"));
+                    break;
+                }
+                emitPayload(event.payload);
                 break;
             }
             ensureHeaderReady(_response_code, _response_header);
             emitPayload(event.payload);
+            if (event.type == EsFilePacketType::FileChunk && event.file_size > 0 &&
+                event.received_size >= event.file_size) {
+                terminal_event = true;
+            }
             if (terminal_event) {
                 finish(SockException(Err_success, "play channel complete"));
             }
@@ -831,6 +829,8 @@ Buffer::Ptr HttpFileBody::readData(size_t size) {
 }
 
 HttpUrlBody::HttpUrlBody(const std::string &url, const StrCaseMap &request_header) {
+    GET_CONFIG(uint64_t, timeout_ms, kPlayChannelCompleteTimeoutMs);
+
     _url = url;
     _request_header = request_header;
     _alive_token = std::make_shared<char>(0);
@@ -840,7 +840,7 @@ HttpUrlBody::HttpUrlBody(const std::string &url, const StrCaseMap &request_heade
     _client_holder = client;
     client->setClientPoller(EventPollerPool::Instance().getPoller(false));
     client->setMethod("GET");
-    client->setCompleteTimeout(30 * 1000);
+    client->setCompleteTimeout(timeout_ms);
     client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
         if (weak_alive.expired()) {
             return;
@@ -1009,6 +1009,7 @@ bool HttpUrlBody::requestSuccess() const {
 PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url,
                                        const StrCaseMap &request_header,
                                        const toolkit::EventPoller::Ptr &poller) {
+    GET_CONFIG(uint64_t, timeout_ms, kPlayChannelCompleteTimeoutMs);
     _url = url;
     _request_header = request_header;
     _alive_token = std::make_shared<char>(0);
@@ -1024,7 +1025,7 @@ PlayChannelUrlBody::PlayChannelUrlBody(const std::string &url,
     };
     client->setClientPoller(poller ? poller : EventPollerPool::Instance().getPoller(false));
     client->setMethod("GET");
-    client->setCompleteTimeout(30 * 1000);
+    client->setCompleteTimeout(timeout_ms);
     client->setHeaderCB([weak_alive, self](int code, const HttpClient::HttpHeader &headers) {
         if (weak_alive.expired()) {
             return;

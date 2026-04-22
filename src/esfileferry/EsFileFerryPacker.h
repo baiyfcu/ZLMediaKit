@@ -59,7 +59,7 @@ struct EsFileGlobalOptions {
     uint64_t scheduler_round_budget_bytes = 8 * 1024 * 1024;
     // FileChunk 的最小发送门限（仅对 FileChunk 生效）。
     // emit token 小于该值时延后发送，等待 token 累积；尾包可放行。
-    uint64_t min_emit_payload_bytes = 4 * 1024;
+    uint64_t min_emit_payload_bytes = 32 * 1024;
     // HTTP 回源的默认最大并发窗口。
     // 取 6：适合作为 50 路以内混合任务的默认保护值。
     size_t http_pull_concurrency_limit = 6;
@@ -70,11 +70,11 @@ struct EsFileGlobalOptions {
     // 在稳态下，发送速率与该值保持同量级一致，上层无需再做独立业务限速。
     uint64_t http_pull_total_rate_bps = 12 * 1024 * 1024;
     // API 请求在总速率中的默认占比权重。
-    uint32_t http_api_rate_share = 50;
+    uint32_t http_api_rate_share = 15;
     // MP4 点播在总速率中的默认占比权重。
     uint32_t http_mp4_rate_share = 35;
     // 资源下载在总速率中的默认占比权重。
-    uint32_t http_download_rate_share = 15;
+    uint32_t http_download_rate_share = 50;
 };
 
 class EsFileFerryPacker {

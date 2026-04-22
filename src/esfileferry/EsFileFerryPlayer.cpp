@@ -1,5 +1,6 @@
 ﻿#include "EsFileFerryPlayer.h"
 
+#include "Util/base64.h"
 #include "Util/logger.h"
 #include <atomic>
 #include <cstring>
@@ -147,9 +148,48 @@ PacketDecodeStatus decodePacketAt(const uint8_t *data, size_t size,
   }
   if (packet.header.payload_len > 0) {
     packet.payload.resize(packet.header.payload_len);
-    std::memcpy(packet.payload.data(), p + pos, packet.header.payload_len);
+    const bool payload_escaped =
+        (packet.header.flags & kEsFileFlagPayloadEscaped) != 0;
+    if (!payload_escaped) {
+      std::memcpy(packet.payload.data(), p + pos, packet.header.payload_len);
+      consumed = static_cast<size_t>(packet.header.total_len + prefix_size);
+    } else {
+      const auto encoded_limit = size - prefix_size;
+      auto encoded_pos = pos;
+      size_t raw_written = 0;
+      while (raw_written < packet.header.payload_len) {
+        if (encoded_pos >= encoded_limit) {
+          return PacketDecodeStatus::NeedMoreData;
+        }
+        if (encoded_pos >= 2 &&
+            p[encoded_pos - 2] == 0x00 &&
+            p[encoded_pos - 1] == 0x00 &&
+            p[encoded_pos] == 0x03) {
+          ++encoded_pos;
+          continue;
+        }
+        packet.payload[raw_written++] = p[encoded_pos++];
+      }
+      consumed = prefix_size + encoded_pos;
+    }
+    const bool file_info_base64 =
+        packet.header.type == EsFilePacketType::FileInfo &&
+        (packet.header.flags & kEsFileFlagFileInfoPayloadBase64) != 0;
+    if (file_info_base64 && !packet.payload.empty()) {
+      const auto decoded = decodeBase64(
+          std::string(reinterpret_cast<const char *>(packet.payload.data()),
+                      packet.payload.size()));
+      if (!decoded.empty()) {
+        packet.payload.assign(decoded.begin(), decoded.end());
+      } else {
+        WarnL << "decode fileinfo payload base64 failed, task_id:"
+              << packet.task_id << " seq:" << packet.header.seq
+              << " payload_len:" << packet.payload.size();
+      }
+    }
+    return PacketDecodeStatus::Success;
   }
-  consumed = static_cast<size_t>(packet.header.total_len + prefix_size);
+  consumed = static_cast<size_t>(prefix_size + pos);
   return PacketDecodeStatus::Success;
 }
 } // namespace
@@ -467,8 +507,8 @@ bool EsFileFerryUnPacker::parseOnePacketFromRaw(const uint8_t *data,
     }
     return false;
   } else {
-      DebugL << "frame normal,size:" << size << " task id:" << packet.task_id << " type:" << EsFilePacketTypeToString(packet.header.type) << " seq:" << packet.header.seq
-             << " hex:" << hexmem(data, 100); 
+      // DebugL << "frame normal,size:" << size << " task id:" << packet.task_id << " type:" << EsFilePacketTypeToString(packet.header.type) << " seq:" << packet.header.seq
+      //        << " hex:" << hexmem(data, 100);
   }
   consumed = start + local_consumed;
   return true;

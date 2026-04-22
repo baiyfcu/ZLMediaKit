@@ -10,8 +10,8 @@
 
 namespace {
 
-constexpr float kDefaultHttpStreamTimeoutSec = 60.0f;
-constexpr long kDefaultHttpConnectTimeoutMs = 10 * 1000;
+constexpr float kDefaultHttpStreamTimeoutSec = 0.0f;
+constexpr long kDefaultHttpConnectTimeoutMs = 30 * 1000;
 constexpr long kDefaultCurlBufferSize = 512 * 1024;
 
 std::string toLowerCopy(std::string value) {
@@ -214,9 +214,11 @@ bool setupCurlRequest(CURL *curl, const std::string &url,
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
                    kDefaultHttpConnectTimeoutMs);
-  curl_easy_setopt(
-      curl, CURLOPT_TIMEOUT_MS,
-      static_cast<long>(kDefaultHttpStreamTimeoutSec * 1000.0f));
+  if (kDefaultHttpStreamTimeoutSec > 0.0f) {
+    curl_easy_setopt(
+        curl, CURLOPT_TIMEOUT_MS,
+        static_cast<long>(kDefaultHttpStreamTimeoutSec * 1000.0f));
+  }
   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, &onCurlHeader);
   curl_easy_setopt(curl, CURLOPT_HEADERDATA, ctx);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &onCurlWrite);
