@@ -306,6 +306,7 @@ enum class RtmpVideoCodec : uint32_t {
     screen_video2 = 6, // Screen video version 2
     h264 = 7, // avc
     h265 = 12, // 国内扩展
+    svac3 = 22, // 国内扩展
 
     // 增强型rtmp FourCC  [AUTO-TRANSLATED:442b77fb]
     // Enhanced rtmp FourCC

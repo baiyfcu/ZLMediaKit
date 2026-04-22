@@ -54,8 +54,8 @@ typedef enum {
     XX(CodecG722,  TrackAudio, 18, "G722", PSI_STREAM_AUDIO_G722, MOV_OBJECT_NONE)   \
     XX(CodecG723,  TrackAudio, 19, "G723", PSI_STREAM_AUDIO_G723, MOV_OBJECT_NONE)   \
     XX(CodecG728,  TrackAudio, 20, "G728", PSI_STREAM_RESERVED, MOV_OBJECT_NONE)     \
-    XX(CodecG729,  TrackAudio, 21, "G729", PSI_STREAM_AUDIO_G729, MOV_OBJECT_NONE)
-
+    XX(CodecG729,  TrackAudio, 21, "G729", PSI_STREAM_AUDIO_G729, MOV_OBJECT_NONE)   \
+    XX(CodecSVAC3, TrackVideo, 22, "SVAC3", PSI_STREAM_VIDEO_SVAC3, MOV_OBJECT_SVAC3)
 typedef enum {
     CodecInvalid = -1,
 #define XX(name, type, value, str, mpeg_id, mp4_id) name = value,

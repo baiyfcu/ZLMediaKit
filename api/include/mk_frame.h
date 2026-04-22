@@ -44,6 +44,7 @@ API_EXPORT extern const int MKCodecVP8;
 API_EXPORT extern const int MKCodecVP9;
 API_EXPORT extern const int MKCodecAV1;
 API_EXPORT extern const int MKCodecJPEG;
+API_EXPORT extern const int MKCodecSVAC3;
 
 typedef struct mk_frame_t *mk_frame;
 

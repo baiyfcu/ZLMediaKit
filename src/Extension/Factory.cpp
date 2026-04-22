@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
  *
  * This file is part of ZLMediaKit(https://github.com/ZLMediaKit/ZLMediaKit).
@@ -30,6 +30,7 @@ extern CodecPlugin g711a_plugin;
 extern CodecPlugin g711u_plugin;
 extern CodecPlugin l16_plugin;
 extern CodecPlugin mp3_plugin;
+extern CodecPlugin svac3_plugin;
 
 onceToken g_plugins_token([]() { Factory::loadPlugins(); });
 
@@ -46,6 +47,7 @@ void Factory::loadPlugins() {
         registerPlugin(g711u_plugin);
         registerPlugin(l16_plugin);
         registerPlugin(mp3_plugin);
+        registerPlugin(svac3_plugin);
     }
 }
 
@@ -107,6 +109,9 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
         if (str == "hev1" || str == "hvc1") {
             return CodecH265;
         }
+        if (str == "svac3") {
+            return CodecSVAC3;
+        }
         WarnL << "Unsupported codec: " << str;
         return CodecInvalid;
     }
@@ -119,6 +124,7 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
             case RtmpVideoCodec::h265: return CodecH265;
             case RtmpVideoCodec::fourcc_av1: return CodecAV1;
             case RtmpVideoCodec::fourcc_vp9: return CodecVP9;
+			case RtmpVideoCodec::svac3: return CodecSVAC3;
             default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
         }
     }
@@ -217,6 +223,7 @@ AMFValue Factory::getAmfByCodecId(CodecId codecId) {
         case CodecMP3: return AMFValue((int)RtmpAudioCodec::mp3);
         case CodecAV1: return AMFValue((int)RtmpVideoCodec::fourcc_av1);
         case CodecVP9: return AMFValue((int)RtmpVideoCodec::fourcc_vp9);
+		case CodecSVAC3: return AMFValue((int)RtmpVideoCodec::svac3);
         default: return AMFValue(AMF_NULL);
     }
 }
