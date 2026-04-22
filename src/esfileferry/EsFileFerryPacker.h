@@ -4,7 +4,6 @@
 #include "EsFilePayloadProtocol.h"
 #include "Poller/Timer.h"
 #include "Util/ResourcePool.h"
-#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -38,18 +37,6 @@ struct EsFilePackTaskInfo {
     bool completed = false;
 };
 
-enum class EsFileTaskType {
-    HttpApiRequest = 0,
-    HttpMp4Vod = 1,
-    HttpResourceDownload = 2,
-};
-
-enum class EsFileTaskPriority {
-    High = 0,
-    Medium = 1,
-    Low = 2,
-};
-
 struct EsFileGlobalOptions {
     // 单个 FileChunk 的默认业务分片大小。
     // 取 128KB：兼顾多路并发时的平滑度与包数量。
@@ -66,20 +53,18 @@ struct EsFileGlobalOptions {
     // HTTP 回源的默认全局缓冲上限。
     // 取 24MB：与默认并发窗口一起控制瞬时内存占用。
     uint64_t http_pull_total_buffer_limit_bytes = 24 * 1024 * 1024;
-    // 全部 HTTP 任务共享的总体拉流速率上限。
-    // 在稳态下，发送速率与该值保持同量级一致，上层无需再做独立业务限速。
+    // 兼容命名保留：当前配置名沿用 HTTP pull 语义，
+    // 但一阶段重构后也作为统一发送面的总体速率上限使用。
     uint64_t http_pull_total_rate_bps = 12 * 1024 * 1024;
-    // API 请求在总速率中的默认占比权重。
-    uint32_t http_api_rate_share = 15;
-    // MP4 点播在总速率中的默认占比权重。
-    uint32_t http_mp4_rate_share = 35;
-    // 资源下载在总速率中的默认占比权重。
-    uint32_t http_download_rate_share = 50;
 };
 
 class EsFileFerryPacker {
 public:
     static constexpr const char *kBootstrapTaskId = "__bootstrap__";
+    // 一阶段主调度面说明：
+    // 1. 控制面优先推进：TaskStatus / FileInfo / FileEnd 独立于数据面公平轮转；
+    // 2. 数据面统一等权：所有可调度任务进入同一公平轮转集合；
+    // 3. 运行时 profile 统一：buffer / burst / emit/fetch rate 不再按旧分类分叉。
     // 同步发包回调，运行在 Packer 调度线程。
     // 如果第三方调用方需要异步转发，建议在回调内部使用有界队列；
     // 当队列达到上限时阻塞回调线程，让背压自然回传到 Packer/HTTP 拉取线程，
@@ -129,7 +114,7 @@ public:
     // 获取最近一次错误信息
     std::string getLastError() const;
     std::vector<std::string> testPickFairRound(const std::vector<std::string> &active_ids) {
-        return pickFairRound(active_ids, EsFileTaskPriority::High);
+        return pickFairRound(active_ids);
     }
 
     uint64_t testComputeTaskQuota(uint64_t total_payload_quota_bytes, size_t active_count, size_t index) const {
@@ -155,20 +140,6 @@ public:
 
     static constexpr size_t testDefaultHttpBufferChunkBytes() {
         return kDefaultHttpBufferChunkBytes;
-    }
-
-    EsFileTaskType testGetTaskType(const std::string &task_id) const {
-        std::lock_guard<std::mutex> lock(_mtx);
-        auto it = _task_registry.tasks.find(task_id);
-        return it != _task_registry.tasks.end() ? it->second.control.task_type
-                                  : EsFileTaskType::HttpResourceDownload;
-    }
-
-    EsFileTaskPriority testGetTaskPriority(const std::string &task_id) const {
-        std::lock_guard<std::mutex> lock(_mtx);
-        auto it = _task_registry.tasks.find(task_id);
-        return it != _task_registry.tasks.end() ? it->second.control.priority
-                                  : EsFileTaskPriority::Low;
     }
 
     uint64_t testGetTaskFetchRateBps(const std::string &task_id) const {
@@ -214,8 +185,6 @@ private:
     };
 
     struct TaskControlState {
-        EsFileTaskType task_type = EsFileTaskType::HttpResourceDownload;
-        EsFileTaskPriority priority = EsFileTaskPriority::Low;
         uint64_t max_buffered_bytes = 0;
         uint64_t resume_buffered_bytes = 0;
         TokenBucket fetch_bucket;
@@ -274,7 +243,7 @@ private:
     struct TaskRegistryState {
         std::unordered_map<std::string, TaskState> tasks;
         uint64_t generation = 0;
-        std::array<size_t, 3> priority_rr_cursor{{0, 0, 0}};
+        size_t rr_cursor = 0;
     };
 
     struct HttpFetchRuntimeState {
@@ -333,21 +302,18 @@ private:
     static constexpr uint32_t kDefaultPaceIntervalMs = 20;
     // 视频专网默认的单轮调度发送预算。
     // 作用：限制单轮调度的总出流量，保障多路公平轮转而不是被大视频或大 JSON 长时间独占。
-    // 默认取 8MB：适合作为 API/MP4 优先、下载保底场景的吞吐/公平折中值。
+    // 默认取 8MB：适合作为统一公平轮转场景下的吞吐/公平折中值。
     static constexpr uint64_t kDefaultSchedulerRoundBudgetBytes =
         8 * 1024 * 1024;
     // FileChunk 最小发送门限默认值。
     static constexpr uint64_t kDefaultMinEmitPayloadBytes = 4 * 1024;
-    // 三档优先级默认预算权重：高优 API，中优 MP4 点播，低优下载。
-    // 三类任务的默认单任务缓冲上限。
-    static constexpr uint64_t kDefaultApiBufferedBytes = 512 * 1024;
-    static constexpr uint64_t kDefaultMp4BufferedBytes = 1024 * 1024;
-    static constexpr uint64_t kDefaultDownloadBufferedBytes =
+    // 兼容保留：旧分类字段仍存在，但一阶段重构后不再驱动主调度。
+    // 单任务 HTTP 默认缓冲上限统一收敛为单一值。
+    static constexpr uint64_t kDefaultUnifiedBufferedBytes =
         kDefaultMaxHttpBufferedBytesPerTask;
 
     // 获取本地文件大小
     static bool getFileSize(const std::string &file_path, uint64_t &size);
-    static size_t taskTypeToIndex(EsFileTaskType type);
     // 选择输出文件名（优先显式传入）
     static std::string pickFileName(const std::string &file_path, const std::string &file_name);
     // 组装协议头
@@ -384,45 +350,37 @@ private:
     bool emitPacket(const std::string &task_id, std::vector<uint8_t> &&packet, const EsFilePacketHeader &header) const;
     // 更新最近一次错误信息
     void setLastError(const std::string &err);
-    // 按优先级获取活跃任务列表
-    std::array<std::vector<std::string>, 3> snapshotActiveTasksByPriority() const;
-    // 指定优先级下的任务公平轮转顺序计算
-    std::vector<std::string> pickFairRound(const std::vector<std::string> &active_ids,
-                                           EsFileTaskPriority priority);
+    // 以下为一阶段真实主调度面：
+    // - snapshotSchedulableTaskIds / pickFairRound / computeTaskQuota
+    //   共同决定数据面统一公平轮转；
+    // - isTaskControlReady / isTaskDataSchedulable / isTaskReadyToEmitEnd
+    //   负责 control plane 与 data plane 的边界判断；
+    // - refreshUnifiedTaskProfileLocked / recomputeAllTaskRateProfilesLocked /
+    //   refreshTaskRateBucketsLocked 负责统一运行时 profile 与动态分母重算。
+    // 获取当前轮次的数据面可调度任务列表
+    std::vector<std::string> snapshotSchedulableTaskIds() const;
+    // 单集合公平轮转顺序计算
+    std::vector<std::string> pickFairRound(const std::vector<std::string> &active_ids);
     // 计算单任务本 tick 负载预算
     uint64_t computeTaskQuota(uint64_t total_payload_quota_bytes, size_t active_count, size_t index) const;
-    // 计算某个优先级本 tick 的预算
-    uint64_t computePriorityQuota(uint64_t total_payload_quota_bytes,
-                                  EsFileTaskPriority priority,
-                                  const std::array<std::vector<std::string>, 3> &active_groups) const;
     // 判断任务是否已具备发送 FileEnd 的条件
     static bool isTaskReadyToEmitEnd(const TaskState &task);
+    // 判断任务是否存在待立即推进的控制包
+    static bool isTaskControlReady(const TaskState &task);
     // 判断 HTTP 任务内部缓冲是否已完全排空
     static bool isHttpTaskBufferDrained(const TaskState &task);
-    // 根据请求信息推断任务类型。
-    static EsFileTaskType inferTaskTypeFromRequest(const std::string &url,
-                                                   const std::string &method_upper,
-                                                   const HttpHeaders &headers,
-                                                   const std::string &body);
-    // 根据响应头修正任务类型。
-    static EsFileTaskType inferTaskTypeFromResponse(EsFileTaskType current_type,
-                                                    const std::string &url,
-                                                    uint32_t status_code,
-                                                    const HttpHeaders &headers);
-    // 按任务类型应用内部策略（调用方需已持锁）
-    void applyTaskProfileLocked(TaskState &task,
-                                EsFileTaskType task_type,
-                                bool reset_buckets);
-    // 获取指定任务类型的全局带宽占比
-    uint32_t rateShareForTaskType(EsFileTaskType type) const;
-    // 根据当前活跃任务重新分配全局共享速率（调用方需已持锁）
+    // 判断任务是否具备参与当前数据面公平轮转的条件
+    static bool isTaskDataSchedulable(const TaskState &task);
+    // 刷新统一运行时 profile（调用方需已持锁）。
+    // 一阶段重构后 profile 不再按 task_type 分叉。
+    void refreshUnifiedTaskProfileLocked(TaskState &task, bool reset_buckets);
+    // 根据当前任务状态重新分配全局共享速率（调用方需已持锁）
     void recomputeAllTaskRateProfilesLocked(bool reset_buckets);
-    // 基于类型占比和活跃数刷新单任务令牌桶（调用方需已持锁）
+    // 基于统一调度口径刷新单任务令牌桶（调用方需已持锁）
     void refreshTaskRateBucketsLocked(
         TaskState &task,
-        const std::array<size_t, 3> &active_counts,
-        size_t active_type_count,
-        uint32_t active_share_sum,
+        size_t alive_http_task_count,
+        size_t schedulable_task_count,
         bool reset_buckets);
     // 更新令牌桶
     static void refillTokenBucket(TokenBucket &bucket);

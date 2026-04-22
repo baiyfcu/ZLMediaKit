@@ -326,24 +326,42 @@ void splitFerryH264(const char *ptr, size_t len, size_t prefix, const std::funct
 #endif
 
 bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
-  if (!data || size <= 48) {
-    if (data && size > 8 && !(data[5] == 0x42 && data[6] == 0x51)) {
-      static std::atomic<size_t> s_small_frame_count{0};
-      size_t count = 0;
-      if (shouldLogSampled(s_small_frame_count, 1000, count)) {
-        WarnL << "inputFrame ignore small frame, size:" << size
-              << " sample_count:" << count;
-      }
-    }
+  if (!data || size == 0) {
     return false;
   }
-  // Fast path: a complete ferry packet arrives in one frame.
-  EsFilePacket packet;
-  size_t consumed = 0;
-  
-  if (parseOnePacketFromRaw(data, size, packet, consumed) && consumed == size) {
-    dispatchPacket(std::move(packet), data, size);
-    return true;
+  bool buffer_empty = false;
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    resetBufferIfFullyConsumedLocked();
+    buffer_empty = (_buffer.size() - _buffer_start) == 0;
+  }
+  if (buffer_empty) {
+    size_t start_code_size = 0;
+    if (size >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 &&
+        data[3] == 0x01) {
+      start_code_size = 4;
+    } else if (size >= 3 && data[0] == 0x00 && data[1] == 0x00 &&
+               data[2] == 0x01) {
+      start_code_size = 3;
+    }
+    if (start_code_size > 0 && size > start_code_size) {
+      const uint8_t nal_header = data[start_code_size];
+      if (nal_header != kEsFileCarrierNalHeader) {
+        return false;
+      }
+      if (size >= start_code_size + 1 + sizeof(uint32_t) &&
+          ReadEsFileU32BE(data + start_code_size + 1) != kEsFilePacketMagic) {
+        return false;
+      }
+    }
+  }
+  if (size >= kEsFileFixedHeaderSize + kEsFileCarrierShortPrefixSize) {
+    EsFilePacket packet;
+    size_t consumed = 0;
+    if (parseOnePacketFromRaw(data, size, packet, consumed) && consumed == size) {
+      dispatchPacket(std::move(packet), data, size);
+      return true;
+    }
   }
 
   {

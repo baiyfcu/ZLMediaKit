@@ -18,9 +18,7 @@ constexpr uint32_t EsFileFerryPacker::kDefaultBootstrapIntervalMs;
 constexpr uint32_t EsFileFerryPacker::kDefaultPaceIntervalMs;
 constexpr uint64_t EsFileFerryPacker::kDefaultSchedulerRoundBudgetBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultMinEmitPayloadBytes;
-constexpr uint64_t EsFileFerryPacker::kDefaultApiBufferedBytes;
-constexpr uint64_t EsFileFerryPacker::kDefaultMp4BufferedBytes;
-constexpr uint64_t EsFileFerryPacker::kDefaultDownloadBufferedBytes;
+constexpr uint64_t EsFileFerryPacker::kDefaultUnifiedBufferedBytes;
 
 EsFileFerryPacker &EsFileFerryPacker::Instance() {
   static std::shared_ptr<EsFileFerryPacker> instance(new EsFileFerryPacker());
@@ -78,44 +76,8 @@ bool isHttpUrl(const std::string &value) {
   return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
 }
 
-size_t priorityToIndex(EsFileTaskPriority priority) {
-  return static_cast<size_t>(priority);
-}
-
-EsFileTaskPriority inferPriorityFromType(EsFileTaskType type) {
-  switch (type) {
-  case EsFileTaskType::HttpApiRequest:
-    return EsFileTaskPriority::High;
-  case EsFileTaskType::HttpMp4Vod:
-    return EsFileTaskPriority::Medium;
-  case EsFileTaskType::HttpResourceDownload:
-  default:
-    return EsFileTaskPriority::Low;
-  }
-}
-
-uint64_t inferDefaultBufferedBytes(EsFileTaskType type) {
-  switch (type) {
-  case EsFileTaskType::HttpApiRequest:
-    return 512 * 1024;
-  case EsFileTaskType::HttpMp4Vod:
-    return 1024 * 1024;
-  case EsFileTaskType::HttpResourceDownload:
-  default:
-    return 4 * 1024 * 1024;
-  }
-}
-
-uint64_t inferDefaultBurstBytes(EsFileTaskType type, size_t chunk_size) {
-  switch (type) {
-  case EsFileTaskType::HttpApiRequest:
-    return std::max<uint64_t>(chunk_size, 128 * 1024);
-  case EsFileTaskType::HttpMp4Vod:
-    return std::max<uint64_t>(chunk_size, 64 * 1024);
-  case EsFileTaskType::HttpResourceDownload:
-  default:
-    return std::max<uint64_t>(chunk_size * 2, 256 * 1024);
-  }
+uint64_t inferUnifiedBurstBytes(size_t chunk_size) {
+  return std::max<uint64_t>(chunk_size * 2, 256 * 1024);
 }
 
 std::string inferHttpFileName(const std::string &url, const std::string &task_id) {
@@ -370,16 +332,6 @@ void EsFileFerryPacker::setGlobalOptions(const EsFileGlobalOptions &opts) {
             ? kDefaultMaxHttpBufferedBytes
             : opts.http_pull_total_buffer_limit_bytes;
     _global_options.http_pull_total_rate_bps = opts.http_pull_total_rate_bps;
-    _global_options.http_api_rate_share = opts.http_api_rate_share;
-    _global_options.http_mp4_rate_share = opts.http_mp4_rate_share;
-    _global_options.http_download_rate_share = opts.http_download_rate_share;
-    if (_global_options.http_api_rate_share == 0 &&
-        _global_options.http_mp4_rate_share == 0 &&
-        _global_options.http_download_rate_share == 0) {
-      _global_options.http_api_rate_share = 50;
-      _global_options.http_mp4_rate_share = 35;
-      _global_options.http_download_rate_share = 15;
-    }
     recomputeAllTaskRateProfilesLocked(false);
     should_try_start_http = !_http_runtime.pending_fetches.empty();
   }
@@ -424,6 +376,14 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
                                 const std::string &body,
                                 const std::string &file_name) {
 
+  if (task_id.empty()) {
+    setLastError("task_id is empty");
+    return false;
+  }
+  if (source.empty()) {
+    setLastError("source is empty");
+    return false;
+  }
   TaskState state;
   state.task_id = task_id;
   if (isHttpUrl(source)) {
@@ -450,12 +410,10 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     state.http.request_headers = headers;
     state.http.request_body = body;
     state.http.buffer.cv = std::make_shared<std::condition_variable>();
-    state.control.task_type =
-        inferTaskTypeFromRequest(source, method_upper, headers, body);
     uint64_t generation = 0;
     {
       std::lock_guard<std::mutex> lock(_mtx);
-      applyTaskProfileLocked(state, state.control.task_type, true);
+      refreshUnifiedTaskProfileLocked(state, true);
       generation = ++_task_registry.generation;
       state.generation = generation;
       _task_registry.tasks[task_id] = std::move(state);
@@ -482,7 +440,7 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     state.source.memory_mode = false;
     state.source.stream = std::move(stream);
     std::lock_guard<std::mutex> lock(_mtx);
-    applyTaskProfileLocked(state, EsFileTaskType::HttpResourceDownload, true);
+    refreshUnifiedTaskProfileLocked(state, true);
     state.generation = ++_task_registry.generation;
     _task_registry.tasks[task_id] = std::move(state);
     recomputeAllTaskRateProfilesLocked(false);
@@ -549,7 +507,7 @@ void EsFileFerryPacker::clearTasks() {
     _http_runtime.pending_fetches.clear();
     _http_runtime.total_buffered_bytes = 0;
     _task_registry.tasks.clear();
-    _task_registry.priority_rr_cursor = {{0, 0, 0}};
+    _task_registry.rr_cursor = 0;
     recomputeAllTaskRateProfilesLocked(false);
     should_schedule_http = !_http_runtime.pending_fetches.empty();
   }
@@ -672,128 +630,147 @@ void EsFileFerryPacker::packetThreadLoop() {
 
 size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes) {
   size_t packet_count = 0;
-  auto active_groups = snapshotActiveTasksByPriority();
-  if (active_groups[0].empty() && active_groups[1].empty() &&
-      active_groups[2].empty()) {
-    return packet_count;
-  }
-
-  struct TaskSendSnapshot {
-    std::string file_name;
-    uint64_t file_size = 0;
-    uint32_t next_seq = 0;
-    bool info_sent = false;
-    bool http_fetch_pending = false;
-    bool http_failed = false;
-    std::string http_error;
-    bool http_headers_ready = false;
-    std::vector<uint8_t> http_meta_payload;
+  auto collect_ids = [&](const std::function<bool(const TaskState &)> &pred) {
+    std::vector<std::string> ids;
+    {
+      std::lock_guard<std::mutex> lock(_mtx);
+      for (const auto &item : _task_registry.tasks) {
+        if (pred(item.second)) {
+          ids.emplace_back(item.first);
+        }
+      }
+    }
+    return pickFairRound(ids);
   };
 
-  for (EsFileTaskPriority priority : {EsFileTaskPriority::High,
-                                      EsFileTaskPriority::Medium,
-                                      EsFileTaskPriority::Low}) {
-    const auto &priority_ids = active_groups[priorityToIndex(priority)];
-    if (priority_ids.empty()) {
-      continue;
-    }
-    uint64_t priority_quota =
-        computePriorityQuota(total_payload_quota_bytes, priority, active_groups);
-    if (priority_quota == 0) {
-      continue;
-    }
-    auto round_ids = pickFairRound(priority_ids, priority);
-    const auto active_count = round_ids.size();
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    recomputeAllTaskRateProfilesLocked(false);
+  }
 
-    for (size_t i = 0; i < active_count; ++i) {
-      const auto &task_id = round_ids[i];
-      uint64_t quota = computeTaskQuota(priority_quota, active_count, i);
-
-      TaskSendSnapshot snapshot;
+  // Control plane first: failed/info/end packets bypass the data fair round.
+  auto failed_ids = collect_ids([](const TaskState &task) {
+    return !task.send.end_sent && task.http.failed;
+  });
+  if (!failed_ids.empty()) {
+    bool dirty = false;
+    for (const auto &task_id : failed_ids) {
+      std::string file_name;
+      uint64_t file_size = 0;
+      uint32_t next_seq = 0;
+      std::string http_error;
       {
         std::lock_guard<std::mutex> lock(_mtx);
         auto it = _task_registry.tasks.find(task_id);
-        if (it == _task_registry.tasks.end() || it->second.send.end_sent) {
+        if (it == _task_registry.tasks.end() || it->second.send.end_sent ||
+            !it->second.http.failed) {
           continue;
         }
-        const auto &task = it->second;
-        snapshot.file_name = task.source.file_name;
-        snapshot.file_size = task.source.file_size;
-        snapshot.next_seq = task.send.next_seq;
-        snapshot.info_sent = task.send.info_sent;
-        snapshot.http_fetch_pending =
-            task.http.source && (task.http.queued || task.http.active);
-        snapshot.http_failed = task.http.failed;
-        snapshot.http_error = task.http.error;
-        snapshot.http_headers_ready = task.http.headers_ready;
-        if (task.http.source && !task.send.info_sent &&
-            !task.http.response_meta_payload.empty()) {
-          snapshot.http_meta_payload = task.http.response_meta_payload;
-        }
+        file_name = it->second.source.file_name;
+        file_size = it->second.source.file_size;
+        next_seq = it->second.send.next_seq;
+        http_error = it->second.http.error;
       }
-
-      if (snapshot.http_fetch_pending && !snapshot.http_headers_ready) {
+      std::vector<uint8_t> status_payload(http_error.begin(), http_error.end());
+      const auto status_ts = nextRelativeTimestampMs();
+      TaskState status_task;
+      status_task.task_id = task_id;
+      status_task.source.file_name = file_name;
+      status_task.source.file_size = file_size;
+      auto status_header =
+          makePacketHeader(status_task, EsFilePacketType::TaskStatus, 0,
+                           static_cast<uint32_t>(status_payload.size()), 0,
+                           next_seq, status_ts);
+      auto status_packet = buildPacket(status_task, status_header, status_payload);
+      if (!emitPacket(task_id, std::move(status_packet), status_header)) {
         continue;
       }
+      ++packet_count;
+      std::lock_guard<std::mutex> lock(_mtx);
+      auto it = _task_registry.tasks.find(task_id);
+      if (it != _task_registry.tasks.end() && !it->second.send.end_sent &&
+          it->second.http.failed) {
+        it->second.send.info_sent = true;
+        it->second.send.end_sent = true;
+        it->second.send.next_seq++;
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      std::lock_guard<std::mutex> lock(_mtx);
+      recomputeAllTaskRateProfilesLocked(false);
+    }
+  }
 
-      if (snapshot.http_failed) {
-        std::vector<uint8_t> status_payload(snapshot.http_error.begin(),
-                                            snapshot.http_error.end());
-        const auto status_ts = nextRelativeTimestampMs();
-        TaskState status_task;
-        status_task.task_id = task_id;
-        status_task.source.file_name = snapshot.file_name;
-        status_task.source.file_size = snapshot.file_size;
-        auto status_header =
-            makePacketHeader(status_task, EsFilePacketType::TaskStatus, 0,
-                             static_cast<uint32_t>(status_payload.size()), 0,
-                             snapshot.next_seq, status_ts);
-        auto status_packet =
-            buildPacket(status_task, status_header, status_payload);
-        if (!emitPacket(task_id, std::move(status_packet), status_header)) {
-          continue;
-        }
-        ++packet_count;
+  auto info_ids = collect_ids([](const TaskState &task) {
+    if (task.send.end_sent || task.http.failed || task.send.info_sent) {
+      return false;
+    }
+    return !task.http.source || task.http.headers_ready;
+  });
+  if (!info_ids.empty()) {
+    bool dirty = false;
+    for (const auto &task_id : info_ids) {
+      std::string file_name;
+      uint64_t file_size = 0;
+      uint32_t next_seq = 0;
+      std::vector<uint8_t> http_meta_payload;
+      {
         std::lock_guard<std::mutex> lock(_mtx);
         auto it = _task_registry.tasks.find(task_id);
-        if (it != _task_registry.tasks.end()) {
-          it->second.send.info_sent = true;
-          it->second.send.end_sent = true;
-          it->second.send.next_seq++;
-          recomputeAllTaskRateProfilesLocked(false);
+        if (it == _task_registry.tasks.end() || it->second.send.end_sent ||
+            it->second.send.info_sent || it->second.http.failed ||
+            (it->second.http.source && !it->second.http.headers_ready)) {
+          continue;
         }
+        file_name = it->second.source.file_name;
+        file_size = it->second.source.file_size;
+        next_seq = it->second.send.next_seq;
+        if (it->second.http.source) {
+          http_meta_payload = it->second.http.response_meta_payload;
+        }
+      }
+      uint16_t info_flags = 0;
+      if (!http_meta_payload.empty()) {
+        info_flags = kEsFileFlagFileInfoHasHttpResponseHeaders;
+      }
+      const auto info_ts = nextRelativeTimestampMs();
+      TaskState info_task;
+      info_task.task_id = task_id;
+      info_task.source.file_name = file_name;
+      info_task.source.file_size = file_size;
+      auto info_header = makePacketHeader(
+          info_task, EsFilePacketType::FileInfo, 0,
+          static_cast<uint32_t>(http_meta_payload.size()), info_flags, next_seq,
+          info_ts);
+      auto info_packet = buildPacket(info_task, info_header, http_meta_payload);
+      if (!emitPacket(task_id, std::move(info_packet), info_header)) {
         continue;
       }
-
-      if (!snapshot.info_sent) {
-        std::vector<uint8_t> info_payload;
-        uint16_t info_flags = 0;
-        if (!snapshot.http_meta_payload.empty()) {
-          info_payload = std::move(snapshot.http_meta_payload);
-          info_flags = kEsFileFlagFileInfoHasHttpResponseHeaders;
-        }
-        const auto info_ts = nextRelativeTimestampMs();
-        TaskState info_task;
-        info_task.task_id = task_id;
-        info_task.source.file_name = snapshot.file_name;
-        info_task.source.file_size = snapshot.file_size;
-        auto info_header = makePacketHeader(
-            info_task, EsFilePacketType::FileInfo, 0,
-            static_cast<uint32_t>(info_payload.size()), info_flags,
-            snapshot.next_seq, info_ts);
-        auto info_packet = buildPacket(info_task, info_header, info_payload);
-        if (!emitPacket(task_id, std::move(info_packet), info_header)) {
-          continue;
-        }
-        ++packet_count;
-        std::lock_guard<std::mutex> lock(_mtx);
-        auto it = _task_registry.tasks.find(task_id);
-        if (it != _task_registry.tasks.end()) {
-          it->second.send.info_sent = true;
-          it->second.send.next_seq++;
-        }
+      ++packet_count;
+      std::lock_guard<std::mutex> lock(_mtx);
+      auto it = _task_registry.tasks.find(task_id);
+      if (it != _task_registry.tasks.end() && !it->second.send.end_sent &&
+          !it->second.send.info_sent) {
+        it->second.send.info_sent = true;
+        it->second.send.next_seq++;
+        dirty = true;
       }
+    }
+    if (dirty) {
+      std::lock_guard<std::mutex> lock(_mtx);
+      recomputeAllTaskRateProfilesLocked(false);
+    }
+  }
 
+  // Data plane: all schedulable tasks enter one equal-weight fair round.
+  auto round_ids = snapshotSchedulableTaskIds();
+  if (!round_ids.empty() && total_payload_quota_bytes > 0) {
+    round_ids = pickFairRound(round_ids);
+    const auto active_count = round_ids.size();
+    for (size_t i = 0; i < active_count; ++i) {
+      const auto &task_id = round_ids[i];
+      uint64_t quota = computeTaskQuota(total_payload_quota_bytes, active_count, i);
       while (quota > 0) {
         uint64_t offset = 0;
         uint32_t seq = 0;
@@ -816,7 +793,8 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
         {
           std::lock_guard<std::mutex> lock(_mtx);
           auto it = _task_registry.tasks.find(task_id);
-          if (it == _task_registry.tasks.end() || it->second.send.end_sent) {
+          if (it == _task_registry.tasks.end() || it->second.send.end_sent ||
+              !isTaskDataSchedulable(it->second)) {
             break;
           }
           auto &task = it->second;
@@ -1049,41 +1027,49 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
         }
       }
 
-      bool should_end = false;
+    }
+  }
+
+  auto end_ids = collect_ids([](const TaskState &task) {
+    return isTaskReadyToEmitEnd(task);
+  });
+  if (!end_ids.empty()) {
+    bool dirty = false;
+    for (const auto &task_id : end_ids) {
       uint64_t end_offset = 0;
       uint32_t end_seq = 0;
       TaskState end_task;
       {
         std::lock_guard<std::mutex> lock(_mtx);
         auto it = _task_registry.tasks.find(task_id);
-        const bool ready_to_finish =
-            it != _task_registry.tasks.end() && isTaskReadyToEmitEnd(it->second);
-        if (ready_to_finish) {
-          should_end = true;
-          end_offset = it->second.send.sent_bytes;
-          end_seq = it->second.send.next_seq;
-          end_task.task_id = it->second.task_id;
-          end_task.source.file_name = it->second.source.file_name;
-          end_task.source.file_size = it->second.source.file_size;
-          it->second.send.next_seq++;
-          it->second.send.end_sent = true;
-          it->second.source.stream.reset();
-          clearTaskHttpBufferLocked(it->second);
-          it->second.source.memory_payload.clear();
-          it->second.source.memory_payload.shrink_to_fit();
-          recomputeAllTaskRateProfilesLocked(false);
+        if (it == _task_registry.tasks.end() || !isTaskReadyToEmitEnd(it->second)) {
+          continue;
         }
+        end_offset = it->second.send.sent_bytes;
+        end_seq = it->second.send.next_seq;
+        end_task.task_id = it->second.task_id;
+        end_task.source.file_name = it->second.source.file_name;
+        end_task.source.file_size = it->second.source.file_size;
+        it->second.send.next_seq++;
+        it->second.send.end_sent = true;
+        it->second.source.stream.reset();
+        clearTaskHttpBufferLocked(it->second);
+        it->second.source.memory_payload.clear();
+        it->second.source.memory_payload.shrink_to_fit();
+        dirty = true;
       }
-      if (should_end) {
-        const auto end_ts = nextRelativeTimestampMs();
-        auto end_header =
-            makePacketHeader(end_task, EsFilePacketType::FileEnd, end_offset,
-                             0, 0, end_seq, end_ts);
-        auto end_packet = buildPacket(end_task, end_header, {});
-        if (emitPacket(task_id, std::move(end_packet), end_header)) {
-          ++packet_count;
-        }
+      const auto end_ts = nextRelativeTimestampMs();
+      auto end_header =
+          makePacketHeader(end_task, EsFilePacketType::FileEnd, end_offset, 0,
+                           0, end_seq, end_ts);
+      auto end_packet = buildPacket(end_task, end_header, {});
+      if (emitPacket(task_id, std::move(end_packet), end_header)) {
+        ++packet_count;
       }
+    }
+    if (dirty) {
+      std::lock_guard<std::mutex> lock(_mtx);
+      recomputeAllTaskRateProfilesLocked(false);
     }
   }
   return packet_count;
@@ -1324,10 +1310,8 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             return;
           }
           auto &task = it->second;
-          const auto inferred_type = inferTaskTypeFromResponse(
-              task.control.task_type, task.source.file_path, status_code, headers_in);
-          applyTaskProfileLocked(task, inferred_type, false);
-        recomputeAllTaskRateProfilesLocked(false);
+          refreshUnifiedTaskProfileLocked(task, false);
+          recomputeAllTaskRateProfilesLocked(false);
           task.http.status_code = status_code;
           task.http.response_meta_payload =
               buildHttpResponseMetaPayload(status_code, headers_in);
@@ -1430,10 +1414,6 @@ std::vector<EsFilePackTaskInfo> EsFileFerryPacker::getTaskInfos() const {
 std::string EsFileFerryPacker::getLastError() const {
   std::lock_guard<std::mutex> lock(_mtx);
   return _packet_runtime.last_error;
-}
-
-size_t EsFileFerryPacker::taskTypeToIndex(EsFileTaskType type) {
-  return static_cast<size_t>(type);
 }
 
 bool EsFileFerryPacker::getFileSize(const std::string &file_path,
@@ -1598,7 +1578,7 @@ bool EsFileFerryPacker::emitPacket(
     }
     if (header.type == EsFilePacketType::FileInfo ||
         header.type == EsFilePacketType::FileEnd) {
-      ErrorL << "emit packet callback, task_id:" << task_id
+      DebugL << "emit packet callback, task_id:" << task_id
              << " type:" << EsFilePacketTypeToString(header.type)
              << " seq:" << header.seq
              << " offset:" << header.data_offset
@@ -1630,65 +1610,16 @@ void EsFileFerryPacker::setLastError(const std::string &err) {
   _packet_runtime.last_error = err;
 }
 
-EsFileTaskType EsFileFerryPacker::inferTaskTypeFromRequest(
-    const std::string &url, const std::string &method_upper,
-    const HttpHeaders &headers, const std::string &body) {
-  if (method_upper == "POST" || !body.empty()) {
-    return EsFileTaskType::HttpApiRequest;
-  }
-  if (headerValueContains(headers, "range", "bytes=") ||
-      headerValueContains(headers, "accept", "video/mp4")) {
-    return EsFileTaskType::HttpMp4Vod;
-  }
-  if (headerValueContains(headers, "accept", "application/json") ||
-      headerValueContains(headers, "accept", "text/")) {
-    return EsFileTaskType::HttpApiRequest;
-  }
-  auto lower = toLowerCopy(url);
-  if (lower.find(".mp4") != std::string::npos) {
-    return EsFileTaskType::HttpMp4Vod;
-  }
-  return EsFileTaskType::HttpResourceDownload;
-}
-
-EsFileTaskType EsFileFerryPacker::inferTaskTypeFromResponse(
-    EsFileTaskType current_type, const std::string &url, uint32_t status_code,
-    const HttpHeaders &headers) {
-  if (headerValueContains(headers, "content-disposition", "attachment")) {
-    return EsFileTaskType::HttpResourceDownload;
-  }
-  if (headerValueContains(headers, "content-type", "application/json") ||
-      headerValueContains(headers, "content-type", "text/") ||
-      headerValueContains(headers, "content-type", "application/xml")) {
-    return EsFileTaskType::HttpApiRequest;
-  }
-  if (headerValueContains(headers, "content-type", "video/mp4") ||
-      headerValueContains(headers, "content-type", "application/mp4") ||
-      headerValueContains(headers, "content-range", "bytes") ||
-      headerValueContains(headers, "accept-ranges", "bytes") ||
-      status_code == 206) {
-    return EsFileTaskType::HttpMp4Vod;
-  }
-  auto lower = toLowerCopy(url);
-  if (lower.find(".mp4") != std::string::npos) {
-    return EsFileTaskType::HttpMp4Vod;
-  }
-  return current_type;
-}
-
-void EsFileFerryPacker::applyTaskProfileLocked(TaskState &task,
-                                               EsFileTaskType task_type,
-                                               bool reset_buckets) {
+void EsFileFerryPacker::refreshUnifiedTaskProfileLocked(TaskState &task,
+                                                        bool reset_buckets) {
   const auto now = std::chrono::steady_clock::now();
-  task.control.task_type = task_type;
-  task.control.priority = inferPriorityFromType(task_type);
-  task.control.max_buffered_bytes = inferDefaultBufferedBytes(task_type);
+  task.control.max_buffered_bytes = kDefaultUnifiedBufferedBytes;
   task.control.resume_buffered_bytes = task.control.max_buffered_bytes / 2;
 
   const auto fetch_burst =
-      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+      inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
   const auto emit_burst =
-      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+      inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
   task.control.fetch_bucket.rate_bps = 0;
   task.control.fetch_bucket.burst_bytes = fetch_burst;
   task.control.emit_bucket.rate_bps = 0;
@@ -1715,72 +1646,54 @@ void EsFileFerryPacker::applyTaskProfileLocked(TaskState &task,
   }
 }
 
-uint32_t EsFileFerryPacker::rateShareForTaskType(EsFileTaskType type) const {
-  switch (type) {
-  case EsFileTaskType::HttpApiRequest:
-    return _global_options.http_api_rate_share;
-  case EsFileTaskType::HttpMp4Vod:
-    return _global_options.http_mp4_rate_share;
-  case EsFileTaskType::HttpResourceDownload:
-  default:
-    return _global_options.http_download_rate_share;
-  }
-}
-
 void EsFileFerryPacker::recomputeAllTaskRateProfilesLocked(bool reset_buckets) {
-  std::array<size_t, 3> active_counts{{0, 0, 0}};
-  size_t active_type_count = 0;
-  uint32_t active_share_sum = 0;
+  size_t alive_http_task_count = 0;
+  size_t schedulable_task_count = 0;
+  // Dynamic denominators:
+  // - fetch side shares total rate across alive HTTP sources;
+  // - emit side shares total rate across current data-schedulable tasks.
   for (auto &item : _task_registry.tasks) {
     auto &task = item.second;
     if (task.send.end_sent) {
       continue;
     }
-    ++active_counts[taskTypeToIndex(task.control.task_type)];
-  }
-  for (size_t i = 0; i < active_counts.size(); ++i) {
-    if (active_counts[i] == 0) {
-      continue;
+    if (task.http.source) {
+      ++alive_http_task_count;
     }
-    ++active_type_count;
-    active_share_sum += rateShareForTaskType(static_cast<EsFileTaskType>(i));
+    if (isTaskDataSchedulable(task)) {
+      ++schedulable_task_count;
+    }
   }
   for (auto &item : _task_registry.tasks) {
-    refreshTaskRateBucketsLocked(item.second, active_counts, active_type_count,
-                                 active_share_sum, reset_buckets);
+    refreshTaskRateBucketsLocked(item.second, alive_http_task_count,
+                                 schedulable_task_count, reset_buckets);
   }
 }
 
 void EsFileFerryPacker::refreshTaskRateBucketsLocked(
-    TaskState &task, const std::array<size_t, 3> &active_counts,
-    size_t active_type_count, uint32_t active_share_sum, bool reset_buckets) {
+    TaskState &task, size_t alive_http_task_count, size_t schedulable_task_count,
+    bool reset_buckets) {
   const auto now = std::chrono::steady_clock::now();
-  const auto task_type = task.control.task_type;
-  const auto type_idx = taskTypeToIndex(task_type);
-  const auto active_count = active_counts[type_idx];
-  uint64_t task_rate_bps = 0;
+  uint64_t fetch_rate_bps = 0;
+  uint64_t emit_rate_bps = 0;
 
-  if (!task.send.end_sent && active_count > 0) {
-    uint64_t type_rate_bps = 0;
-    if (_global_options.http_pull_total_rate_bps > 0) {
-      if (active_share_sum > 0) {
-        type_rate_bps = (_global_options.http_pull_total_rate_bps *
-                         rateShareForTaskType(task_type)) /
-                        active_share_sum;
-      } else if (active_type_count > 0) {
-        type_rate_bps =
-            _global_options.http_pull_total_rate_bps / active_type_count;
-      }
+  if (!task.send.end_sent && _global_options.http_pull_total_rate_bps > 0) {
+    if (task.http.source && alive_http_task_count > 0) {
+      fetch_rate_bps =
+          _global_options.http_pull_total_rate_bps / alive_http_task_count;
     }
-    task_rate_bps = type_rate_bps / active_count;
+    if (isTaskDataSchedulable(task) && schedulable_task_count > 0) {
+      emit_rate_bps =
+          _global_options.http_pull_total_rate_bps / schedulable_task_count;
+    }
   }
 
-  task.control.fetch_bucket.rate_bps = task.http.source ? task_rate_bps : 0;
-  task.control.emit_bucket.rate_bps = task_rate_bps;
+  task.control.fetch_bucket.rate_bps = task.http.source ? fetch_rate_bps : 0;
+  task.control.emit_bucket.rate_bps = emit_rate_bps;
   task.control.fetch_bucket.burst_bytes =
-      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+      inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
   task.control.emit_bucket.burst_bytes =
-      inferDefaultBurstBytes(task_type, _global_options.packet_chunk_bytes);
+      inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
 
   if (reset_buckets ||
       task.control.fetch_bucket.last_refill ==
@@ -1853,21 +1766,19 @@ std::chrono::milliseconds EsFileFerryPacker::estimateTokenWait(
   return std::chrono::milliseconds(wait_ms == 0 ? 1 : wait_ms);
 }
 
-std::array<std::vector<std::string>, 3>
-EsFileFerryPacker::snapshotActiveTasksByPriority() const {
+std::vector<std::string> EsFileFerryPacker::snapshotSchedulableTaskIds() const {
   std::lock_guard<std::mutex> lock(_mtx);
-  std::array<std::vector<std::string>, 3> groups;
+  std::vector<std::string> ids;
   for (const auto &it : _task_registry.tasks) {
-    if (it.second.send.end_sent) {
-      continue;
+    if (isTaskDataSchedulable(it.second)) {
+      ids.emplace_back(it.first);
     }
-    groups[priorityToIndex(it.second.control.priority)].emplace_back(it.first);
   }
-  return groups;
+  return ids;
 }
 
 std::vector<std::string> EsFileFerryPacker::pickFairRound(
-    const std::vector<std::string> &active_ids, EsFileTaskPriority priority) {
+    const std::vector<std::string> &active_ids) {
   if (active_ids.size() <= 1) {
     return active_ids;
   }
@@ -1877,7 +1788,7 @@ std::vector<std::string> EsFileFerryPacker::pickFairRound(
     return sorted;
   }
   std::lock_guard<std::mutex> lock(_mtx);
-  auto &cursor = _task_registry.priority_rr_cursor[priorityToIndex(priority)];
+  auto &cursor = _task_registry.rr_cursor;
   cursor %= sorted.size();
   std::vector<std::string> round;
   round.reserve(sorted.size());
@@ -1899,41 +1810,6 @@ uint64_t EsFileFerryPacker::computeTaskQuota(uint64_t total_payload_quota_bytes,
   return base + (index < extra ? 1 : 0);
 }
 
-uint64_t EsFileFerryPacker::computePriorityQuota(
-    uint64_t total_payload_quota_bytes, EsFileTaskPriority priority,
-    const std::array<std::vector<std::string>, 3> &active_groups) const {
-  uint64_t total_weight = 0;
-  for (size_t i = 0; i < active_groups.size(); ++i) {
-    if (!active_groups[i].empty()) {
-      total_weight += rateShareForTaskType(static_cast<EsFileTaskType>(i));
-    }
-  }
-  if (total_weight == 0) {
-    return 0;
-  }
-  const auto idx = priorityToIndex(priority);
-  if (active_groups[idx].empty()) {
-    return 0;
-  }
-  uint64_t quota =
-      (total_payload_quota_bytes *
-       rateShareForTaskType(static_cast<EsFileTaskType>(idx))) /
-      total_weight;
-  if (priority == EsFileTaskPriority::High) {
-    uint64_t distributed = 0;
-    for (size_t i = 0; i < active_groups.size(); ++i) {
-      if (!active_groups[i].empty()) {
-        distributed +=
-            (total_payload_quota_bytes *
-             rateShareForTaskType(static_cast<EsFileTaskType>(i))) /
-            total_weight;
-      }
-    }
-    quota += total_payload_quota_bytes - distributed;
-  }
-  return quota;
-}
-
 bool EsFileFerryPacker::isTaskReadyToEmitEnd(
     const EsFileFerryPacker::TaskState &task) {
   if (task.send.end_sent || !task.send.info_sent) {
@@ -1948,9 +1824,38 @@ bool EsFileFerryPacker::isTaskReadyToEmitEnd(
   return task.send.sent_bytes >= task.source.file_size;
 }
 
+bool EsFileFerryPacker::isTaskControlReady(
+    const EsFileFerryPacker::TaskState &task) {
+  if (task.send.end_sent) {
+    return false;
+  }
+  if (task.http.failed) {
+    return true;
+  }
+  if (!task.send.info_sent) {
+    return !task.http.source || task.http.headers_ready;
+  }
+  return isTaskReadyToEmitEnd(task);
+}
+
 bool EsFileFerryPacker::isHttpTaskBufferDrained(
     const EsFileFerryPacker::TaskState &task) {
   return task.http.buffer.chunks.empty() &&
          task.http.buffer.buffered_bytes == 0 &&
          task.http.buffer.front_chunk_offset == 0;
+}
+
+bool EsFileFerryPacker::isTaskDataSchedulable(
+    const EsFileFerryPacker::TaskState &task) {
+  if (task.send.end_sent || !task.send.info_sent || task.http.failed) {
+    return false;
+  }
+  if (task.http.source) {
+    return task.http.headers_ready && !task.http.buffer.chunks.empty() &&
+           task.http.buffer.buffered_bytes > 0;
+  }
+  if (task.source.memory_mode) {
+    return task.send.sent_bytes < task.source.memory_payload.size();
+  }
+  return task.send.sent_bytes < task.source.file_size;
 }

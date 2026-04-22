@@ -17,6 +17,7 @@
 
 #include "Util/logger.h"
 #include "Util/File.h"
+#include "Util/base64.h"
 #include "Network/TcpServer.h"
 #include "Http/HttpSession.h"
 #include "Util/NoticeCenter.h"
@@ -67,6 +68,16 @@ bool decodePacket(const std::vector<uint8_t> &raw, EsFilePacket &out) {
     out.file_name.assign(reinterpret_cast<const char *>(raw.data() + static_cast<long>(pos)), out.header.file_name_len);
     pos += out.header.file_name_len;
     out.payload.assign(raw.begin() + static_cast<long>(pos), raw.begin() + static_cast<long>(pos + out.header.payload_len));
+    if (out.header.type == EsFilePacketType::FileInfo &&
+        (out.header.flags & kEsFileFlagFileInfoPayloadBase64) != 0 &&
+        !out.payload.empty()) {
+        const auto decoded = decodeBase64(
+            std::string(reinterpret_cast<const char *>(out.payload.data()),
+                        out.payload.size()));
+        if (!decoded.empty()) {
+            out.payload.assign(decoded.begin(), decoded.end());
+        }
+    }
     return true;
 }
 
@@ -281,9 +292,6 @@ int main() {
         assert(defaults.http_pull_concurrency_limit == 6);
         assert(defaults.http_pull_total_buffer_limit_bytes == 24 * 1024 * 1024);
         assert(defaults.http_pull_total_rate_bps == 12 * 1024 * 1024);
-        assert(defaults.http_api_rate_share == 50);
-        assert(defaults.http_mp4_rate_share == 35);
-        assert(defaults.http_download_rate_share == 15);
     }
 
     std::mutex mtx;
@@ -379,9 +387,6 @@ int main() {
     tuned_options.http_pull_concurrency_limit = 1;
     tuned_options.http_pull_total_buffer_limit_bytes = 4 * 1024 * 1024;
     tuned_options.http_pull_total_rate_bps = 1024 * 1024;
-    tuned_options.http_api_rate_share = 50;
-    tuned_options.http_mp4_rate_share = 35;
-    tuned_options.http_download_rate_share = 15;
     packer.setGlobalOptions(tuned_options);
     assert(packer.addHttpTask("strategy_slow_http_1", http_base + "/test/slow.bin",
                               "GET", {}, "", "slow_1.bin"));
@@ -398,24 +403,10 @@ int main() {
                               http_base + "/test/video-noext", "GET", {}, "",
                               "video.bin"));
     const bool strategy_ready = waitUntil(std::chrono::milliseconds(5000), [&]() {
-        return slow_http_request_count.load() >= 2 &&
-               packer.testGetTaskType("strategy_mp4_task") ==
-                   EsFileTaskType::HttpMp4Vod &&
-               packer.testGetTaskType("strategy_api_task") ==
-                   EsFileTaskType::HttpApiRequest &&
-               packer.testGetTaskType("strategy_download_task") ==
-                   EsFileTaskType::HttpResourceDownload &&
-               packer.testGetTaskType("strategy_video_noext_task") ==
-                   EsFileTaskType::HttpMp4Vod;
+        return slow_http_request_count.load() >= 2;
     }, std::chrono::milliseconds(20));
     assert(strategy_ready);
     assert(slow_http_max_active.load() <= 1);
-    assert(packer.testGetTaskPriority("strategy_mp4_task") ==
-           EsFileTaskPriority::Medium);
-    assert(packer.testGetTaskPriority("strategy_api_task") ==
-           EsFileTaskPriority::High);
-    assert(packer.testGetTaskPriority("strategy_download_task") ==
-           EsFileTaskPriority::Low);
     packer.clearTasks();
 
     packer.clearTasks();
@@ -528,9 +519,6 @@ int main() {
     shared_rate_options.http_pull_concurrency_limit = 4;
     shared_rate_options.http_pull_total_buffer_limit_bytes = 8 * 1024 * 1024;
     shared_rate_options.http_pull_total_rate_bps = 1024 * 1024;
-    shared_rate_options.http_api_rate_share = 50;
-    shared_rate_options.http_mp4_rate_share = 35;
-    shared_rate_options.http_download_rate_share = 15;
     packer.setGlobalOptions(shared_rate_options);
     sim_http_active.store(0);
     sim_http_max_active.store(0);
@@ -550,48 +538,96 @@ int main() {
                               "share_download.bin"));
     const bool shared_rate_ready = waitUntil(std::chrono::milliseconds(5000), [&]() {
         return sim_http_request_count.load() == 4 &&
-               packer.testGetTaskType("share_api_task") ==
-                   EsFileTaskType::HttpApiRequest &&
-               packer.testGetTaskType("share_mp4_task_1") ==
-                   EsFileTaskType::HttpMp4Vod &&
-               packer.testGetTaskType("share_mp4_task_2") ==
-                   EsFileTaskType::HttpMp4Vod &&
-               packer.testGetTaskType("share_download_task") ==
-                   EsFileTaskType::HttpResourceDownload &&
                packer.testGetTaskFetchRateBps("share_api_task") > 0 &&
                packer.testGetTaskFetchRateBps("share_mp4_task_1") > 0 &&
+               packer.testGetTaskFetchRateBps("share_mp4_task_2") > 0 &&
                packer.testGetTaskFetchRateBps("share_download_task") > 0;
     }, std::chrono::milliseconds(20));
     assert(shared_rate_ready);
-    const uint64_t expected_api_rate =
-        (shared_rate_options.http_pull_total_rate_bps *
-         shared_rate_options.http_api_rate_share) /
-        (shared_rate_options.http_api_rate_share +
-         shared_rate_options.http_mp4_rate_share +
-         shared_rate_options.http_download_rate_share);
-    const uint64_t expected_mp4_rate =
-        ((shared_rate_options.http_pull_total_rate_bps *
-          shared_rate_options.http_mp4_rate_share) /
-         (shared_rate_options.http_api_rate_share +
-          shared_rate_options.http_mp4_rate_share +
-          shared_rate_options.http_download_rate_share)) / 2;
-    const uint64_t expected_download_rate =
-        (shared_rate_options.http_pull_total_rate_bps *
-         shared_rate_options.http_download_rate_share) /
-        (shared_rate_options.http_api_rate_share +
-         shared_rate_options.http_mp4_rate_share +
-         shared_rate_options.http_download_rate_share);
-    assert(packer.testGetTaskFetchRateBps("share_api_task") == expected_api_rate);
-    assert(packer.testGetTaskEmitRateBps("share_api_task") == expected_api_rate);
-    assert(packer.testGetTaskFetchRateBps("share_mp4_task_1") == expected_mp4_rate);
-    assert(packer.testGetTaskEmitRateBps("share_mp4_task_1") == expected_mp4_rate);
-    assert(packer.testGetTaskFetchRateBps("share_mp4_task_2") == expected_mp4_rate);
-    assert(packer.testGetTaskEmitRateBps("share_mp4_task_2") == expected_mp4_rate);
+    const uint64_t expected_fetch_rate =
+        shared_rate_options.http_pull_total_rate_bps / 4;
+    assert(packer.testGetTaskFetchRateBps("share_api_task") == expected_fetch_rate);
+    assert(packer.testGetTaskFetchRateBps("share_mp4_task_1") == expected_fetch_rate);
+    assert(packer.testGetTaskFetchRateBps("share_mp4_task_2") == expected_fetch_rate);
     assert(packer.testGetTaskFetchRateBps("share_download_task") ==
-           expected_download_rate);
-    assert(packer.testGetTaskEmitRateBps("share_download_task") ==
-           expected_download_rate);
+           expected_fetch_rate);
+    const bool equal_emit_ready = waitUntil(std::chrono::milliseconds(5000), [&]() {
+        std::vector<uint64_t> active_emit_rates;
+        for (const auto &task_id : {"share_api_task", "share_mp4_task_1",
+                                    "share_mp4_task_2", "share_download_task"}) {
+            auto emit_rate = packer.testGetTaskEmitRateBps(task_id);
+            if (emit_rate > 0) {
+                active_emit_rates.emplace_back(emit_rate);
+            }
+        }
+        if (active_emit_rates.empty()) {
+            return false;
+        }
+        return std::all_of(active_emit_rates.begin(), active_emit_rates.end(),
+                           [&](uint64_t value) {
+                               return value == active_emit_rates.front();
+                           });
+    }, std::chrono::milliseconds(20));
+    assert(equal_emit_ready);
     packer.clearTasks();
+
+    packer.clearTasks();
+    clearCollectedPackets();
+    EsFileGlobalOptions min_emit_options;
+    min_emit_options.packet_chunk_bytes = 64 * 1024;
+    min_emit_options.scheduler_round_budget_bytes = 64 * 1024;
+    min_emit_options.min_emit_payload_bytes = 64 * 1024;
+    min_emit_options.http_pull_total_rate_bps = 256 * 1024;
+    packer.setGlobalOptions(min_emit_options);
+    std::atomic<size_t> min_emit_chunk_count{0};
+    auto min_emit_collector = [&](const std::string &task_id,
+                                  std::vector<uint8_t> &&packet,
+                                  const EsFilePacketHeader &header) {
+        const auto packet_size = packet.size();
+        const auto packet_hex = packet.empty() ? std::string() : hexmem(packet.data(), 6);
+        std::lock_guard<std::mutex> lock(mtx);
+        if (task_id == EsFileFerryPacker::kBootstrapTaskId) {
+            ++bootstrap_count;
+            bootstrap_packets.emplace_back(std::move(packet));
+            assert(packet_size >= 4);
+        } else {
+            task_packets.emplace_back(std::move(packet));
+            assert(header.magic == kEsFilePacketMagic);
+        }
+        if (task_id == "min_emit_task" &&
+            header.type == EsFilePacketType::FileChunk) {
+            min_emit_chunk_count.fetch_add(1);
+        }
+        DebugL << "task_id: " << task_id << ", packet size: " << packet_size
+               << ",hex:" << packet_hex;
+        cv.notify_all();
+    };
+    packer.setPacketCallback(min_emit_collector);
+    const std::string min_emit_file = makeTempFilePath();
+    writeFile(min_emit_file, 'm', 64 * 1024 * 6);
+    assert(packer.addFileTask("min_emit_task", min_emit_file, "min_emit.bin"));
+    const bool min_emit_burst_ready = waitUntil(std::chrono::milliseconds(3000), [&]() {
+        return min_emit_chunk_count.load() >= 4;
+    }, std::chrono::milliseconds(20));
+    assert(min_emit_burst_ready);
+    const auto chunk_count_after_burst = min_emit_chunk_count.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    assert(min_emit_chunk_count.load() == chunk_count_after_burst);
+    const bool min_emit_gated_chunk_ready =
+        waitUntil(std::chrono::milliseconds(1200), [&]() {
+            return min_emit_chunk_count.load() >= chunk_count_after_burst + 1;
+        }, std::chrono::milliseconds(20));
+    assert(min_emit_gated_chunk_ready);
+    packer.setPacketCallback(packet_collector);
+    const bool min_emit_completed = waitUntil(std::chrono::milliseconds(3000), [&]() {
+        auto infos = packer.getTaskInfos();
+        return std::any_of(infos.begin(), infos.end(), [](const EsFilePackTaskInfo &info) {
+            return info.task_id == "min_emit_task" && info.completed;
+        });
+    }, std::chrono::milliseconds(20));
+    assert(min_emit_completed);
+    packer.clearTasks();
+    File::delete_file(min_emit_file, false);
 
     packer.clearTasks();
     packer.setSchedulerRoundBudgetBytes(0);
