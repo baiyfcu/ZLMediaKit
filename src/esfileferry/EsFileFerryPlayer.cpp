@@ -346,12 +346,17 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
     }
     if (start_code_size > 0 && size > start_code_size) {
       const uint8_t nal_header = data[start_code_size];
-      if (nal_header != kEsFileCarrierNalHeader) {
-        return false;
-      }
+      bool should_fast_reject = nal_header != kEsFileCarrierNalHeader;
       if (size >= start_code_size + 1 + sizeof(uint32_t) &&
           ReadEsFileU32BE(data + start_code_size + 1) != kEsFilePacketMagic) {
-        return false;
+        should_fast_reject = true;
+      }
+      if (should_fast_reject) {
+        bool found = false;
+        scanPacketStart(data, size, kEsFilePacketMagic, found);
+        if (!found) {
+          return false;
+        }
       }
     }
   }

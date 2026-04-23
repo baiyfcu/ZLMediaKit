@@ -40,6 +40,13 @@ using namespace mediakit;
 #define assert(expr) TEST_CHECK(expr)
 
 namespace {
+constexpr uint64_t kBitsPerByte = 8;
+constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
+
+uint64_t mbpsToBytesPerSec(uint64_t mbps) {
+    return (mbps * kBitsPerMegabit) / kBitsPerByte;
+}
+
 bool decodePacket(const std::vector<uint8_t> &raw, EsFilePacket &out) {
     if (raw.size() < kEsFileFixedHeaderSize + kEsFileCarrierPrefixSize) {
         return false;
@@ -289,9 +296,10 @@ int main() {
         EsFileGlobalOptions defaults;
         assert(defaults.packet_chunk_bytes == 128 * 1024);
         assert(defaults.scheduler_round_budget_bytes == 8 * 1024 * 1024);
-        assert(defaults.http_pull_concurrency_limit == 6);
-        assert(defaults.http_pull_total_buffer_limit_bytes == 24 * 1024 * 1024);
-        assert(defaults.http_pull_total_rate_bps == 12 * 1024 * 1024);
+        assert(defaults.http_pull_concurrency_limit == 150);
+        assert(defaults.http_pull_total_buffer_limit_bytes == 128 * 1024 * 1024);
+        assert(defaults.http_pull_per_task_buffer_limit_bytes == 4 * 1024 * 1024);
+        assert(defaults.http_pull_total_rate_mbps == 450);
     }
 
     std::mutex mtx;
@@ -386,7 +394,8 @@ int main() {
     tuned_options.scheduler_round_budget_bytes = 2 * 1024 * 1024;
     tuned_options.http_pull_concurrency_limit = 1;
     tuned_options.http_pull_total_buffer_limit_bytes = 4 * 1024 * 1024;
-    tuned_options.http_pull_total_rate_bps = 1024 * 1024;
+    tuned_options.http_pull_per_task_buffer_limit_bytes = 512 * 1024;
+    tuned_options.http_pull_total_rate_mbps = 8;
     packer.setGlobalOptions(tuned_options);
     assert(packer.addHttpTask("strategy_slow_http_1", http_base + "/test/slow.bin",
                               "GET", {}, "", "slow_1.bin"));
@@ -412,7 +421,7 @@ int main() {
     packer.clearTasks();
     clearCollectedPackets();
     EsFileGlobalOptions sim_options;
-    sim_options.http_pull_total_rate_bps = 128 * 1024 * 1024;
+    sim_options.http_pull_total_rate_mbps = 1024;
     packer.setGlobalOptions(sim_options);
     sim_http_active.store(0);
     sim_http_max_active.store(0);
@@ -518,7 +527,7 @@ int main() {
     shared_rate_options.scheduler_round_budget_bytes = 512 * 1024;
     shared_rate_options.http_pull_concurrency_limit = 4;
     shared_rate_options.http_pull_total_buffer_limit_bytes = 8 * 1024 * 1024;
-    shared_rate_options.http_pull_total_rate_bps = 1024 * 1024;
+    shared_rate_options.http_pull_total_rate_mbps = 8;
     packer.setGlobalOptions(shared_rate_options);
     sim_http_active.store(0);
     sim_http_max_active.store(0);
@@ -545,7 +554,7 @@ int main() {
     }, std::chrono::milliseconds(20));
     assert(shared_rate_ready);
     const uint64_t expected_fetch_rate =
-        shared_rate_options.http_pull_total_rate_bps / 4;
+        mbpsToBytesPerSec(shared_rate_options.http_pull_total_rate_mbps) / 4;
     assert(packer.testGetTaskFetchRateBps("share_api_task") == expected_fetch_rate);
     assert(packer.testGetTaskFetchRateBps("share_mp4_task_1") == expected_fetch_rate);
     assert(packer.testGetTaskFetchRateBps("share_mp4_task_2") == expected_fetch_rate);
@@ -573,13 +582,62 @@ int main() {
 
     packer.clearTasks();
     clearCollectedPackets();
+    EsFileGlobalOptions active_fetch_options;
+    active_fetch_options.packet_chunk_bytes = 32 * 1024;
+    active_fetch_options.scheduler_round_budget_bytes = 512 * 1024;
+    active_fetch_options.http_pull_concurrency_limit = 2;
+    active_fetch_options.http_pull_total_buffer_limit_bytes = 8 * 1024 * 1024;
+    active_fetch_options.http_pull_total_rate_mbps = 8;
+    packer.setGlobalOptions(active_fetch_options);
+    slow_http_active.store(0);
+    slow_http_max_active.store(0);
+    slow_http_request_count.store(0);
+    std::vector<std::string> active_fetch_task_ids;
+    for (size_t i = 0; i < 6; ++i) {
+        const auto task_id = "active_fetch_share_task_" + std::to_string(i);
+        active_fetch_task_ids.emplace_back(task_id);
+        assert(packer.addHttpTask(task_id, http_base + "/test/slow.bin",
+                                  "GET", {}, "", "active_fetch_share.mp4"));
+    }
+    const uint64_t expected_active_fetch_rate =
+        mbpsToBytesPerSec(active_fetch_options.http_pull_total_rate_mbps) /
+        active_fetch_options.http_pull_concurrency_limit;
+    const bool active_fetch_rate_ready =
+        waitUntil(std::chrono::milliseconds(5000), [&]() {
+            size_t active_rate_count = 0;
+            for (const auto &task_id : active_fetch_task_ids) {
+                const auto rate = packer.testGetTaskFetchRateBps(task_id);
+                if (rate == 0) {
+                    continue;
+                }
+                if (rate != expected_active_fetch_rate) {
+                    return false;
+                }
+                ++active_rate_count;
+            }
+            return slow_http_request_count.load() >=
+                       static_cast<int>(active_fetch_options.http_pull_concurrency_limit) &&
+                   active_rate_count ==
+                       active_fetch_options.http_pull_concurrency_limit;
+        }, std::chrono::milliseconds(20));
+    assert(active_fetch_rate_ready);
+    assert(slow_http_max_active.load() <=
+           static_cast<int>(active_fetch_options.http_pull_concurrency_limit));
+    packer.clearTasks();
+    assert(waitUntil(std::chrono::milliseconds(5000), [&]() {
+        return slow_http_active.load() == 0;
+    }, std::chrono::milliseconds(20)));
+
+    packer.clearTasks();
+    clearCollectedPackets();
     EsFileGlobalOptions min_emit_options;
     min_emit_options.packet_chunk_bytes = 64 * 1024;
     min_emit_options.scheduler_round_budget_bytes = 64 * 1024;
     min_emit_options.min_emit_payload_bytes = 64 * 1024;
-    min_emit_options.http_pull_total_rate_bps = 256 * 1024;
+    min_emit_options.http_pull_total_rate_mbps = 2;
     packer.setGlobalOptions(min_emit_options);
     std::atomic<size_t> min_emit_chunk_count{0};
+    std::vector<uint32_t> min_emit_payload_lens;
     auto min_emit_collector = [&](const std::string &task_id,
                                   std::vector<uint8_t> &&packet,
                                   const EsFilePacketHeader &header) {
@@ -597,6 +655,7 @@ int main() {
         if (task_id == "min_emit_task" &&
             header.type == EsFilePacketType::FileChunk) {
             min_emit_chunk_count.fetch_add(1);
+            min_emit_payload_lens.emplace_back(header.payload_len);
         }
         DebugL << "task_id: " << task_id << ", packet size: " << packet_size
                << ",hex:" << packet_hex;
@@ -604,7 +663,7 @@ int main() {
     };
     packer.setPacketCallback(min_emit_collector);
     const std::string min_emit_file = makeTempFilePath();
-    writeFile(min_emit_file, 'm', 64 * 1024 * 6);
+    writeFile(min_emit_file, 'm', 64 * 1024 * 6 + 17);
     assert(packer.addFileTask("min_emit_task", min_emit_file, "min_emit.bin"));
     const bool min_emit_burst_ready = waitUntil(std::chrono::milliseconds(3000), [&]() {
         return min_emit_chunk_count.load() >= 4;
@@ -618,7 +677,6 @@ int main() {
             return min_emit_chunk_count.load() >= chunk_count_after_burst + 1;
         }, std::chrono::milliseconds(20));
     assert(min_emit_gated_chunk_ready);
-    packer.setPacketCallback(packet_collector);
     const bool min_emit_completed = waitUntil(std::chrono::milliseconds(3000), [&]() {
         auto infos = packer.getTaskInfos();
         return std::any_of(infos.begin(), infos.end(), [](const EsFilePackTaskInfo &info) {
@@ -626,7 +684,20 @@ int main() {
         });
     }, std::chrono::milliseconds(20));
     assert(min_emit_completed);
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        assert(!min_emit_payload_lens.empty());
+        for (size_t i = 0; i < min_emit_payload_lens.size(); ++i) {
+            if (i + 1 == min_emit_payload_lens.size()) {
+                assert(min_emit_payload_lens[i] == 17);
+            } else {
+                assert(min_emit_payload_lens[i] >=
+                       min_emit_options.min_emit_payload_bytes);
+            }
+        }
+    }
     packer.clearTasks();
+    packer.setPacketCallback(packet_collector);
     File::delete_file(min_emit_file, false);
 
     packer.clearTasks();

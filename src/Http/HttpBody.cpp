@@ -45,7 +45,7 @@ using HttpHeader = HttpClient::HttpHeader;
 namespace {
 const std::string kPlayChannelCompleteTimeoutMs = "http.play_channel_complete_timeout_ms";
 static onceToken s_play_channel_timeout_token([]() {
-    mINI::Instance()[kPlayChannelCompleteTimeoutMs] = 300 * 1000;
+    mINI::Instance()[kPlayChannelCompleteTimeoutMs] = 3600 * 1000;
 });
 
 

@@ -17,7 +17,6 @@ constexpr uint64_t EsFileFerryPacker::kDefaultMaxHttpBufferedBytes;
 constexpr uint32_t EsFileFerryPacker::kDefaultBootstrapIntervalMs;
 constexpr uint32_t EsFileFerryPacker::kDefaultPaceIntervalMs;
 constexpr uint64_t EsFileFerryPacker::kDefaultSchedulerRoundBudgetBytes;
-constexpr uint64_t EsFileFerryPacker::kDefaultMinEmitPayloadBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultUnifiedBufferedBytes;
 
 EsFileFerryPacker &EsFileFerryPacker::Instance() {
@@ -51,7 +50,13 @@ EsFileFerryPacker::~EsFileFerryPacker() {
         buffer_cvs.emplace_back(item.second.http.buffer.cv);
       }
     }
-    http_join_threads.swap(_http_fetch_threads);
+    http_join_threads.reserve(_http_fetch_threads.size());
+    for (auto &thread_state : _http_fetch_threads) {
+      if (thread_state && thread_state->thread.joinable()) {
+        http_join_threads.emplace_back(std::move(thread_state->thread));
+      }
+    }
+    _http_fetch_threads.clear();
   }
   for (const auto &buffer_cv : buffer_cvs) {
     buffer_cv->notify_all();
@@ -71,6 +76,12 @@ constexpr int64_t kHttpBufferWaitSlowLogMs = 1000;
 constexpr int64_t kEmitPacketSlowLogMs = 1000;
 constexpr int64_t kRateLimitWaitStepMs = 20;
 constexpr bool kEnableAnnexBPayloadEscape = true;
+constexpr uint64_t kBitsPerByte = 8;
+constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
+
+uint64_t mbpsToBytesPerSec(uint64_t mbps) {
+  return (mbps * kBitsPerMegabit) / kBitsPerByte;
+}
 
 bool isHttpUrl(const std::string &value) {
   return value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0;
@@ -331,7 +342,12 @@ void EsFileFerryPacker::setGlobalOptions(const EsFileGlobalOptions &opts) {
         opts.http_pull_total_buffer_limit_bytes == 0
             ? kDefaultMaxHttpBufferedBytes
             : opts.http_pull_total_buffer_limit_bytes;
-    _global_options.http_pull_total_rate_bps = opts.http_pull_total_rate_bps;
+    _global_options.http_pull_per_task_buffer_limit_bytes =
+        opts.http_pull_per_task_buffer_limit_bytes == 0
+            ? kDefaultMaxHttpBufferedBytesPerTask
+            : opts.http_pull_per_task_buffer_limit_bytes;
+    _global_options.http_pull_total_rate_mbps =
+        opts.http_pull_total_rate_mbps;
     recomputeAllTaskRateProfilesLocked(false);
     should_try_start_http = !_http_runtime.pending_fetches.empty();
   }
@@ -495,9 +511,11 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
 
 void EsFileFerryPacker::clearTasks() {
   std::vector<std::shared_ptr<std::condition_variable>> buffer_cvs;
+  std::vector<std::thread> http_join_threads;
   bool should_schedule_http = false;
   {
     std::lock_guard<std::mutex> lock(_mtx);
+    reapCompletedHttpFetchThreadsLocked(http_join_threads);
     buffer_cvs.reserve(_task_registry.tasks.size());
     for (const auto &it : _task_registry.tasks) {
       if (it.second.http.buffer.cv) {
@@ -513,6 +531,11 @@ void EsFileFerryPacker::clearTasks() {
   }
   for (const auto &buffer_cv : buffer_cvs) {
     buffer_cv->notify_all();
+  }
+  for (auto &thread : http_join_threads) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
   if (should_schedule_http) {
     maybeStartPendingHttpFetches();
@@ -589,8 +612,21 @@ void EsFileFerryPacker::stopPacketThreadLocked(std::thread &join_thread) {
 }
 
 void EsFileFerryPacker::packetThreadLoop() {
+  auto reap_http_fetch_threads = [this]() {
+    std::vector<std::thread> http_join_threads;
+    {
+      std::lock_guard<std::mutex> lock(_mtx);
+      reapCompletedHttpFetchThreadsLocked(http_join_threads);
+    }
+    for (auto &thread : http_join_threads) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+  };
   while (true) {
     _packet_runtime.packet_sem.wait();
+    reap_http_fetch_threads();
     while (true) {
       PacketCallback bootstrap_cb;
       bool should_exit = false;
@@ -617,6 +653,7 @@ void EsFileFerryPacker::packetThreadLoop() {
         break;
       }
     }
+    reap_http_fetch_threads();
     bool should_exit = false;
     {
       std::lock_guard<std::mutex> lock(_mtx);
@@ -819,7 +856,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
               const bool allow_tail_emit =
                   http_stream_finished &&
                   min_emit_payload_bytes > 0 &&
-                  buffered <= min_emit_payload_bytes;
+                  buffered < min_emit_payload_bytes;
               if (min_emit_payload_bytes > 0 &&
                   emit_token_quota < min_emit_payload_bytes &&
                   !allow_tail_emit) {
@@ -830,11 +867,16 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                   !allow_tail_emit) {
                 break;
               }
-              read_len = static_cast<size_t>(std::min<uint64_t>(
-                  std::min<uint64_t>(
-                      std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),
-                      emit_token_quota),
-                  buffered));
+              if (allow_tail_emit) {
+                read_len = static_cast<size_t>(std::min<uint64_t>(
+                    _global_options.packet_chunk_bytes, buffered));
+              } else {
+                read_len = static_cast<size_t>(std::min<uint64_t>(
+                    std::min<uint64_t>(
+                        std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),
+                        emit_token_quota),
+                    buffered));
+              }
               if (read_len == 0) {
                 no_data = true;
               } else {
@@ -889,7 +931,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                   consumeTokenBucketBytes(task.control.emit_bucket, read_len);
                   task.send.sent_bytes += read_len;
                   task.send.next_seq++;
-                  quota -= read_len;
+                  quota = read_len >= quota ? 0 : quota - read_len;
                   buffer_cv = task.http.buffer.cv;
                   can_emit_packet = true;
                   should_try_start_http =
@@ -906,17 +948,23 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
               no_data = true;
             } else {
               auto remain = task.source.file_size - task.send.sent_bytes;
-              const bool allow_tail_emit = remain <= min_emit_payload_bytes;
+              const bool allow_tail_emit =
+                  min_emit_payload_bytes > 0 && remain < min_emit_payload_bytes;
               if (min_emit_payload_bytes > 0 &&
                   emit_token_quota < min_emit_payload_bytes &&
                   !allow_tail_emit) {
                 break;
               }
-              read_len = static_cast<size_t>(std::min<uint64_t>(
-                  std::min<uint64_t>(
-                      std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),
-                                     emit_token_quota),
-                  remain));
+              if (allow_tail_emit) {
+                read_len = static_cast<size_t>(std::min<uint64_t>(
+                    _global_options.packet_chunk_bytes, remain));
+              } else {
+                read_len = static_cast<size_t>(std::min<uint64_t>(
+                    std::min<uint64_t>(
+                        std::min<uint64_t>(quota, _global_options.packet_chunk_bytes),
+                        emit_token_quota),
+                    remain));
+              }
               if (task.source.memory_mode) {
                 if (task.send.sent_bytes < task.source.memory_payload.size()) {
                   const auto available =
@@ -941,7 +989,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                     consumeTokenBucketBytes(task.control.emit_bucket, read_len);
                     task.send.sent_bytes += read_len;
                     task.send.next_seq++;
-                    quota -= read_len;
+                    quota = read_len >= quota ? 0 : quota - read_len;
                     can_emit_packet = true;
                   }
                 } else {
@@ -1020,7 +1068,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           consumeTokenBucketBytes(task.control.emit_bucket, read_size);
           task.send.sent_bytes += read_size;
           task.send.next_seq++;
-          quota -= read_size;
+          quota = read_size >= quota ? 0 : quota - read_size;
         }
         if (emitPacket(task_id, std::move(packet), packet_header)) {
           ++packet_count;
@@ -1096,9 +1144,27 @@ void EsFileFerryPacker::erasePendingHttpFetchLocked(const std::string &task_id,
       _http_runtime.pending_fetches.end());
 }
 
+void EsFileFerryPacker::reapCompletedHttpFetchThreadsLocked(
+    std::vector<std::thread> &join_threads) {
+  auto it = _http_fetch_threads.begin();
+  while (it != _http_fetch_threads.end()) {
+    auto &thread_state = *it;
+    if (thread_state && thread_state->done &&
+        thread_state->done->load(std::memory_order_acquire)) {
+      if (thread_state->thread.joinable()) {
+        join_threads.emplace_back(std::move(thread_state->thread));
+      }
+      it = _http_fetch_threads.erase(it);
+      continue;
+    }
+    ++it;
+  }
+}
+
 std::vector<std::pair<std::string, uint64_t>>
 EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
   std::vector<std::pair<std::string, uint64_t>> launches;
+  bool dirty = false;
   while (_http_runtime.active_fetches < _global_options.http_pull_concurrency_limit &&
          !_http_runtime.pending_fetches.empty()) {
     if (_http_runtime.total_buffered_bytes >=
@@ -1118,7 +1184,11 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
     task.http.queued = false;
     task.http.active = true;
     ++_http_runtime.active_fetches;
+    dirty = true;
     launches.emplace_back(item);
+  }
+  if (dirty) {
+    recomputeAllTaskRateProfilesLocked(false);
   }
   return launches;
 }
@@ -1152,12 +1222,14 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
       if (_http_runtime.active_fetches > 0) {
         --_http_runtime.active_fetches;
       }
+      recomputeAllTaskRateProfilesLocked(false);
       return;
     }
     if (it == _task_registry.tasks.end() || it->second.generation != generation) {
       if (_http_runtime.active_fetches > 0) {
         --_http_runtime.active_fetches;
       }
+      recomputeAllTaskRateProfilesLocked(false);
       return;
     }
     source = it->second.source.file_path;
@@ -1166,7 +1238,9 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
     body = it->second.http.request_body;
   }
 
-  std::thread fetch_thread([this, task_id, generation, source, method, headers, body]() {
+  auto fetch_done = std::make_shared<std::atomic_bool>(false);
+  std::thread fetch_thread([this, task_id, generation, source, method, headers,
+                            body, fetch_done]() {
     const auto fetch_begin = std::chrono::steady_clock::now();
     HttpHeaders response_headers;
     uint32_t response_status_code = 0;
@@ -1369,6 +1443,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           task.http.error.clear();
         }
       }
+      recomputeAllTaskRateProfilesLocked(false);
     }
     if (buffer_cv) {
       buffer_cv->notify_all();
@@ -1384,10 +1459,23 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
       maybeStartPendingHttpFetches();
       _packet_runtime.packet_sem.post();
     }
+    fetch_done->store(true, std::memory_order_release);
+    if (!packet_runtime_stopped) {
+      _packet_runtime.packet_sem.post();
+    }
   });
+  std::vector<std::thread> http_join_threads;
   {
     std::lock_guard<std::mutex> lock(_mtx);
-    _http_fetch_threads.emplace_back(std::move(fetch_thread));
+    reapCompletedHttpFetchThreadsLocked(http_join_threads);
+    _http_fetch_threads.emplace_back(
+        std::unique_ptr<HttpFetchThreadState>(
+            new HttpFetchThreadState(std::move(fetch_thread), fetch_done)));
+  }
+  for (auto &thread : http_join_threads) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
 }
 
@@ -1613,15 +1701,20 @@ void EsFileFerryPacker::setLastError(const std::string &err) {
 void EsFileFerryPacker::refreshUnifiedTaskProfileLocked(TaskState &task,
                                                         bool reset_buckets) {
   const auto now = std::chrono::steady_clock::now();
-  task.control.max_buffered_bytes = kDefaultUnifiedBufferedBytes;
+  task.control.max_buffered_bytes =
+      _global_options.http_pull_per_task_buffer_limit_bytes == 0
+          ? kDefaultUnifiedBufferedBytes
+          : _global_options.http_pull_per_task_buffer_limit_bytes;
   task.control.resume_buffered_bytes = task.control.max_buffered_bytes / 2;
 
   const auto fetch_burst =
       inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
   const auto emit_burst =
       inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
+  task.control.fetch_bucket.unlimited = true;
   task.control.fetch_bucket.rate_bps = 0;
   task.control.fetch_bucket.burst_bytes = fetch_burst;
+  task.control.emit_bucket.unlimited = true;
   task.control.emit_bucket.rate_bps = 0;
   task.control.emit_bucket.burst_bytes = emit_burst;
 
@@ -1647,76 +1740,96 @@ void EsFileFerryPacker::refreshUnifiedTaskProfileLocked(TaskState &task,
 }
 
 void EsFileFerryPacker::recomputeAllTaskRateProfilesLocked(bool reset_buckets) {
-  size_t alive_http_task_count = 0;
+  size_t active_http_fetch_count = 0;
   size_t schedulable_task_count = 0;
   // Dynamic denominators:
-  // - fetch side shares total rate across alive HTTP sources;
+  // - fetch side shares total rate across currently active HTTP fetches;
   // - emit side shares total rate across current data-schedulable tasks.
   for (auto &item : _task_registry.tasks) {
     auto &task = item.second;
     if (task.send.end_sent) {
       continue;
     }
-    if (task.http.source) {
-      ++alive_http_task_count;
+    if (task.http.source && task.http.active) {
+      ++active_http_fetch_count;
     }
     if (isTaskDataSchedulable(task)) {
       ++schedulable_task_count;
     }
   }
   for (auto &item : _task_registry.tasks) {
-    refreshTaskRateBucketsLocked(item.second, alive_http_task_count,
+    refreshTaskRateBucketsLocked(item.second, active_http_fetch_count,
                                  schedulable_task_count, reset_buckets);
   }
 }
 
 void EsFileFerryPacker::refreshTaskRateBucketsLocked(
-    TaskState &task, size_t alive_http_task_count, size_t schedulable_task_count,
+    TaskState &task, size_t active_http_fetch_count, size_t schedulable_task_count,
     bool reset_buckets) {
   const auto now = std::chrono::steady_clock::now();
+  const bool prev_fetch_unlimited = task.control.fetch_bucket.unlimited;
+  const bool prev_emit_unlimited = task.control.emit_bucket.unlimited;
+  const auto prev_fetch_rate_bps = task.control.fetch_bucket.rate_bps;
+  const auto prev_emit_rate_bps = task.control.emit_bucket.rate_bps;
+  // Phase 1 keeps the public option name for compatibility, but internally the
+  // same total limit is treated as both HTTP fetch and unified emit budget.
+  const uint64_t total_fetch_rate_bytes_per_sec =
+      mbpsToBytesPerSec(_global_options.http_pull_total_rate_mbps);
+  const uint64_t total_emit_rate_bytes_per_sec =
+      mbpsToBytesPerSec(_global_options.http_pull_total_rate_mbps);
   uint64_t fetch_rate_bps = 0;
   uint64_t emit_rate_bps = 0;
+  const bool rate_limit_enabled = total_emit_rate_bytes_per_sec > 0;
 
-  if (!task.send.end_sent && _global_options.http_pull_total_rate_bps > 0) {
-    if (task.http.source && alive_http_task_count > 0) {
+  if (!task.send.end_sent && rate_limit_enabled) {
+    if (task.http.source && task.http.active && active_http_fetch_count > 0) {
       fetch_rate_bps =
-          _global_options.http_pull_total_rate_bps / alive_http_task_count;
+          total_fetch_rate_bytes_per_sec / active_http_fetch_count;
     }
     if (isTaskDataSchedulable(task) && schedulable_task_count > 0) {
       emit_rate_bps =
-          _global_options.http_pull_total_rate_bps / schedulable_task_count;
+          total_emit_rate_bytes_per_sec / schedulable_task_count;
     }
   }
 
+  task.control.fetch_bucket.unlimited =
+      !(rate_limit_enabled && task.http.source && !task.send.end_sent);
   task.control.fetch_bucket.rate_bps = task.http.source ? fetch_rate_bps : 0;
+  task.control.emit_bucket.unlimited =
+      !(rate_limit_enabled && !task.send.end_sent);
   task.control.emit_bucket.rate_bps = emit_rate_bps;
   task.control.fetch_bucket.burst_bytes =
       inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
   task.control.emit_bucket.burst_bytes =
       inferUnifiedBurstBytes(_global_options.packet_chunk_bytes);
 
-  if (reset_buckets ||
-      task.control.fetch_bucket.last_refill ==
-          std::chrono::steady_clock::time_point{}) {
-    task.control.fetch_bucket.tokens = task.control.fetch_bucket.burst_bytes;
-    task.control.fetch_bucket.last_refill = now;
-  } else {
-    task.control.fetch_bucket.tokens = std::min(
-        task.control.fetch_bucket.tokens, task.control.fetch_bucket.burst_bytes);
-  }
-  if (reset_buckets ||
-      task.control.emit_bucket.last_refill ==
-          std::chrono::steady_clock::time_point{}) {
-    task.control.emit_bucket.tokens = task.control.emit_bucket.burst_bytes;
-    task.control.emit_bucket.last_refill = now;
-  } else {
-    task.control.emit_bucket.tokens = std::min(
-        task.control.emit_bucket.tokens, task.control.emit_bucket.burst_bytes);
-  }
+  auto refresh_bucket_tokens =
+      [&](TokenBucket &bucket, bool prev_unlimited, uint64_t prev_rate_bps) {
+        const bool enabled_now = !bucket.unlimited && bucket.rate_bps > 0;
+        const bool became_enabled =
+            enabled_now && (prev_unlimited || prev_rate_bps == 0);
+        if (reset_buckets ||
+            bucket.last_refill == std::chrono::steady_clock::time_point{} ||
+            became_enabled) {
+          bucket.tokens = bucket.unlimited || enabled_now ? bucket.burst_bytes : 0;
+          bucket.last_refill = now;
+          return;
+        }
+        if (!bucket.unlimited && bucket.rate_bps == 0) {
+          bucket.tokens = 0;
+          bucket.last_refill = now;
+          return;
+        }
+        bucket.tokens = std::min(bucket.tokens, bucket.burst_bytes);
+      };
+  refresh_bucket_tokens(task.control.fetch_bucket, prev_fetch_unlimited,
+                        prev_fetch_rate_bps);
+  refresh_bucket_tokens(task.control.emit_bucket, prev_emit_unlimited,
+                        prev_emit_rate_bps);
 }
 
 void EsFileFerryPacker::refillTokenBucket(TokenBucket &bucket) {
-  if (bucket.rate_bps == 0) {
+  if (bucket.unlimited || bucket.rate_bps == 0) {
     return;
   }
   const auto now = std::chrono::steady_clock::now();
@@ -1740,7 +1853,7 @@ void EsFileFerryPacker::refillTokenBucket(TokenBucket &bucket) {
 }
 
 uint64_t EsFileFerryPacker::peekTokenBucketBytes(TokenBucket &bucket) {
-  if (bucket.rate_bps == 0) {
+  if (bucket.unlimited) {
     return UINT64_MAX;
   }
   return bucket.tokens;
@@ -1748,7 +1861,7 @@ uint64_t EsFileFerryPacker::peekTokenBucketBytes(TokenBucket &bucket) {
 
 void EsFileFerryPacker::consumeTokenBucketBytes(TokenBucket &bucket,
                                                 uint64_t bytes) {
-  if (bucket.rate_bps == 0) {
+  if (bucket.unlimited) {
     return;
   }
   bucket.tokens = bytes >= bucket.tokens ? 0 : bucket.tokens - bytes;
@@ -1758,7 +1871,10 @@ void EsFileFerryPacker::consumeTokenBucketBytes(TokenBucket &bucket,
 
 std::chrono::milliseconds EsFileFerryPacker::estimateTokenWait(
     const TokenBucket &bucket, uint64_t min_bytes) {
-  if (bucket.rate_bps == 0 || bucket.tokens >= min_bytes) {
+  if (bucket.unlimited || bucket.tokens >= min_bytes) {
+    return std::chrono::milliseconds(0);
+  }
+  if (bucket.rate_bps == 0) {
     return std::chrono::milliseconds(0);
   }
   const auto deficit = min_bytes - bucket.tokens;

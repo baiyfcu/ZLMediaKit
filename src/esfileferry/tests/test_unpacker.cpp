@@ -91,9 +91,10 @@ int main() {
     unpacker.clearTasks();
     packer.setChunkSize(4096);
 
-    packer.setPacketCallback([&unpacker](const std::string &task_id,
-                                         std::vector<uint8_t> &&packet,
-                                         const EsFilePacketHeader &) {
+    auto bridge_packets_to_unpacker =
+        [&unpacker](const std::string &task_id,
+                    std::vector<uint8_t> &&packet,
+                    const EsFilePacketHeader &) {
         if (task_id == EsFileFerryPacker::kBootstrapTaskId || packet.empty()) {
             return;
         }
@@ -105,7 +106,8 @@ int main() {
             unpacker.inputFrame(packet.data() + offset, step);
             offset += step;
         }
-    });
+    };
+    packer.setPacketCallback(bridge_packets_to_unpacker);
 
     auto run_case = [&](const std::string &file_path,
                         const std::vector<uint8_t> &source_data,
@@ -243,6 +245,53 @@ int main() {
     run_case(file_path_large, source_data_large, 4096, 20);
     run_case(file_path_small, source_data_small, 7, 20);
     run_case(file_path_empty, source_data_empty, 1024, 10);
+
+    {
+        const std::string task_id = "mixed_annexb_ferry_task";
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool captured = false;
+        std::vector<uint8_t> captured_packet;
+
+        packer.setPacketCallback([&](const std::string &event_task_id,
+                                     std::vector<uint8_t> &&packet,
+                                     const EsFilePacketHeader &header) {
+            if (event_task_id == task_id &&
+                header.type == EsFilePacketType::FileInfo) {
+                std::lock_guard<std::mutex> lock(mtx);
+                if (!captured) {
+                    captured_packet = std::move(packet);
+                    captured = true;
+                    cv.notify_all();
+                }
+            }
+        });
+        assert(packer.addFileTask(task_id, file_path_small, "mixed.bin"));
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            const bool ok = cv.wait_for(lock, std::chrono::seconds(3),
+                                        [&]() { return captured; });
+            assert(ok);
+        }
+        packer.clearTasks();
+
+        bool info_seen = false;
+        unpacker.setTaskCallback(task_id, [&](const EsTaskDataEvent &event) {
+            if (event.task_id == task_id &&
+                event.type == EsFilePacketType::FileInfo) {
+                info_seen = true;
+            }
+        });
+        std::vector<uint8_t> mixed_frame = {
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1f,
+            0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x06};
+        mixed_frame.insert(mixed_frame.end(), captured_packet.begin(),
+                           captured_packet.end());
+        assert(unpacker.inputFrame(mixed_frame.data(), mixed_frame.size()));
+        assert(info_seen);
+        unpacker.removeTask(task_id);
+        packer.setPacketCallback(bridge_packets_to_unpacker);
+    }
 
     const auto version_get =
         doHttpCall("http://localhost:7080/index/api/version", "GET");

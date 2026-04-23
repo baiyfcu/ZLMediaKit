@@ -1,4 +1,4 @@
-# esfileferry 模块集成说明
+﻿# esfileferry 模块集成说明
 
 ## 1. 模块定位
 
@@ -115,16 +115,90 @@ packer.addFileTask("task_local_1", "/data/a.mp4", "a.mp4");
 
 ### 5.4 调度特性
 
-- 默认分片：`512KB`
+- 默认分片：`128KB`
 - 每轮全局 payload 配额：`8MB`
 - 活跃任务公平轮转，单任务按配额裁剪
 - 同一任务发送顺序：`FileInfo -> FileChunk* -> FileEnd`
 
-### 5.5 线程模型
+### 5.5 API 迁移说明
+
+本轮公平调度重构接受一次破坏性 API 清理：公开头文件不再提供 `EsFileTaskType`、`EsFileTaskPriority`、`http_api_rate_share`、`http_mp4_rate_share`、`http_download_rate_share`。
+
+迁移方式：
+
+- 删除外部调用方对旧任务类型、旧优先级和三类权重字段的引用。
+- 使用 `http_pull_total_rate_mbps` 配置统一总速率；当前该字段同时约束 HTTP fetch 和统一 emit 发送面。
+- 使用 `http_pull_concurrency_limit`、`http_pull_total_buffer_limit_bytes`、`packet_chunk_bytes`、`scheduler_round_budget_bytes`、`min_emit_payload_bytes` 做高并发调参。
+- 如果外部代码只调用 `addFileTask`、`addHttpTask`、`addTask`、`setGlobalOptions`，且没有引用旧分类符号，一般不需要业务改动。
+
+### 5.6 线程模型
 
 - `PacketCallback` 在 Packer 发包线程触发
 - 回调中不要做阻塞 I/O 与重计算
 - 任务增删与发包并发受内部互斥保护
+
+### 5.7 高并发 HTTP 下载配置建议
+
+面向浏览器 MP4 下载、录像文件下载等场景时，应把“任务总数”和“同时 active HTTP 拉取数”分开理解。`EsFileFerryPacker` 可以接收 100/200+ 个 HTTP 任务，但不建议把 `http_pull_concurrency_limit` 直接设置为任务总数。
+
+推荐模型：
+
+- 200+ 个任务可以同时进入 Packer，由内部 pending 队列排队。
+- `http_pull_concurrency_limit` 只控制当前同时通过 curl 拉取上游 HTTP 的 active 任务数。
+- pending 任务不会占用 active fetch 的限速分母，也不会持续堆积 HTTP body 缓冲。
+- active 任务通过每任务缓冲和全局缓冲上限形成背压，避免下游消费慢时内存无界增长。
+
+200+ 任务的推荐起步配置：
+
+```cpp
+EsFileGlobalOptions opts;
+
+// 先不要直接设为 200。建议从 16 开始，稳定后再试 24/32。
+opts.http_pull_concurrency_limit = 16;
+
+// 按 active 并发估算，而不是按总任务数估算。
+// 当前默认单 active HTTP 任务缓冲上限约 4MB，
+// 并发 24 左右时可先给 96MB，全链路稳定后再调整。
+opts.http_pull_total_buffer_limit_bytes = 96 * 1024 * 1024;
+
+// 单任务 HTTP 回源缓冲上限。
+// 如果业务要求 100 路都持续有进度，建议先压到 512KB-1MB，
+// 避免 100 路同时 active 时每路都堆到默认 4MB。
+opts.http_pull_per_task_buffer_limit_bytes = 512 * 1024;
+
+// 统一速率上限。建议设置为机器/源站/下游链路安全吞吐的 60%-80%，
+// 避免一开始使用 0 不限速造成源站、发送队列或内存压力突刺。
+opts.http_pull_total_rate_mbps = 640;
+
+// 单个 FileChunk 的目标 payload 大小。
+// 默认 128KB 通常适合多路公平调度；如果下游包开销偏高，可压测 256KB。
+opts.packet_chunk_bytes = 128 * 1024;
+
+// 单轮调度预算，通常先保留默认 8MB。
+opts.scheduler_round_budget_bytes = 8 * 1024 * 1024;
+
+// 最小 payload 成形门限，降低高并发下的小包比例。
+opts.min_emit_payload_bytes = 16 * 1024;
+
+packer.setGlobalOptions(opts);
+```
+
+建议按下面三档压测：
+
+| 档位 | active HTTP 并发 | 全局 HTTP buffer | 适用场景 |
+|---|---:|---:|---|
+| 保守 | 12-16 | 48-64MB | 先验证 200+ 任务排队稳定性 |
+| 均衡 | 24-32 | 96-128MB | 推荐生产起点 |
+| 激进 | 48-64 | 192-256MB | 机器、源站、下游发送队列都确认可承载后再试 |
+
+调参原则：
+
+- `http_pull_concurrency_limit` 是源站连接数、线程数、内存和下游发送压力的核心旋钮，不等于浏览器任务总数。
+- `http_pull_total_buffer_limit_bytes` 应随 active 并发同步评估；可按 `active 并发 * 单任务缓冲上限` 估算初值，再结合压测调整。
+- `http_pull_total_rate_mbps` 同时约束 HTTP fetch 与统一 emit 发送面；配置为 `0` 表示不限速，生产高并发场景不建议默认不限速。
+- `PacketCallback` 必须快速返回。若上层要写浏览器 socket 或跨线程发送，建议进入有界队列；队列满时阻塞回调，让背压回传到 Packer/HTTP 拉取侧。
+- 浏览器下载进度不需要由 Packer 暴露额外字段。Packer 只输出 `FileInfo/FileChunk/FileEnd/TaskStatus`，HTTP 响应层负责还原响应头、`Content-Length`、`Range/206` 等浏览器语义。
+- 如果业务目标是真正 200 路同时 active 且每路都高速下载，当前“一路 active HTTP 一个 fetch 线程”的模型会有线程数和上下文切换压力，应考虑后续演进为 `libcurl multi` 或 HTTP 拉取线程池模型。
 
 ## 6. 接收侧集成（EsFileFerryUnPacker）
 
@@ -289,10 +363,10 @@ puller.startPull("rtsp://127.0.0.1/live/esferry", 0);
 
 ## 9. 性能与稳定性建议
 
-- 分片大小建议不小于 `512KB`
+- 多路并发默认优先使用 `128KB` 分片；若下游包开销较高，可压测 `256KB/512KB`
 - 业务回调只做轻量逻辑，重任务异步转移
 - 任务完成后及时 `removeTask`，避免状态长期堆积
-- 高并发场景优先监控：任务数、回调耗时、内存占用、重试次数
+- 高并发场景优先监控：任务总数、active HTTP fetch 数、pending 队列长度、`PacketCallback` 耗时、全局 HTTP buffer、进程线程数、源站连接数、重试次数
 
 ## 10. 测试与验证
 

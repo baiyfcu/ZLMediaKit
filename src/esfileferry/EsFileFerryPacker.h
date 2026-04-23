@@ -4,6 +4,7 @@
 #include "EsFilePayloadProtocol.h"
 #include "Poller/Timer.h"
 #include "Util/ResourcePool.h"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -43,19 +44,23 @@ struct EsFileGlobalOptions {
     size_t packet_chunk_bytes = 128 * 1024;
     // 单轮调度的默认发送预算。
     // 该值只控制单轮调度粒度与线程占用时长，不承担总体限速语义。
-    uint64_t scheduler_round_budget_bytes = 8 * 1024 * 1024;
+    uint64_t scheduler_round_budget_bytes = 4 * 1024 * 1024;
     // FileChunk 的最小发送门限（仅对 FileChunk 生效）。
     // emit token 小于该值时延后发送，等待 token 累积；尾包可放行。
     uint64_t min_emit_payload_bytes = 32 * 1024;
     // HTTP 回源的默认最大并发窗口。
     // 取 6：适合作为 50 路以内混合任务的默认保护值。
-    size_t http_pull_concurrency_limit = 6;
+    size_t http_pull_concurrency_limit = 150;
     // HTTP 回源的默认全局缓冲上限。
     // 取 24MB：与默认并发窗口一起控制瞬时内存占用。
-    uint64_t http_pull_total_buffer_limit_bytes = 24 * 1024 * 1024;
-    // 兼容命名保留：当前配置名沿用 HTTP pull 语义，
+    uint64_t http_pull_total_buffer_limit_bytes = 128 * 1024 * 1024;
+    // 单任务 HTTP 回源缓冲上限。
+    // 默认保持 4MB 兼容行为；100 路都需保活时建议压到 512KB-1MB。
+    uint64_t http_pull_per_task_buffer_limit_bytes = 512 * 1024;
+    // 当前配置名沿用 HTTP pull 语义，
     // 但一阶段重构后也作为统一发送面的总体速率上限使用。
-    uint64_t http_pull_total_rate_bps = 12 * 1024 * 1024;
+    // 单位：Mb/s，按 1 Mbps = 1024 * 1024 bit/s 换算。
+    uint64_t http_pull_total_rate_mbps = 450;
 };
 
 class EsFileFerryPacker {
@@ -178,6 +183,7 @@ private:
     };
 
     struct TokenBucket {
+        bool unlimited = true;
         uint64_t rate_bps = 0;
         uint64_t burst_bytes = 0;
         uint64_t tokens = 0;
@@ -252,6 +258,14 @@ private:
         uint64_t total_buffered_bytes = 0;
     };
 
+    struct HttpFetchThreadState {
+        HttpFetchThreadState(std::thread &&thread_in,
+                             std::shared_ptr<std::atomic_bool> done_in)
+            : thread(std::move(thread_in)), done(std::move(done_in)) {}
+        std::thread thread;
+        std::shared_ptr<std::atomic_bool> done;
+    };
+
     struct PacketRuntimeState {
         PacketCallback callback;
         std::string last_error;
@@ -305,10 +319,7 @@ private:
     // 默认取 8MB：适合作为统一公平轮转场景下的吞吐/公平折中值。
     static constexpr uint64_t kDefaultSchedulerRoundBudgetBytes =
         8 * 1024 * 1024;
-    // FileChunk 最小发送门限默认值。
-    static constexpr uint64_t kDefaultMinEmitPayloadBytes = 4 * 1024;
-    // 兼容保留：旧分类字段仍存在，但一阶段重构后不再驱动主调度。
-    // 单任务 HTTP 默认缓冲上限统一收敛为单一值。
+    // 单任务 HTTP 默认缓冲上限统一收敛为单一值，不再按旧业务分类拆分。
     static constexpr uint64_t kDefaultUnifiedBufferedBytes =
         kDefaultMaxHttpBufferedBytesPerTask;
 
@@ -379,7 +390,7 @@ private:
     // 基于统一调度口径刷新单任务令牌桶（调用方需已持锁）
     void refreshTaskRateBucketsLocked(
         TaskState &task,
-        size_t alive_http_task_count,
+        size_t active_http_fetch_count,
         size_t schedulable_task_count,
         bool reset_buckets);
     // 更新令牌桶
@@ -401,6 +412,8 @@ private:
     std::vector<std::pair<std::string, uint64_t>> collectHttpFetchLaunchesLocked();
     // 启动单个 HTTP 拉取任务
     void launchHttpFetchTask(const std::string &task_id, uint64_t generation);
+    // 回收已结束的 HTTP 拉取线程（调用方需已持锁）
+    void reapCompletedHttpFetchThreadsLocked(std::vector<std::thread> &join_threads);
 
 private:
     // 全局互斥锁
@@ -411,5 +424,5 @@ private:
     TaskRegistryState _task_registry;
     HttpFetchRuntimeState _http_runtime;
     PacketRuntimeState _packet_runtime;
-    std::vector<std::thread> _http_fetch_threads;
+    std::vector<std::unique_ptr<HttpFetchThreadState>> _http_fetch_threads;
 };
