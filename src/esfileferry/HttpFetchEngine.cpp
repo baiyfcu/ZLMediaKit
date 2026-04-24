@@ -17,6 +17,7 @@ constexpr float kDefaultHttpStreamTimeoutSec = 0.0f;
 constexpr long kDefaultHttpConnectTimeoutMs = 30 * 1000;
 constexpr long kDefaultCurlBufferSize = 512 * 1024;
 constexpr int kCurlMultiWaitTimeoutMs = 100;
+constexpr int kThreadedFetchPauseRetryMs = 10;
 
 std::string toLowerCopy(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -92,6 +93,7 @@ struct CurlRequestContext {
   bool headers_emitted = false;
   bool consumer_ok = true;
   std::string consumer_err;
+  bool *paused_flag = nullptr;
 
   void resetPendingHeaders(uint32_t status) {
     pending_status_code = status;
@@ -170,14 +172,24 @@ size_t onCurlWrite(char *ptr, size_t size, size_t nmemb, void *userdata) {
   if (!ctx->on_chunk) {
     return bytes;
   }
-  if (!ctx->on_chunk(reinterpret_cast<const uint8_t *>(ptr), bytes)) {
+  const auto result = ctx->on_chunk(reinterpret_cast<const uint8_t *>(ptr), bytes);
+  if (result == HttpFetchEngine::ChunkConsumeResult::Consumed) {
+    return bytes;
+  }
+  if (result == HttpFetchEngine::ChunkConsumeResult::Pause) {
+    if (ctx->paused_flag) {
+      *ctx->paused_flag = true;
+    }
+    return CURL_WRITEFUNC_PAUSE;
+  }
+  if (result == HttpFetchEngine::ChunkConsumeResult::Abort) {
     ctx->consumer_ok = false;
     if (ctx->consumer_err.empty()) {
       ctx->consumer_err = "consume http payload failed";
     }
     return 0;
   }
-  return bytes;
+  return 0;
 }
 
 curl_slist *buildCurlHeaderList(const HttpFetchEngine::HttpHeaders &headers) {
@@ -323,9 +335,25 @@ void ThreadedHttpFetchEngine::submit(Request request) {
     uint32_t response_status_code = 0;
     std::string fetch_err;
     TransferDiagnostics diagnostics;
+    const auto on_chunk = [&request](const uint8_t *data, size_t size) {
+      if (!request.on_chunk) {
+        return true;
+      }
+      while (true) {
+        const auto result = request.on_chunk(data, size);
+        if (result == HttpFetchEngine::ChunkConsumeResult::Consumed) {
+          return true;
+        }
+        if (result == HttpFetchEngine::ChunkConsumeResult::Abort) {
+          return false;
+        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kThreadedFetchPauseRetryMs));
+      }
+    };
     const bool ok = HttpStreamFetcher::stream(
         request.url, request.method, request.headers, request.body,
-        request.on_chunk, request.on_headers, &response_headers,
+        on_chunk, request.on_headers, &response_headers,
         &response_status_code, fetch_err, &diagnostics);
     if (request.on_complete) {
       request.on_complete(ok, response_headers, response_status_code, fetch_err,
@@ -408,6 +436,7 @@ struct CurlMultiHttpFetchEngine::Impl {
     std::thread worker;
     bool worker_started = false;
     bool shutting_down = false;
+    CURLM *multi_handle = nullptr;
 
     void ensureWorkerStarted() {
       if (worker_started) {
@@ -423,6 +452,10 @@ struct CurlMultiHttpFetchEngine::Impl {
       if (!multi) {
         failPendingRequests("curl_multi_init failed");
         return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mtx);
+        multi_handle = multi;
       }
 
       int running_handles = 0;
@@ -463,6 +496,10 @@ struct CurlMultiHttpFetchEngine::Impl {
       }
 
       cleanupAllHandles(multi);
+      {
+        std::lock_guard<std::mutex> lock(mtx);
+        multi_handle = nullptr;
+      }
       curl_multi_cleanup(multi);
     }
 
@@ -515,6 +552,9 @@ struct CurlMultiHttpFetchEngine::Impl {
       action.task_id = task_id;
       action.generation = generation;
       control_actions.push_back(std::move(action));
+      if (multi_handle) {
+        curl_multi_wakeup(multi_handle);
+      }
       cv.notify_one();
       return true;
     }
@@ -591,7 +631,7 @@ struct CurlMultiHttpFetchEngine::Impl {
           if (curl_easy_pause(state->easy, CURLPAUSE_RECV) == CURLE_OK) {
             state->paused = true;
           }
-        } else if (type == ControlAction::Type::Resume && state->paused) {
+        } else if (type == ControlAction::Type::Resume) {
           if (curl_easy_pause(state->easy, CURLPAUSE_CONT) == CURLE_OK) {
             state->paused = false;
           }
@@ -641,6 +681,7 @@ struct CurlMultiHttpFetchEngine::Impl {
         state->effective_headers = makeEffectiveHeaders(state->request.headers);
         state->ctx.on_chunk = state->request.on_chunk;
         state->ctx.on_headers = state->request.on_headers;
+        state->ctx.paused_flag = &state->paused;
         state->easy = curl_easy_init();
         if (!state->easy) {
           completeSetupFailure(std::move(state), "curl_easy_init failed");
@@ -846,6 +887,9 @@ struct CurlMultiHttpFetchEngine::Impl {
       }
       worker->ensureWorkerStarted();
       worker->pending_requests.emplace_back(std::move(request));
+      if (worker->multi_handle) {
+        curl_multi_wakeup(worker->multi_handle);
+      }
     }
     worker->cv.notify_one();
   }
@@ -879,6 +923,9 @@ struct CurlMultiHttpFetchEngine::Impl {
       {
         std::lock_guard<std::mutex> lock(worker->mtx);
         worker->shutting_down = true;
+        if (worker->multi_handle) {
+          curl_multi_wakeup(worker->multi_handle);
+        }
       }
       worker->cv.notify_all();
       if (worker->worker.joinable()) {

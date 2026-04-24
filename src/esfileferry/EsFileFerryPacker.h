@@ -285,6 +285,7 @@ private:
         bool packet_thread_running = false;
         bool packet_thread_exit = false;
         toolkit::semaphore packet_sem;
+        std::chrono::steady_clock::time_point last_http_stall_log_time;
     };
 
     EsFileFerryPacker(const EsFileFerryPacker &) = delete;
@@ -406,8 +407,6 @@ private:
     // 从令牌桶消费字节数
     static void consumeTokenBucketBytes(TokenBucket &bucket, uint64_t bytes);
     // 估算至少获取指定令牌所需等待时间
-    static std::chrono::milliseconds estimateTokenWait(const TokenBucket &bucket,
-                                                       uint64_t min_bytes);
     // 清理任务 HTTP 缓冲并同步更新全局缓冲统计（调用方需已持锁）
     void clearTaskHttpBufferLocked(TaskState &task);
     // 清理待启动 HTTP 拉取队列中的指定任务（调用方需已持锁）

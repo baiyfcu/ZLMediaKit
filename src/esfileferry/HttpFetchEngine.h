@@ -13,8 +13,15 @@ class HttpFetchEngine {
 public:
     using HttpHeaders = HttpStreamFetcher::HttpHeaders;
     using TransferDiagnostics = HttpStreamFetcher::TransferDiagnostics;
-    using OnChunk = HttpStreamFetcher::OnChunk;
     using OnHeaders = HttpStreamFetcher::OnHeaders;
+
+    enum class ChunkConsumeResult {
+        Consumed,
+        Pause,
+        Abort,
+    };
+
+    using OnChunk = std::function<ChunkConsumeResult(const uint8_t *, size_t)>;
 
     struct Request {
         std::string task_id;
