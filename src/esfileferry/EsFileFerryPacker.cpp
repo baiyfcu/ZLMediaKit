@@ -27,7 +27,7 @@ EsFileFerryPacker &EsFileFerryPacker::Instance() {
 
 EsFileFerryPacker::EsFileFerryPacker()
     : _http_chunk_pool(kDefaultHttpBufferChunkBytes),
-      _http_fetch_engine(new ThreadedHttpFetchEngine()) {
+      _http_fetch_engine(new CurlMultiHttpFetchEngine()) {
   std::lock_guard<std::mutex> lock(_mtx);
   _global_options = EsFileGlobalOptions{};
   _http_chunk_pool.setSize(kDefaultMaxHttpBufferBlocksPerTask * 8);
