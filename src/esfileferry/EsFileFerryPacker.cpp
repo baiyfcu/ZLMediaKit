@@ -26,7 +26,8 @@ EsFileFerryPacker &EsFileFerryPacker::Instance() {
 }
 
 EsFileFerryPacker::EsFileFerryPacker()
-    : _http_chunk_pool(kDefaultHttpBufferChunkBytes) {
+    : _http_chunk_pool(kDefaultHttpBufferChunkBytes),
+      _http_fetch_engine(new ThreadedHttpFetchEngine()) {
   std::lock_guard<std::mutex> lock(_mtx);
   _global_options = EsFileGlobalOptions{};
   _http_chunk_pool.setSize(kDefaultMaxHttpBufferBlocksPerTask * 8);
@@ -50,13 +51,9 @@ EsFileFerryPacker::~EsFileFerryPacker() {
         buffer_cvs.emplace_back(item.second.http.buffer.cv);
       }
     }
-    http_join_threads.reserve(_http_fetch_threads.size());
-    for (auto &thread_state : _http_fetch_threads) {
-      if (thread_state && thread_state->thread.joinable()) {
-        http_join_threads.emplace_back(std::move(thread_state->thread));
-      }
+    if (_http_fetch_engine) {
+      _http_fetch_engine->shutdown(http_join_threads);
     }
-    _http_fetch_threads.clear();
   }
   for (const auto &buffer_cv : buffer_cvs) {
     buffer_cv->notify_all();
@@ -383,6 +380,7 @@ void EsFileFerryPacker::setDownstreamCongested(bool congested) {
       return;
     }
     _packet_runtime.downstream_congested = congested;
+    maybeUpdateAllHttpFetchControlsLocked();
     should_try_start_http = !congested && !_http_runtime.pending_fetches.empty();
     for (auto &item : _task_registry.tasks) {
       auto &cv = item.second.http.buffer.cv;
@@ -397,6 +395,38 @@ void EsFileFerryPacker::setDownstreamCongested(bool congested) {
   _packet_runtime.packet_sem.post();
   if (should_try_start_http) {
     maybeStartPendingHttpFetches();
+  }
+}
+
+void EsFileFerryPacker::maybeUpdateHttpFetchControlLocked(TaskState &task) {
+  if (!_http_fetch_engine || !task.http.source || !task.http.active) {
+    task.http.fetch_paused = false;
+    return;
+  }
+
+  const bool should_pause =
+      _packet_runtime.downstream_congested ||
+      task.http.buffer.buffered_bytes >= task.control.max_buffered_bytes ||
+      _http_runtime.total_buffered_bytes >=
+          _global_options.http_pull_total_buffer_limit_bytes;
+  if (should_pause == task.http.fetch_paused) {
+    return;
+  }
+
+  bool updated = false;
+  if (should_pause) {
+    updated = _http_fetch_engine->pauseTask(task.task_id, task.generation);
+  } else {
+    updated = _http_fetch_engine->resumeTask(task.task_id, task.generation);
+  }
+  if (updated) {
+    task.http.fetch_paused = should_pause;
+  }
+}
+
+void EsFileFerryPacker::maybeUpdateAllHttpFetchControlsLocked() {
+  for (auto &entry : _task_registry.tasks) {
+    maybeUpdateHttpFetchControlLocked(entry.second);
   }
 }
 
@@ -506,6 +536,7 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
   bool info_sent = false;
   bool end_sent = false;
   bool http_pending = false;
+  uint64_t task_generation = 0;
   uint64_t sent_bytes = 0;
   uint64_t file_size = 0;
   bool should_schedule_http = false;
@@ -518,6 +549,7 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
       info_sent = it->second.send.info_sent;
       end_sent = it->second.send.end_sent;
       http_pending = it->second.http.queued || it->second.http.active;
+      task_generation = it->second.generation;
       sent_bytes = it->second.send.sent_bytes;
       file_size = it->second.source.file_size;
       erasePendingHttpFetchLocked(task_id, it->second.generation);
@@ -534,6 +566,9 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
         << " http_pending:" << http_pending
         << " sent_bytes:" << sent_bytes
         << " file_size:" << file_size;
+  if (_http_fetch_engine && task_generation != 0) {
+    _http_fetch_engine->cancelTask(task_id, task_generation);
+  }
   if (buffer_cv) {
     buffer_cv->notify_all();
   }
@@ -549,7 +584,6 @@ void EsFileFerryPacker::clearTasks() {
   bool should_schedule_http = false;
   {
     std::lock_guard<std::mutex> lock(_mtx);
-    reapCompletedHttpFetchThreadsLocked(http_join_threads);
     buffer_cvs.reserve(_task_registry.tasks.size());
     for (const auto &it : _task_registry.tasks) {
       if (it.second.http.buffer.cv) {
@@ -648,9 +682,8 @@ void EsFileFerryPacker::stopPacketThreadLocked(std::thread &join_thread) {
 void EsFileFerryPacker::packetThreadLoop() {
   auto reap_http_fetch_threads = [this]() {
     std::vector<std::thread> http_join_threads;
-    {
-      std::lock_guard<std::mutex> lock(_mtx);
-      reapCompletedHttpFetchThreadsLocked(http_join_threads);
+    if (_http_fetch_engine) {
+      _http_fetch_engine->reapCompleted(http_join_threads);
     }
     for (auto &thread : http_join_threads) {
       if (thread.joinable()) {
@@ -966,6 +999,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                     writeU32BEAt(packet, total_len_pos, packet_header.total_len);
                     packet.resize(payload_offset + copied);
                   }
+                  maybeUpdateAllHttpFetchControlsLocked();
                   consumeTokenBucketBytes(task.control.emit_bucket, read_len);
                   task.send.sent_bytes += read_len;
                   task.send.next_seq++;
@@ -1185,23 +1219,6 @@ void EsFileFerryPacker::erasePendingHttpFetchLocked(const std::string &task_id,
       _http_runtime.pending_fetches.end());
 }
 
-void EsFileFerryPacker::reapCompletedHttpFetchThreadsLocked(
-    std::vector<std::thread> &join_threads) {
-  auto it = _http_fetch_threads.begin();
-  while (it != _http_fetch_threads.end()) {
-    auto &thread_state = *it;
-    if (thread_state && thread_state->done &&
-        thread_state->done->load(std::memory_order_acquire)) {
-      if (thread_state->thread.joinable()) {
-        join_threads.emplace_back(std::move(thread_state->thread));
-      }
-      it = _http_fetch_threads.erase(it);
-      continue;
-    }
-    ++it;
-  }
-}
-
 std::vector<std::pair<std::string, uint64_t>>
 EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
   std::vector<std::pair<std::string, uint64_t>> launches;
@@ -1262,6 +1279,7 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
     }
     task.http.queued = false;
     task.http.active = true;
+    task.http.fetch_paused = false;
     task.http.active_since = now;
     task.http.first_chunk_emitted = false;
     task.http.fast_start_granted = can_grant_fast_start;
@@ -1271,6 +1289,7 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
       ++granted_active_fetches;
     }
     ++_http_runtime.active_fetches;
+    maybeUpdateHttpFetchControlLocked(task);
     dirty = true;
     InfoL << "http fast-start launch task_id:" << task.task_id
           << " generation:" << task.generation
@@ -1389,172 +1408,168 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
     body = it->second.http.request_body;
   }
 
-  auto fetch_done = std::make_shared<std::atomic_bool>(false);
-  std::thread fetch_thread([this, task_id, generation, source, method, headers,
-                            body, fetch_done]() {
-    const auto fetch_begin = std::chrono::steady_clock::now();
-    InfoL << "http fetch start task_id:" << task_id
-          << " generation:" << generation
-          << " method:" << method
-          << " url:" << source;
-    HttpHeaders response_headers;
-    uint32_t response_status_code = 0;
-    std::string fetch_err;
-    HttpStreamFetcher::TransferDiagnostics diagnostics;
-    const bool ok = HttpStreamFetcher::stream(
-        source, method, headers, body,
-        [this, task_id, generation](const uint8_t *data, size_t size) {
-          if (!data || size == 0) {
-            return true;
+  HttpFetchEngine::Request request;
+  request.task_id = task_id;
+  request.generation = generation;
+  request.url = source;
+  request.method = method;
+  request.headers = headers;
+  request.body = body;
+  const auto fetch_begin = std::chrono::steady_clock::now();
+  request.on_chunk = [this, task_id, generation](const uint8_t *data, size_t size) {
+    if (!data || size == 0) {
+      return true;
+    }
+    size_t consumed = 0;
+    auto logChunkAbort = [&](const char *reason, uint64_t task_generation,
+                             size_t task_buffered_bytes,
+                             bool has_task_state) {
+      WarnL << "http on_chunk abort, task_id:" << task_id
+            << " reason:" << reason
+            << " fetch_generation:" << generation
+            << " task_generation:" << task_generation
+            << " consumed_bytes:" << consumed
+            << " incoming_chunk_bytes:" << size
+            << " task_buffered_bytes:" << task_buffered_bytes
+            << " has_task_state:" << has_task_state;
+    };
+    while (consumed < size) {
+      size_t copy_len = 0;
+      {
+        std::unique_lock<std::mutex> lock(_mtx);
+        bool waited_for_buffer = false;
+        bool waited_for_rate = false;
+        const auto wait_begin = std::chrono::steady_clock::now();
+        while (true) {
+          auto it = _task_registry.tasks.find(task_id);
+          if (_packet_runtime.packet_thread_exit) {
+            logChunkAbort("packet_thread_exit", 0, 0, false);
+            return false;
           }
-          size_t consumed = 0;
-          auto logChunkAbort = [&](const char *reason, uint64_t task_generation,
-                                   size_t task_buffered_bytes,
-                                   bool has_task_state) {
-            WarnL << "http on_chunk abort, task_id:" << task_id
-                  << " reason:" << reason
-                  << " fetch_generation:" << generation
-                  << " task_generation:" << task_generation
-                  << " consumed_bytes:" << consumed
-                  << " incoming_chunk_bytes:" << size
-                  << " task_buffered_bytes:" << task_buffered_bytes
-                  << " has_task_state:" << has_task_state;
-          };
-          while (consumed < size) {
-            size_t copy_len = 0;
-            {
-              std::unique_lock<std::mutex> lock(_mtx);
-              bool waited_for_buffer = false;
-              bool waited_for_rate = false;
-              const auto wait_begin = std::chrono::steady_clock::now();
-              while (true) {
-                auto it = _task_registry.tasks.find(task_id);
-                if (_packet_runtime.packet_thread_exit) {
-                  logChunkAbort("packet_thread_exit", 0, 0, false);
-                  return false;
-                }
-                if (it == _task_registry.tasks.end()) {
-                  logChunkAbort("task_missing", 0, 0, false);
-                  return false;
-                }
-                if (it->second.generation != generation) {
-                  logChunkAbort("generation_mismatch", it->second.generation,
-                                it->second.http.buffer.buffered_bytes, true);
-                  return false;
-                }
-                auto &task = it->second;
-                auto buffer_cv = it->second.http.buffer.cv;
-                if (!buffer_cv) {
-                  logChunkAbort("null_buffer_cv", task.generation,
-                                task.http.buffer.buffered_bytes, true);
-                  return false;
-                }
-                if (_packet_runtime.downstream_congested) {
-                  waited_for_buffer = true;
-                  buffer_cv->wait_for(
-                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
-                  continue;
-                }
-                refillTokenBucket(task.control.fetch_bucket);
+          if (it == _task_registry.tasks.end()) {
+            logChunkAbort("task_missing", 0, 0, false);
+            return false;
+          }
+          if (it->second.generation != generation) {
+            logChunkAbort("generation_mismatch", it->second.generation,
+                          it->second.http.buffer.buffered_bytes, true);
+            return false;
+          }
+          auto &task = it->second;
+          auto buffer_cv = it->second.http.buffer.cv;
+          if (!buffer_cv) {
+            logChunkAbort("null_buffer_cv", task.generation,
+                          task.http.buffer.buffered_bytes, true);
+            return false;
+          }
+          if (_packet_runtime.downstream_congested) {
+            waited_for_buffer = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
+          }
+          refillTokenBucket(task.control.fetch_bucket);
 
-                if (task.http.buffer.buffered_bytes >=
-                        task.control.max_buffered_bytes &&
-                    task.http.buffer.buffered_bytes >
-                        task.control.resume_buffered_bytes) {
-                  waited_for_buffer = true;
-                  buffer_cv->wait_for(
-                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
-                  continue;
-                }
-                if (_http_runtime.total_buffered_bytes >=
-                    _global_options.http_pull_total_buffer_limit_bytes) {
-                  waited_for_buffer = true;
-                  buffer_cv->wait_for(
-                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
-                  continue;
-                }
+          if (task.http.buffer.buffered_bytes >=
+                  task.control.max_buffered_bytes &&
+              task.http.buffer.buffered_bytes >
+                  task.control.resume_buffered_bytes) {
+            waited_for_buffer = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
+          }
+          if (_http_runtime.total_buffered_bytes >=
+              _global_options.http_pull_total_buffer_limit_bytes) {
+            waited_for_buffer = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
+          }
 
-                const auto task_room = task.control.max_buffered_bytes >
-                                               task.http.buffer.buffered_bytes
-                                           ? task.control.max_buffered_bytes -
-                                                 task.http.buffer.buffered_bytes
-                                           : 0;
-                const auto total_room =
-                    _global_options.http_pull_total_buffer_limit_bytes >
-                            _http_runtime.total_buffered_bytes
-                        ? _global_options.http_pull_total_buffer_limit_bytes -
-                              _http_runtime.total_buffered_bytes
-                        : 0;
-                auto fetch_tokens = peekTokenBucketBytes(task.control.fetch_bucket);
-                if (task_room == 0 || total_room == 0) {
-                  waited_for_buffer = true;
-                  buffer_cv->wait_for(
-                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
-                  continue;
-                }
-                if (fetch_tokens == 0) {
-                  waited_for_rate = true;
-                  auto wait_for =
-                      estimateTokenWait(task.control.fetch_bucket, 1);
-                  if (wait_for.count() <= 0) {
-                    wait_for = std::chrono::milliseconds(kRateLimitWaitStepMs);
-                  }
-                  buffer_cv->wait_for(lock, wait_for);
-                  continue;
-                }
-
-                auto chunk = _http_chunk_pool.obtain([](HttpChunkBuffer *buffer) {
-                  buffer->size = 0;
-                });
-                const auto max_copy = std::min<uint64_t>(
-                    std::min<uint64_t>(task_room, total_room), fetch_tokens);
-                copy_len = static_cast<size_t>(std::min<uint64_t>(
-                    std::min<uint64_t>(size - consumed, chunk->data.size()),
-                    max_copy));
-                if (copy_len == 0) {
-                  waited_for_rate = true;
-                  buffer_cv->wait_for(
-                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
-                  continue;
-                }
-                std::memcpy(chunk->data.data(), data + consumed, copy_len);
-                chunk->size = copy_len;
-                consumeTokenBucketBytes(task.control.fetch_bucket, copy_len);
-                task.http.received_bytes += copy_len;
-                task.http.buffer.buffered_bytes += copy_len;
-                _http_runtime.total_buffered_bytes += copy_len;
-                task.http.buffer.chunks.emplace_back(std::move(chunk));
-                break;
-              }
-              if (waited_for_buffer || waited_for_rate) {
-                const auto wait_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - wait_begin)
-                        .count();
-                if (wait_ms >= kHttpBufferWaitSlowLogMs) {
-                  auto it = _task_registry.tasks.find(task_id);
-                  const auto buffered_bytes =
-                      it != _task_registry.tasks.end() ? it->second.http.buffer.buffered_bytes : 0;
-                  WarnL << "http chunk buffer wait, task_id:" << task_id
-                        << " wait_ms:" << wait_ms
-                        << " waited_for_rate:" << waited_for_rate
-                        << " task_buffered_bytes:" << buffered_bytes
-                        << " total_buffered_bytes:" << _http_runtime.total_buffered_bytes
-                        << " chunk_block_size:" << kDefaultHttpBufferChunkBytes
-                        << " task_buffer_limit:"
-                        << (it != _task_registry.tasks.end()
-                                ? it->second.control.max_buffered_bytes
-                                : 0);
-                }
-              }
+          const auto task_room = task.control.max_buffered_bytes >
+                                         task.http.buffer.buffered_bytes
+                                     ? task.control.max_buffered_bytes -
+                                           task.http.buffer.buffered_bytes
+                                     : 0;
+          const auto total_room =
+              _global_options.http_pull_total_buffer_limit_bytes >
+                      _http_runtime.total_buffered_bytes
+                  ? _global_options.http_pull_total_buffer_limit_bytes -
+                        _http_runtime.total_buffered_bytes
+                  : 0;
+          auto fetch_tokens = peekTokenBucketBytes(task.control.fetch_bucket);
+          if (task_room == 0 || total_room == 0) {
+            waited_for_buffer = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
+          }
+          if (fetch_tokens == 0) {
+            waited_for_rate = true;
+            auto wait_for =
+                estimateTokenWait(task.control.fetch_bucket, 1);
+            if (wait_for.count() <= 0) {
+              wait_for = std::chrono::milliseconds(kRateLimitWaitStepMs);
             }
-            consumed += copy_len;
-            _packet_runtime.packet_sem.post();
+            buffer_cv->wait_for(lock, wait_for);
+            continue;
           }
-          return true;
-        },
-        [this, task_id, generation, source](uint32_t status_code,
-                                            const HttpHeaders &headers_in) {
+
+          auto chunk = _http_chunk_pool.obtain([](HttpChunkBuffer *buffer) {
+            buffer->size = 0;
+          });
+          const auto max_copy = std::min<uint64_t>(
+              std::min<uint64_t>(task_room, total_room), fetch_tokens);
+          copy_len = static_cast<size_t>(std::min<uint64_t>(
+              std::min<uint64_t>(size - consumed, chunk->data.size()),
+              max_copy));
+          if (copy_len == 0) {
+            waited_for_rate = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
+          }
+          std::memcpy(chunk->data.data(), data + consumed, copy_len);
+          chunk->size = copy_len;
+          consumeTokenBucketBytes(task.control.fetch_bucket, copy_len);
+          task.http.received_bytes += copy_len;
+          task.http.buffer.buffered_bytes += copy_len;
+          _http_runtime.total_buffered_bytes += copy_len;
+          task.http.buffer.chunks.emplace_back(std::move(chunk));
+          maybeUpdateAllHttpFetchControlsLocked();
+          break;
+        }
+        if (waited_for_buffer || waited_for_rate) {
+          const auto wait_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - wait_begin)
+                  .count();
+          if (wait_ms >= kHttpBufferWaitSlowLogMs) {
+            auto it = _task_registry.tasks.find(task_id);
+            const auto buffered_bytes =
+                it != _task_registry.tasks.end() ? it->second.http.buffer.buffered_bytes : 0;
+            WarnL << "http chunk buffer wait, task_id:" << task_id
+                  << " wait_ms:" << wait_ms
+                  << " waited_for_rate:" << waited_for_rate
+                  << " task_buffered_bytes:" << buffered_bytes
+                  << " total_buffered_bytes:" << _http_runtime.total_buffered_bytes
+                  << " chunk_block_size:" << kDefaultHttpBufferChunkBytes
+                  << " task_buffer_limit:"
+                  << (it != _task_registry.tasks.end()
+                          ? it->second.control.max_buffered_bytes
+                          : 0);
+          }
+        }
+      }
+      consumed += copy_len;
+      _packet_runtime.packet_sem.post();
+    }
+    return true;
+  };
+  request.on_headers =
+      [this, task_id, generation, source](uint32_t status_code,
+                                          const HttpHeaders &headers_in) {
           uint64_t content_length = 0;
           const bool has_content_length =
               tryParseContentLength(headers_in, content_length);
@@ -1585,9 +1600,12 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
                 << " response_header_count:" << headers_in.size()
                 << " url:" << source;
           _packet_runtime.packet_sem.post();
-        },
-        &response_headers, &response_status_code, fetch_err, &diagnostics);
-
+        };
+  request.on_complete =
+      [this, task_id, generation, source, method, fetch_begin](
+          bool ok, const HttpHeaders &response_headers,
+          uint32_t response_status_code, const std::string &fetch_err,
+          const HttpStreamFetcher::TransferDiagnostics &diagnostics) {
     const auto fetch_cost_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - fetch_begin)
@@ -1612,6 +1630,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         final_size_known = task.http.size_known;
         final_buffered_bytes = task.http.buffer.buffered_bytes;
         task.http.active = false;
+        task.http.fetch_paused = false;
         task.http.fast_start_granted = false;
         task.http.fast_start_candidate = false;
         task.http.status_code = response_status_code;
@@ -1636,6 +1655,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         }
       }
       recomputeAllTaskRateProfilesLocked(false);
+      maybeUpdateAllHttpFetchControlsLocked();
     }
     if (buffer_cv) {
       buffer_cv->notify_all();
@@ -1661,23 +1681,16 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
       maybeStartPendingHttpFetches();
       _packet_runtime.packet_sem.post();
     }
-    fetch_done->store(true, std::memory_order_release);
     if (!packet_runtime_stopped) {
       _packet_runtime.packet_sem.post();
     }
-  });
-  std::vector<std::thread> http_join_threads;
-  {
-    std::lock_guard<std::mutex> lock(_mtx);
-    reapCompletedHttpFetchThreadsLocked(http_join_threads);
-    _http_fetch_threads.emplace_back(
-        std::unique_ptr<HttpFetchThreadState>(
-            new HttpFetchThreadState(std::move(fetch_thread), fetch_done)));
-  }
-  for (auto &thread : http_join_threads) {
-    if (thread.joinable()) {
-      thread.join();
-    }
+      };
+  InfoL << "http fetch start task_id:" << task_id
+        << " generation:" << generation
+        << " method:" << method
+        << " url:" << source;
+  if (_http_fetch_engine) {
+    _http_fetch_engine->submit(std::move(request));
   }
 }
 

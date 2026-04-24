@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "HttpStreamFetcher.h"
+#include "HttpFetchEngine.h"
 #include "EsFilePayloadProtocol.h"
 #include "Poller/Timer.h"
 #include "Util/ResourcePool.h"
@@ -207,6 +208,7 @@ private:
         bool source = false;
         bool queued = false;
         bool active = false;
+        bool fetch_paused = false;
         bool failed = false;
         bool headers_ready = false;
         bool size_known = false;
@@ -267,14 +269,6 @@ private:
         std::deque<std::pair<std::string, uint64_t>> pending_fetches;
         size_t active_fetches = 0;
         uint64_t total_buffered_bytes = 0;
-    };
-
-    struct HttpFetchThreadState {
-        HttpFetchThreadState(std::thread &&thread_in,
-                             std::shared_ptr<std::atomic_bool> done_in)
-            : thread(std::move(thread_in)), done(std::move(done_in)) {}
-        std::thread thread;
-        std::shared_ptr<std::atomic_bool> done;
     };
 
     struct PacketRuntimeState {
@@ -422,6 +416,10 @@ private:
     void maybeStartPendingHttpFetches();
     // 收集可启动的 HTTP 拉取任务（调用方需已持锁）
     std::vector<std::pair<std::string, uint64_t>> collectHttpFetchLaunchesLocked();
+    // 根据当前水位/拥塞状态更新单任务 fetch pause/resume（调用方需已持锁）
+    void maybeUpdateHttpFetchControlLocked(TaskState &task);
+    // 根据当前全局状态刷新全部活跃 HTTP 任务的 fetch pause/resume（调用方需已持锁）
+    void maybeUpdateAllHttpFetchControlsLocked();
     // 释放已完成或超时的 fast-start granted 资格（调用方需已持锁）
     bool refreshFastStartGrantLocked(TaskState &task,
                                      std::chrono::steady_clock::time_point now);
@@ -429,8 +427,6 @@ private:
     void markHttpFirstChunkEmitted(const std::string &task_id, uint64_t generation);
     // 启动单个 HTTP 拉取任务
     void launchHttpFetchTask(const std::string &task_id, uint64_t generation);
-    // 回收已结束的 HTTP 拉取线程（调用方需已持锁）
-    void reapCompletedHttpFetchThreadsLocked(std::vector<std::thread> &join_threads);
 
 private:
     // 全局互斥锁
@@ -441,5 +437,5 @@ private:
     TaskRegistryState _task_registry;
     HttpFetchRuntimeState _http_runtime;
     PacketRuntimeState _packet_runtime;
-    std::vector<std::unique_ptr<HttpFetchThreadState>> _http_fetch_threads;
+    std::unique_ptr<HttpFetchEngine> _http_fetch_engine;
 };
