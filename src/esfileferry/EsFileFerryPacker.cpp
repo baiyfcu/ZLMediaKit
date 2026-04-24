@@ -370,6 +370,32 @@ void EsFileFerryPacker::setPacketCallback(PacketCallback cb) {
   }
 }
 
+void EsFileFerryPacker::setDownstreamCongested(bool congested) {
+  std::vector<std::shared_ptr<std::condition_variable>> cvs;
+  bool should_try_start_http = false;
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    if (_packet_runtime.downstream_congested == congested) {
+      return;
+    }
+    _packet_runtime.downstream_congested = congested;
+    should_try_start_http = !congested && !_http_runtime.pending_fetches.empty();
+    for (auto &item : _task_registry.tasks) {
+      auto &cv = item.second.http.buffer.cv;
+      if (cv) {
+        cvs.emplace_back(cv);
+      }
+    }
+  }
+  for (const auto &cv : cvs) {
+    cv->notify_all();
+  }
+  _packet_runtime.packet_sem.post();
+  if (should_try_start_http) {
+    maybeStartPendingHttpFetches();
+  }
+}
+
 bool EsFileFerryPacker::addFileTask(const std::string &task_id,
                                     const std::string &file_path,
                                     const std::string &file_name) {
@@ -667,6 +693,7 @@ void EsFileFerryPacker::packetThreadLoop() {
 
 size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes) {
   size_t packet_count = 0;
+  bool downstream_congested = false;
   auto collect_ids = [&](const std::function<bool(const TaskState &)> &pred) {
     std::vector<std::string> ids;
     {
@@ -683,6 +710,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
   {
     std::lock_guard<std::mutex> lock(_mtx);
     recomputeAllTaskRateProfilesLocked(false);
+    downstream_congested = _packet_runtime.downstream_congested;
   }
 
   // Control plane first: failed/info/end packets bypass the data fair round.
@@ -801,7 +829,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
   }
 
   // Data plane: all schedulable tasks enter one equal-weight fair round.
-  auto round_ids = snapshotSchedulableTaskIds();
+  auto round_ids =
+      downstream_congested ? std::vector<std::string>{}
+                           : snapshotSchedulableTaskIds();
   if (!round_ids.empty() && total_payload_quota_bytes > 0) {
     round_ids = pickFairRound(round_ids);
     const auto active_count = round_ids.size();
@@ -1165,6 +1195,9 @@ std::vector<std::pair<std::string, uint64_t>>
 EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
   std::vector<std::pair<std::string, uint64_t>> launches;
   bool dirty = false;
+  if (_packet_runtime.downstream_congested) {
+    return launches;
+  }
   while (_http_runtime.active_fetches < _global_options.http_pull_concurrency_limit &&
          !_http_runtime.pending_fetches.empty()) {
     if (_http_runtime.total_buffered_bytes >=
@@ -1242,9 +1275,14 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
   std::thread fetch_thread([this, task_id, generation, source, method, headers,
                             body, fetch_done]() {
     const auto fetch_begin = std::chrono::steady_clock::now();
+    InfoL << "http fetch start task_id:" << task_id
+          << " generation:" << generation
+          << " method:" << method
+          << " url:" << source;
     HttpHeaders response_headers;
     uint32_t response_status_code = 0;
     std::string fetch_err;
+    HttpStreamFetcher::TransferDiagnostics diagnostics;
     const bool ok = HttpStreamFetcher::stream(
         source, method, headers, body,
         [this, task_id, generation](const uint8_t *data, size_t size) {
@@ -1252,6 +1290,18 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             return true;
           }
           size_t consumed = 0;
+          auto logChunkAbort = [&](const char *reason, uint64_t task_generation,
+                                   size_t task_buffered_bytes,
+                                   bool has_task_state) {
+            WarnL << "http on_chunk abort, task_id:" << task_id
+                  << " reason:" << reason
+                  << " fetch_generation:" << generation
+                  << " task_generation:" << task_generation
+                  << " consumed_bytes:" << consumed
+                  << " incoming_chunk_bytes:" << size
+                  << " task_buffered_bytes:" << task_buffered_bytes
+                  << " has_task_state:" << has_task_state;
+          };
           while (consumed < size) {
             size_t copy_len = 0;
             {
@@ -1262,15 +1312,30 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
               while (true) {
                 auto it = _task_registry.tasks.find(task_id);
                 if (_packet_runtime.packet_thread_exit) {
+                  logChunkAbort("packet_thread_exit", 0, 0, false);
                   return false;
                 }
-                if (it == _task_registry.tasks.end() || it->second.generation != generation) {
+                if (it == _task_registry.tasks.end()) {
+                  logChunkAbort("task_missing", 0, 0, false);
+                  return false;
+                }
+                if (it->second.generation != generation) {
+                  logChunkAbort("generation_mismatch", it->second.generation,
+                                it->second.http.buffer.buffered_bytes, true);
                   return false;
                 }
                 auto &task = it->second;
                 auto buffer_cv = it->second.http.buffer.cv;
                 if (!buffer_cv) {
+                  logChunkAbort("null_buffer_cv", task.generation,
+                                task.http.buffer.buffered_bytes, true);
                   return false;
+                }
+                if (_packet_runtime.downstream_congested) {
+                  waited_for_buffer = true;
+                  buffer_cv->wait_for(
+                      lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+                  continue;
                 }
                 refillTokenBucket(task.control.fetch_bucket);
 
@@ -1370,8 +1435,8 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           }
           return true;
         },
-        [this, task_id, generation](uint32_t status_code,
-                                    const HttpHeaders &headers_in) {
+        [this, task_id, generation, source](uint32_t status_code,
+                                            const HttpHeaders &headers_in) {
           uint64_t content_length = 0;
           const bool has_content_length =
               tryParseContentLength(headers_in, content_length);
@@ -1394,9 +1459,16 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             task.source.file_size = content_length;
             task.http.size_known = true;
           }
+          InfoL << "http fetch headers task_id:" << task_id
+                << " generation:" << generation
+                << " status:" << status_code
+                << " has_content_length:" << has_content_length
+                << " content_length:" << content_length
+                << " response_header_count:" << headers_in.size()
+                << " url:" << source;
           _packet_runtime.packet_sem.post();
         },
-        &response_headers, &response_status_code, fetch_err);
+        &response_headers, &response_status_code, fetch_err, &diagnostics);
 
     const auto fetch_cost_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1426,7 +1498,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         task.http.response_meta_payload =
             buildHttpResponseMetaPayload(response_status_code, response_headers);
         task.http.headers_ready = true;
-        if (!task.http.size_known) {
+        if (ok && !task.http.size_known) {
           task.source.file_size = task.http.received_bytes;
           task.http.size_known = true;
           final_file_size = task.source.file_size;
@@ -1453,6 +1525,16 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           << " bytes:" << fetched_bytes << " file_size:" << final_file_size
           << " size_known:" << final_size_known
           << " buffered_bytes:" << final_buffered_bytes
+          << " curl_download_bytes:" << diagnostics.download_bytes
+          << " curl_content_length_bytes:" << diagnostics.content_length_bytes
+          << " curl_speed_download_bps:" << diagnostics.download_speed_bytes_per_sec
+          << " headers_emitted:" << diagnostics.headers_emitted
+          << " curl_name_lookup_ms:" << diagnostics.name_lookup_ms
+          << " curl_connect_ms:" << diagnostics.connect_ms
+          << " curl_app_connect_ms:" << diagnostics.app_connect_ms
+          << " curl_pretransfer_ms:" << diagnostics.pretransfer_ms
+          << " curl_starttransfer_ms:" << diagnostics.starttransfer_ms
+          << " curl_total_ms:" << diagnostics.total_ms
           << " fetch_err:" << fetch_err << " cost_ms:" << fetch_cost_ms
           << " url:" << source;
     if (!packet_runtime_stopped) {

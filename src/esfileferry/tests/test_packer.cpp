@@ -295,10 +295,10 @@ int main() {
     {
         EsFileGlobalOptions defaults;
         assert(defaults.packet_chunk_bytes == 128 * 1024);
-        assert(defaults.scheduler_round_budget_bytes == 8 * 1024 * 1024);
+        assert(defaults.scheduler_round_budget_bytes == 4 * 1024 * 1024);
         assert(defaults.http_pull_concurrency_limit == 150);
         assert(defaults.http_pull_total_buffer_limit_bytes == 128 * 1024 * 1024);
-        assert(defaults.http_pull_per_task_buffer_limit_bytes == 4 * 1024 * 1024);
+        assert(defaults.http_pull_per_task_buffer_limit_bytes == 512 * 1024);
         assert(defaults.http_pull_total_rate_mbps == 450);
     }
 

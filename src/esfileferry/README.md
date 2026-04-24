@@ -157,13 +157,13 @@ EsFileGlobalOptions opts;
 opts.http_pull_concurrency_limit = 16;
 
 // 按 active 并发估算，而不是按总任务数估算。
-// 当前默认单 active HTTP 任务缓冲上限约 4MB，
+// 当前默认单 active HTTP 任务缓冲上限约 512KB，
 // 并发 24 左右时可先给 96MB，全链路稳定后再调整。
 opts.http_pull_total_buffer_limit_bytes = 96 * 1024 * 1024;
 
 // 单任务 HTTP 回源缓冲上限。
 // 如果业务要求 100 路都持续有进度，建议先压到 512KB-1MB，
-// 避免 100 路同时 active 时每路都堆到默认 4MB。
+// 避免 100 路同时 active 时每路都堆到过大的回源缓冲。
 opts.http_pull_per_task_buffer_limit_bytes = 512 * 1024;
 
 // 统一速率上限。建议设置为机器/源站/下游链路安全吞吐的 60%-80%，
@@ -174,8 +174,8 @@ opts.http_pull_total_rate_mbps = 640;
 // 默认 128KB 通常适合多路公平调度；如果下游包开销偏高，可压测 256KB。
 opts.packet_chunk_bytes = 128 * 1024;
 
-// 单轮调度预算，通常先保留默认 8MB。
-opts.scheduler_round_budget_bytes = 8 * 1024 * 1024;
+// 单轮调度预算，通常先保留默认 4MB。
+opts.scheduler_round_budget_bytes = 4 * 1024 * 1024;
 
 // 最小 payload 成形门限，降低高并发下的小包比例。
 opts.min_emit_payload_bytes = 16 * 1024;

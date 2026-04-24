@@ -200,6 +200,28 @@ std::string mapCurlError(CURLcode code, const CurlRequestContext &ctx) {
   return curl_easy_strerror(code);
 }
 
+double getCurlTimeMs(CURL *curl, CURLINFO info) {
+  if (!curl) {
+    return 0.0;
+  }
+  double seconds = 0.0;
+  if (curl_easy_getinfo(curl, info, &seconds) != CURLE_OK || seconds < 0.0) {
+    return 0.0;
+  }
+  return seconds * 1000.0;
+}
+
+double getCurlDoubleInfo(CURL *curl, CURLINFO info) {
+  if (!curl) {
+    return 0.0;
+  }
+  double value = 0.0;
+  if (curl_easy_getinfo(curl, info, &value) != CURLE_OK || value < 0.0) {
+    return 0.0;
+  }
+  return value;
+}
+
 bool setupCurlRequest(CURL *curl, const std::string &url,
                       const std::string &method, const std::string &body,
                       curl_slist *request_headers,
@@ -252,7 +274,8 @@ bool HttpStreamFetcher::stream(const std::string &url,
                                const OnHeaders &on_headers,
                                HttpHeaders *response_headers,
                                uint32_t *response_status_code,
-                               std::string &err) {
+                               std::string &err,
+                               TransferDiagnostics *diagnostics) {
   err.clear();
   ensureCurlGlobalInit();
 
@@ -296,6 +319,22 @@ bool HttpStreamFetcher::stream(const std::string &url,
   }
   if (response_headers) {
     *response_headers = ctx.response_headers;
+  }
+  if (diagnostics) {
+    diagnostics->status_code = ctx.status_code;
+    diagnostics->headers_emitted = ctx.headers_emitted;
+    diagnostics->name_lookup_ms = getCurlTimeMs(curl, CURLINFO_NAMELOOKUP_TIME);
+    diagnostics->connect_ms = getCurlTimeMs(curl, CURLINFO_CONNECT_TIME);
+    diagnostics->app_connect_ms = getCurlTimeMs(curl, CURLINFO_APPCONNECT_TIME);
+    diagnostics->pretransfer_ms = getCurlTimeMs(curl, CURLINFO_PRETRANSFER_TIME);
+    diagnostics->starttransfer_ms = getCurlTimeMs(curl, CURLINFO_STARTTRANSFER_TIME);
+    diagnostics->total_ms = getCurlTimeMs(curl, CURLINFO_TOTAL_TIME);
+    diagnostics->download_bytes =
+        getCurlDoubleInfo(curl, CURLINFO_SIZE_DOWNLOAD);
+    diagnostics->content_length_bytes =
+        getCurlDoubleInfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD);
+    diagnostics->download_speed_bytes_per_sec =
+        getCurlDoubleInfo(curl, CURLINFO_SPEED_DOWNLOAD);
   }
 
   curl_slist_free_all(request_headers);

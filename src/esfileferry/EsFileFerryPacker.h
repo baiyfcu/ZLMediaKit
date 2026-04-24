@@ -102,6 +102,8 @@ public:
 
     // 设置发包回调
     void setPacketCallback(PacketCallback cb);
+    // 下游消费拥塞时抑制普通 FileChunk 的 fetch/emit；控制面包仍继续推进。
+    void setDownstreamCongested(bool congested);
     // 添加本地文件任务
     bool addFileTask(const std::string &task_id, const std::string &file_path, const std::string &file_name = "");
     // 添加 HTTP 源任务。
@@ -269,6 +271,7 @@ private:
     struct PacketRuntimeState {
         PacketCallback callback;
         std::string last_error;
+        bool downstream_congested = false;
         bool ts_started = false;
         std::chrono::steady_clock::time_point ts_start_time;
         uint32_t last_ts_ms = 0;

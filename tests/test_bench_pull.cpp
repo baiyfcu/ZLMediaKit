@@ -133,12 +133,25 @@ int main(int argc, char *argv[]) {
         });
         // 设置播放失败监听  [AUTO-TRANSLATED:14e18272]
         // Set playback failure listener
-        player->setOnPlayResult([&mtx, &player_map, tag](const SockException &ex) {
+        player->setOnPlayResult([&mtx, &player_map, tag, player](const SockException &ex) {
             if (ex) {
                 // 播放失败，移除之  [AUTO-TRANSLATED:e3e1ce5e]
                 // Playback failed, remove it
                 lock_guard<recursive_mutex> lck(mtx);
                 player_map.erase(tag);
+            } else {
+                // 获取视频track并订阅
+                auto videoTrack = dynamic_pointer_cast<VideoTrack>(player->getTrack(TrackVideo, false));
+                if (videoTrack) {
+                    videoTrack->addDelegate([](const Frame::Ptr &frame) {
+                        if (frame->size() < 10) {
+                            DebugL << "v frame hex:" << toolkit::hexmem(frame->data(), frame->size());
+                        } else {
+                            DebugL << "v frame hex:" << toolkit::hexmem(frame->data(), 10);
+                        }
+                        return true;
+                    });
+                }
             }
         });
         // 设置播放中途断开监听  [AUTO-TRANSLATED:b1aa9531]
