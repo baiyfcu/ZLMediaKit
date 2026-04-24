@@ -61,6 +61,10 @@ struct EsFileGlobalOptions {
     // 但一阶段重构后也作为统一发送面的总体速率上限使用。
     // 单位：Mb/s，按 1 Mbps = 1024 * 1024 bit/s 换算。
     uint64_t http_pull_total_rate_mbps = 450;
+    // 为新 HTTP 任务预留的 fast-start active 槽位。
+    size_t http_pull_fast_start_slot_reserve = 2;
+    // fast-start granted 的首包保护窗口。
+    uint32_t http_pull_fast_start_protection_ms = 2000;
 };
 
 class EsFileFerryPacker {
@@ -214,6 +218,11 @@ private:
         std::string request_body;
         std::vector<uint8_t> response_meta_payload;
         TaskHttpBufferState buffer;
+        bool fast_start_candidate = false;
+        bool fast_start_granted = false;
+        bool first_chunk_emitted = false;
+        std::chrono::steady_clock::time_point queued_since;
+        std::chrono::steady_clock::time_point active_since;
     };
 
     struct TaskSourceState {
@@ -413,6 +422,11 @@ private:
     void maybeStartPendingHttpFetches();
     // 收集可启动的 HTTP 拉取任务（调用方需已持锁）
     std::vector<std::pair<std::string, uint64_t>> collectHttpFetchLaunchesLocked();
+    // 释放已完成或超时的 fast-start granted 资格（调用方需已持锁）
+    bool refreshFastStartGrantLocked(TaskState &task,
+                                     std::chrono::steady_clock::time_point now);
+    // 标记 HTTP 任务已完成首个 FileChunk 发出
+    void markHttpFirstChunkEmitted(const std::string &task_id, uint64_t generation);
     // 启动单个 HTTP 拉取任务
     void launchHttpFetchTask(const std::string &task_id, uint64_t generation);
     // 回收已结束的 HTTP 拉取线程（调用方需已持锁）

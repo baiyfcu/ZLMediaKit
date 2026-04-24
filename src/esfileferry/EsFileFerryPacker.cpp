@@ -348,6 +348,10 @@ void EsFileFerryPacker::setGlobalOptions(const EsFileGlobalOptions &opts) {
             : opts.http_pull_per_task_buffer_limit_bytes;
     _global_options.http_pull_total_rate_mbps =
         opts.http_pull_total_rate_mbps;
+    _global_options.http_pull_fast_start_slot_reserve =
+        opts.http_pull_fast_start_slot_reserve;
+    _global_options.http_pull_fast_start_protection_ms =
+        opts.http_pull_fast_start_protection_ms;
     recomputeAllTaskRateProfilesLocked(false);
     should_try_start_http = !_http_runtime.pending_fetches.empty();
   }
@@ -448,6 +452,10 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     state.http.headers_ready = false;
     state.http.size_known = false;
     state.http.received_bytes = 0;
+    state.http.fast_start_candidate = true;
+    state.http.fast_start_granted = false;
+    state.http.first_chunk_emitted = false;
+    state.http.queued_since = std::chrono::steady_clock::now();
     state.http.method = method_upper;
     state.http.request_headers = headers;
     state.http.request_body = body;
@@ -1102,6 +1110,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
         }
         if (emitPacket(task_id, std::move(packet), packet_header)) {
           ++packet_count;
+        if (http_chunk_mode) {
+          markHttpFirstChunkEmitted(task_id, generation);
+        }
         }
       }
 
@@ -1198,8 +1209,29 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
   if (_packet_runtime.downstream_congested) {
     return launches;
   }
-  while (_http_runtime.active_fetches < _global_options.http_pull_concurrency_limit &&
-         !_http_runtime.pending_fetches.empty()) {
+  const auto now = std::chrono::steady_clock::now();
+  size_t granted_active_fetches = 0;
+  for (auto &item : _task_registry.tasks) {
+    auto &task = item.second;
+    if (!task.http.source || !task.http.active) {
+      continue;
+    }
+    dirty = refreshFastStartGrantLocked(task, now) || dirty;
+    if (task.http.fast_start_granted) {
+      ++granted_active_fetches;
+    }
+  }
+  const auto total_limit = _global_options.http_pull_concurrency_limit;
+  const auto fast_start_reserve =
+      std::min(_global_options.http_pull_fast_start_slot_reserve, total_limit);
+  const auto normal_limit =
+      total_limit > fast_start_reserve ? total_limit - fast_start_reserve : 0;
+  std::deque<std::pair<std::string, uint64_t>> deferred;
+  const auto pending_count = _http_runtime.pending_fetches.size();
+  for (size_t i = 0; i < pending_count; ++i) {
+    if (_http_runtime.pending_fetches.empty()) {
+      break;
+    }
     if (_http_runtime.total_buffered_bytes >=
         _global_options.http_pull_total_buffer_limit_bytes) {
       break;
@@ -1214,16 +1246,102 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
     if (!task.http.source || !task.http.queued || task.http.active) {
       continue;
     }
+    const auto normal_active_fetches =
+        _http_runtime.active_fetches > granted_active_fetches
+            ? _http_runtime.active_fetches - granted_active_fetches
+            : 0;
+    const bool can_grant_fast_start =
+        task.http.fast_start_candidate && granted_active_fetches < fast_start_reserve &&
+        _http_runtime.active_fetches < total_limit;
+    const bool can_launch_normal =
+        _http_runtime.active_fetches < total_limit &&
+        (fast_start_reserve == 0 || normal_active_fetches < normal_limit);
+    if (!can_grant_fast_start && !can_launch_normal) {
+      deferred.emplace_back(item);
+      continue;
+    }
     task.http.queued = false;
     task.http.active = true;
+    task.http.active_since = now;
+    task.http.first_chunk_emitted = false;
+    task.http.fast_start_granted = can_grant_fast_start;
+    if (!can_grant_fast_start) {
+      task.http.fast_start_candidate = false;
+    } else {
+      ++granted_active_fetches;
+    }
     ++_http_runtime.active_fetches;
     dirty = true;
+    InfoL << "http fast-start launch task_id:" << task.task_id
+          << " generation:" << task.generation
+          << " granted:" << task.http.fast_start_granted
+          << " reserve:" << fast_start_reserve
+          << " active_fetches:" << _http_runtime.active_fetches
+          << " pending_fetches:" << _http_runtime.pending_fetches.size();
     launches.emplace_back(item);
+  }
+  while (!deferred.empty()) {
+    _http_runtime.pending_fetches.emplace_back(std::move(deferred.front()));
+    deferred.pop_front();
   }
   if (dirty) {
     recomputeAllTaskRateProfilesLocked(false);
   }
   return launches;
+}
+
+bool EsFileFerryPacker::refreshFastStartGrantLocked(
+    TaskState &task, std::chrono::steady_clock::time_point now) {
+  if (!task.http.fast_start_granted) {
+    return false;
+  }
+  bool should_release = false;
+  const char *reason = nullptr;
+  if (task.http.first_chunk_emitted) {
+    should_release = true;
+    reason = "first_chunk_emitted";
+  } else if (!_packet_runtime.callback) {
+    should_release = true;
+    reason = "packet_callback_missing";
+  } else if (_global_options.http_pull_fast_start_protection_ms == 0) {
+    should_release = true;
+    reason = "protection_disabled";
+  } else if (task.http.active_since != std::chrono::steady_clock::time_point{} &&
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 now - task.http.active_since)
+                     .count() >=
+                 _global_options.http_pull_fast_start_protection_ms) {
+    should_release = true;
+    reason = "protection_timeout";
+  }
+  if (!should_release) {
+    return false;
+  }
+  task.http.fast_start_granted = false;
+  task.http.fast_start_candidate = false;
+  InfoL << "http fast-start release task_id:" << task.task_id
+        << " generation:" << task.generation
+        << " reason:" << (reason ? reason : "unknown")
+        << " headers_ready:" << task.http.headers_ready
+        << " first_chunk_emitted:" << task.http.first_chunk_emitted
+        << " received_bytes:" << task.http.received_bytes;
+  return true;
+}
+
+void EsFileFerryPacker::markHttpFirstChunkEmitted(const std::string &task_id,
+                                                  uint64_t generation) {
+  std::lock_guard<std::mutex> lock(_mtx);
+  auto it = _task_registry.tasks.find(task_id);
+  if (it == _task_registry.tasks.end() || it->second.generation != generation ||
+      !it->second.http.source || it->second.http.first_chunk_emitted) {
+    return;
+  }
+  auto &task = it->second;
+  task.http.first_chunk_emitted = true;
+  const bool changed = refreshFastStartGrantLocked(task, std::chrono::steady_clock::now());
+  if (changed) {
+    recomputeAllTaskRateProfilesLocked(false);
+  }
 }
 
 void EsFileFerryPacker::maybeStartPendingHttpFetches() {
@@ -1494,6 +1612,8 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         final_size_known = task.http.size_known;
         final_buffered_bytes = task.http.buffer.buffered_bytes;
         task.http.active = false;
+        task.http.fast_start_granted = false;
+        task.http.fast_start_candidate = false;
         task.http.status_code = response_status_code;
         task.http.response_meta_payload =
             buildHttpResponseMetaPayload(response_status_code, response_headers);
