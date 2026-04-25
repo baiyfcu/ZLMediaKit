@@ -10,7 +10,7 @@
 
 namespace {
 
-constexpr float kDefaultHttpStreamTimeoutSec = 0.0f;
+constexpr float kDefaultHttpStreamTimeoutSec = 1800.0f;
 constexpr long kDefaultHttpConnectTimeoutMs = 30 * 1000;
 constexpr long kDefaultCurlBufferSize = 512 * 1024;
 
@@ -81,12 +81,14 @@ bool isInterimStatusCode(uint32_t status_code) {
 struct CurlRequestContext {
   HttpStreamFetcher::OnChunk on_chunk;
   HttpStreamFetcher::OnHeaders on_headers;
+  HttpStreamFetcher::ShouldAbort should_abort;
   HttpStreamFetcher::HttpHeaders response_headers;
   HttpStreamFetcher::HttpHeaders pending_headers;
   uint32_t status_code = 0;
   uint32_t pending_status_code = 0;
   bool headers_emitted = false;
   bool consumer_ok = true;
+  bool cancelled = false;
   std::string consumer_err;
 
   void resetPendingHeaders(uint32_t status) {
@@ -169,13 +171,40 @@ size_t onCurlWrite(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return bytes;
   }
   if (!ctx->on_chunk(reinterpret_cast<const uint8_t *>(ptr), bytes)) {
-    ctx->consumer_ok = false;
-    if (ctx->consumer_err.empty()) {
-      ctx->consumer_err = "consume http payload failed";
+    if (ctx->should_abort && ctx->should_abort()) {
+      ctx->cancelled = true;
+      if (ctx->consumer_err.empty()) {
+        ctx->consumer_err = "http fetch cancelled";
+      }
+    } else {
+      ctx->consumer_ok = false;
+      if (ctx->consumer_err.empty()) {
+        ctx->consumer_err = "consume http payload failed";
+      }
     }
     return 0;
   }
   return bytes;
+}
+
+int onCurlXferInfo(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
+                   curl_off_t ultotal, curl_off_t ulnow) {
+  (void)dltotal;
+  (void)dlnow;
+  (void)ultotal;
+  (void)ulnow;
+  auto *ctx = static_cast<CurlRequestContext *>(userdata);
+  if (!ctx || !ctx->should_abort) {
+    return 0;
+  }
+  if (!ctx->should_abort()) {
+    return 0;
+  }
+  ctx->cancelled = true;
+  if (ctx->consumer_err.empty()) {
+    ctx->consumer_err = "http fetch cancelled";
+  }
+  return 1;
 }
 
 curl_slist *buildCurlHeaderList(
@@ -245,6 +274,9 @@ bool setupCurlRequest(CURL *curl, const std::string &url,
   curl_easy_setopt(curl, CURLOPT_HEADERDATA, ctx);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &onCurlWrite);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, ctx);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, &onCurlXferInfo);
+  curl_easy_setopt(curl, CURLOPT_XFERINFODATA, ctx);
   curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, kDefaultCurlBufferSize);
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, request_headers);
 
@@ -272,6 +304,7 @@ bool HttpStreamFetcher::stream(const std::string &url,
                                const std::string &body,
                                const OnChunk &on_chunk,
                                const OnHeaders &on_headers,
+                               const ShouldAbort &should_abort,
                                HttpHeaders *response_headers,
                                uint32_t *response_status_code,
                                std::string &err,
@@ -283,6 +316,7 @@ bool HttpStreamFetcher::stream(const std::string &url,
   CurlRequestContext ctx;
   ctx.on_chunk = on_chunk;
   ctx.on_headers = on_headers;
+  ctx.should_abort = should_abort;
 
   auto *curl = curl_easy_init();
   if (!curl) {
@@ -340,6 +374,10 @@ bool HttpStreamFetcher::stream(const std::string &url,
   curl_slist_free_all(request_headers);
   curl_easy_cleanup(curl);
 
+  if (ctx.cancelled) {
+    err = ctx.consumer_err.empty() ? "http fetch cancelled" : ctx.consumer_err;
+    return false;
+  }
   if (!ctx.consumer_ok) {
     err = ctx.consumer_err.empty() ? "consume http payload failed"
                                    : ctx.consumer_err;

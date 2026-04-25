@@ -60,6 +60,7 @@ private:
         std::deque<PendingFrame> frames;
         size_t buffered_bytes = 0;
         bool in_ready_queue = false;
+        bool in_processing = false;
     };
 
     mutable std::mutex _mtx;
@@ -71,7 +72,9 @@ private:
     std::unordered_map<std::string, PendingTaskBucket> _task_buckets;
     std::deque<std::string> _ready_task_ids;
     std::condition_variable _frame_cv;
-    std::thread _unpack_thread;
+    std::vector<std::thread> _unpack_threads;
+    size_t _pending_frame_count = 0;
+    size_t _pending_frame_bytes = 0;
     bool _unpack_stop = true;
     std::atomic<bool> _running = {false};
     std::atomic<int> _rtp_type = {0};

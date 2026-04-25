@@ -50,13 +50,13 @@ struct EsFileGlobalOptions {
     // emit token 小于该值时延后发送，等待 token 累积；尾包可放行。
     uint64_t min_emit_payload_bytes = 32 * 1024;
     // HTTP 回源的默认最大并发窗口。
-    // 取 6：适合作为 50 路以内混合任务的默认保护值。
+    // 取 150：适合作为 150~200 路混合任务的默认保护值。
     size_t http_pull_concurrency_limit = 150;
     // HTTP 回源的默认全局缓冲上限。
-    // 取 24MB：与默认并发窗口一起控制瞬时内存占用。
+    // 取 128MB：与默认并发窗口一起控制瞬时内存占用。
     uint64_t http_pull_total_buffer_limit_bytes = 128 * 1024 * 1024;
     // 单任务 HTTP 回源缓冲上限。
-    // 默认保持 4MB 兼容行为；100 路都需保活时建议压到 512KB-1MB。
+    // 默认保持 512KB：100 路都需保活时建议压到 512KB-1MB。
     uint64_t http_pull_per_task_buffer_limit_bytes = 512 * 1024;
     // 当前配置名沿用 HTTP pull 语义，
     // 但一阶段重构后也作为统一发送面的总体速率上限使用。
@@ -223,8 +223,10 @@ private:
         bool fast_start_candidate = false;
         bool fast_start_granted = false;
         bool first_chunk_emitted = false;
+        uint32_t retry_attempt = 0;
         std::chrono::steady_clock::time_point queued_since;
         std::chrono::steady_clock::time_point active_since;
+        std::chrono::steady_clock::time_point retry_not_before;
     };
 
     struct TaskSourceState {

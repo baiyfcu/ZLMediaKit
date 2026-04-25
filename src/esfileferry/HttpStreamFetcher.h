@@ -11,6 +11,7 @@ public:
     using HttpHeaders = std::vector<std::pair<std::string, std::string>>;
     using OnChunk = std::function<bool(const uint8_t *, size_t)>;
     using OnHeaders = std::function<void(uint32_t, const HttpHeaders &)>;
+    using ShouldAbort = std::function<bool()>;
 
     struct TransferDiagnostics {
         uint32_t status_code = 0;
@@ -32,6 +33,7 @@ public:
                        const std::string &body,
                        const OnChunk &on_chunk,
                        const OnHeaders &on_headers,
+                       const ShouldAbort &should_abort,
                        HttpHeaders *response_headers,
                        uint32_t *response_status_code,
                        std::string &err,

@@ -203,7 +203,7 @@ EsFileFerryUnPacker &EsFileFerryUnPacker::Instance() {
 
 void EsFileFerryUnPacker::setTaskCallback(const std::string &task_id,
                                           OnTaskData cb) {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   if (task_id.empty()) {
     return;
   }
@@ -220,19 +220,19 @@ void EsFileFerryUnPacker::setTaskCallback(const std::string &task_id,
 }
 
 void EsFileFerryUnPacker::removeTask(const std::string &task_id) {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   _task_callbacks.erase(task_id);
   _task_states.erase(task_id);
 }
 
 void EsFileFerryUnPacker::clearTasks() {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   _task_callbacks.clear();
   _task_states.clear();
 }
 
 std::vector<std::string> EsFileFerryUnPacker::getTaskIds() const {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   std::vector<std::string> ids;
   ids.reserve(_task_callbacks.size());
   for (auto &it : _task_callbacks) {
@@ -242,12 +242,12 @@ std::vector<std::string> EsFileFerryUnPacker::getTaskIds() const {
 }
 
 std::string EsFileFerryUnPacker::getLastError() const {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   return _last_error;
 }
 
 void EsFileFerryUnPacker::setOnError(OnError cb) {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   _on_error = std::move(cb);
 }
 
@@ -331,7 +331,7 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
   }
   bool buffer_empty = false;
   {
-    std::lock_guard<std::mutex> lock(_mtx);
+    std::lock_guard<std::mutex> lock(_buffer_mtx);
     resetBufferIfFullyConsumedLocked();
     buffer_empty = (_buffer.size() - _buffer_start) == 0;
   }
@@ -370,7 +370,7 @@ bool EsFileFerryUnPacker::inputFrame(const uint8_t *data, size_t size) {
   }
 
   {
-    std::lock_guard<std::mutex> lock(_mtx);
+    std::lock_guard<std::mutex> lock(_buffer_mtx);
     appendToBufferLocked(data, size);
   }
   parseBuffer(data, size);
@@ -396,7 +396,7 @@ bool EsFileFerryUnPacker::parseOnePacket(EsFilePacket &packet) {
   bool has_pending_error = false;
   bool parsed = false;
   {
-    std::lock_guard<std::mutex> lock(_mtx);
+    std::lock_guard<std::mutex> lock(_buffer_mtx);
     const auto available = _buffer.size() - _buffer_start;
     if (available <
         kEsFileFixedHeaderSize + kEsFileCarrierShortPrefixSize) {
@@ -545,7 +545,7 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet,const uint8_t *data
   EsFileUnpackErrorEvent pending_error;
   bool has_pending_error = false;
   {
-    std::lock_guard<std::mutex> lock(_mtx);
+    std::lock_guard<std::mutex> lock(_task_mtx);
     auto it = _task_callbacks.find(packet.task_id);
     if (it == _task_callbacks.end()) {
       size_t miss_count = 0;
@@ -684,14 +684,14 @@ void EsFileFerryUnPacker::dispatchPacket(EsFilePacket packet,const uint8_t *data
 }
 
 void EsFileFerryUnPacker::setLastError(const std::string &err) {
-  std::lock_guard<std::mutex> lock(_mtx);
+  std::lock_guard<std::mutex> lock(_task_mtx);
   _last_error = err;
 }
 
 void EsFileFerryUnPacker::emitError(EsFileUnpackErrorEvent event) {
   OnError cb;
   {
-    std::lock_guard<std::mutex> lock(_mtx);
+    std::lock_guard<std::mutex> lock(_task_mtx);
     if (event.message.empty()) {
       event.message = unpackErrorTypeName(event.type);
     }

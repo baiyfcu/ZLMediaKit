@@ -2,6 +2,7 @@
 #include "EsFileFerryPlayer.h"
 #include "Common/config.h"
 #include "Thread/WorkThreadPool.h"
+#include <algorithm>
 
 using namespace mediakit;
 using namespace toolkit;
@@ -9,6 +10,14 @@ using namespace toolkit;
 namespace {
 constexpr size_t kPendingFrameCountWarnThreshold = 2000;
 constexpr const char *kUnknownTaskBucketKey = "__unknown__";
+
+size_t resolveUnpackWorkerCount() {
+    const auto concurrency = std::thread::hardware_concurrency();
+    if (concurrency <= 1) {
+        return 1;
+    }
+    return std::min<size_t>(4, concurrency);
+}
 
 struct FramePacketMeta {
     bool valid = false;
@@ -165,6 +174,16 @@ void EsFileFerryPuller::removeTaskFrames(const std::string &task_id) {
             }
             removed_frames = it->second.frames.size();
             removed_bytes = it->second.buffered_bytes;
+            if (_pending_frame_count >= removed_frames) {
+                _pending_frame_count -= removed_frames;
+            } else {
+                _pending_frame_count = 0;
+            }
+            if (_pending_frame_bytes >= removed_bytes) {
+                _pending_frame_bytes -= removed_bytes;
+            } else {
+                _pending_frame_bytes = 0;
+            }
             removed_bucket = std::move(it->second);
             _task_buckets.erase(it);
             _ready_task_ids.erase(std::remove(_ready_task_ids.begin(), _ready_task_ids.end(), task_id), _ready_task_ids.end());
@@ -262,29 +281,37 @@ void EsFileFerryPuller::scheduleRetry() {
 
 void EsFileFerryPuller::startUnpackWorker() {
     std::lock_guard<std::mutex> lock(_mtx);
-    if (_unpack_thread.joinable()) {
+    if (!_unpack_threads.empty()) {
         return;
     }
     _task_buckets.clear();
     _ready_task_ids.clear();
+    _pending_frame_count = 0;
+    _pending_frame_bytes = 0;
     _unpack_stop = false;
-    _unpack_thread = std::thread([this]() { unpackWorkerLoop(); });
+    const auto worker_count = resolveUnpackWorkerCount();
+    _unpack_threads.reserve(worker_count);
+    for (size_t i = 0; i < worker_count; ++i) {
+        _unpack_threads.emplace_back([this]() { unpackWorkerLoop(); });
+    }
 }
 
 void EsFileFerryPuller::stopUnpackWorker() {
-    std::thread join_thread;
+    std::vector<std::thread> join_threads;
     {
         std::lock_guard<std::mutex> lock(_mtx);
         _unpack_stop = true;
         _task_buckets.clear();
         _ready_task_ids.clear();
-        if (_unpack_thread.joinable()) {
-            join_thread = std::move(_unpack_thread);
-        }
+        _pending_frame_count = 0;
+        _pending_frame_bytes = 0;
+        join_threads.swap(_unpack_threads);
     }
     _frame_cv.notify_all();
-    if (join_thread.joinable()) {
-        join_thread.join();
+    for (auto &thread : join_threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
     }
 }
 
@@ -310,16 +337,14 @@ bool EsFileFerryPuller::enqueueFrame(const Frame::Ptr &frame) {
         }
         const auto task_key = bucketKeyForMeta(pending.meta);
         auto &bucket = _task_buckets[task_key];
-        if (!bucket.in_ready_queue) {
+        if (!bucket.in_ready_queue && !bucket.in_processing) {
             _ready_task_ids.emplace_back(task_key);
             bucket.in_ready_queue = true;
         }
         bucket.buffered_bytes += pending.size;
         bucket.frames.emplace_back(std::move(pending));
-        for (const auto &entry : _task_buckets) {
-            pending_bytes += entry.second.buffered_bytes;
-            pending_frames += entry.second.frames.size();
-        }
+        pending_bytes = (_pending_frame_bytes += bucket.frames.back().size);
+        pending_frames = ++_pending_frame_count;
     }
     if (pending_frames > kPendingFrameCountWarnThreshold) {
         static std::atomic<size_t> s_overflow_count{0};
@@ -340,6 +365,8 @@ bool EsFileFerryPuller::enqueueFrame(const Frame::Ptr &frame) {
 void EsFileFerryPuller::unpackWorkerLoop() {
     while (true) {
         PendingFrame pending;
+        std::string task_key;
+        bool notify_next = false;
         {
             std::unique_lock<std::mutex> lock(_mtx);
             _frame_cv.wait(lock, [this]() {
@@ -348,7 +375,7 @@ void EsFileFerryPuller::unpackWorkerLoop() {
             if (_unpack_stop && _ready_task_ids.empty()) {
                 break;
             }
-            const auto task_key = std::move(_ready_task_ids.front());
+            task_key = std::move(_ready_task_ids.front());
             _ready_task_ids.pop_front();
             auto bucket_it = _task_buckets.find(task_key);
             if (bucket_it == _task_buckets.end()) {
@@ -356,21 +383,25 @@ void EsFileFerryPuller::unpackWorkerLoop() {
             }
             bucket_it->second.in_ready_queue = false;
             if (bucket_it->second.frames.empty()) {
+                bucket_it->second.in_processing = false;
                 _task_buckets.erase(bucket_it);
                 continue;
             }
             pending = std::move(bucket_it->second.frames.front());
             bucket_it->second.frames.pop_front();
+            bucket_it->second.in_processing = true;
+            if (_pending_frame_count > 0) {
+                --_pending_frame_count;
+            }
             if (bucket_it->second.buffered_bytes >= pending.size) {
                 bucket_it->second.buffered_bytes -= pending.size;
             } else {
                 bucket_it->second.buffered_bytes = 0;
             }
-            if (!bucket_it->second.frames.empty()) {
-                _ready_task_ids.emplace_back(task_key);
-                bucket_it->second.in_ready_queue = true;
+            if (_pending_frame_bytes >= pending.size) {
+                _pending_frame_bytes -= pending.size;
             } else {
-                _task_buckets.erase(bucket_it);
+                _pending_frame_bytes = 0;
             }
         }
         if (pending.frame && pending.frame->data() && pending.frame->size() > 0) {
@@ -391,6 +422,25 @@ void EsFileFerryPuller::unpackWorkerLoop() {
             //        0x32, 0x30, 0x32, 0x36, 0x2d, 0x30, 0x34, 0x2d, 0x32, 0x30, 0x54, 0x30, 0x30, 0x3a, 0x33, 0x30, 0x3a, 0x31, 0x38, 0x29, 0x0a };
             //EsFileFerryUnPacker::Instance().inputFrame(tembuf, sizeof(tembuf));
             EsFileFerryUnPacker::Instance().inputFrame(reinterpret_cast<const uint8_t *>(pending.frame->data()), static_cast<size_t>(pending.frame->size()));
+        }
+        {
+            std::lock_guard<std::mutex> lock(_mtx);
+            auto bucket_it = _task_buckets.find(task_key);
+            if (bucket_it != _task_buckets.end()) {
+                bucket_it->second.in_processing = false;
+                if (!bucket_it->second.frames.empty()) {
+                    if (!bucket_it->second.in_ready_queue) {
+                        _ready_task_ids.emplace_back(task_key);
+                        bucket_it->second.in_ready_queue = true;
+                        notify_next = true;
+                    }
+                } else {
+                    _task_buckets.erase(bucket_it);
+                }
+            }
+        }
+        if (notify_next) {
+            _frame_cv.notify_one();
         }
     }
 }

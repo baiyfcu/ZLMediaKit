@@ -15,6 +15,7 @@ public:
     using TransferDiagnostics = HttpStreamFetcher::TransferDiagnostics;
     using OnChunk = HttpStreamFetcher::OnChunk;
     using OnHeaders = HttpStreamFetcher::OnHeaders;
+    using ShouldAbort = HttpStreamFetcher::ShouldAbort;
 
     struct Request {
         std::string task_id;
@@ -25,6 +26,7 @@ public:
         std::string body;
         OnChunk on_chunk;
         OnHeaders on_headers;
+        ShouldAbort should_abort;
         std::function<void(bool ok,
                            const HttpHeaders &response_headers,
                            uint32_t response_status_code,
@@ -54,10 +56,20 @@ public:
 private:
     struct ThreadState {
         ThreadState(std::thread &&thread_in,
-                    std::shared_ptr<std::atomic_bool> done_in)
-            : thread(std::move(thread_in)), done(std::move(done_in)) {}
+                    std::shared_ptr<std::atomic_bool> done_in,
+                    std::shared_ptr<std::atomic_bool> cancelled_in,
+                    std::string task_id_in,
+                    uint64_t generation_in)
+            : thread(std::move(thread_in)),
+              done(std::move(done_in)),
+              cancelled(std::move(cancelled_in)),
+              task_id(std::move(task_id_in)),
+              generation(generation_in) {}
         std::thread thread;
         std::shared_ptr<std::atomic_bool> done;
+        std::shared_ptr<std::atomic_bool> cancelled;
+        std::string task_id;
+        uint64_t generation = 0;
     };
 
 private:

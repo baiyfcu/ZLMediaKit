@@ -19,6 +19,10 @@ constexpr uint32_t EsFileFerryPacker::kDefaultPaceIntervalMs;
 constexpr uint64_t EsFileFerryPacker::kDefaultSchedulerRoundBudgetBytes;
 constexpr uint64_t EsFileFerryPacker::kDefaultUnifiedBufferedBytes;
 
+namespace {
+void joinOrDetachIfSelf(std::thread &thread);
+}
+
 EsFileFerryPacker &EsFileFerryPacker::Instance() {
   static std::shared_ptr<EsFileFerryPacker> instance(new EsFileFerryPacker());
   static EsFileFerryPacker &ref = *instance;
@@ -59,12 +63,10 @@ EsFileFerryPacker::~EsFileFerryPacker() {
     buffer_cv->notify_all();
   }
   if (join_thread.joinable()) {
-    join_thread.join();
+    joinOrDetachIfSelf(join_thread);
   }
   for (auto &thread : http_join_threads) {
-    if (thread.joinable()) {
-      thread.join();
-    }
+    joinOrDetachIfSelf(thread);
   }
 }
 
@@ -75,6 +77,9 @@ constexpr int64_t kRateLimitWaitStepMs = 20;
 constexpr bool kEnableAnnexBPayloadEscape = true;
 constexpr uint64_t kBitsPerByte = 8;
 constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
+constexpr uint32_t kHttpRetryMaxAttempts = 3;
+constexpr uint32_t kHttpRetryBaseDelayMs = 1500;
+constexpr uint32_t kHttpRetryMaxDelayMs = 8000;
 
 uint64_t mbpsToBytesPerSec(uint64_t mbps) {
   return (mbps * kBitsPerMegabit) / kBitsPerByte;
@@ -274,6 +279,46 @@ bool tryParseContentLength(const EsFileFerryPacker::HttpHeaders &headers,
     return true;
   }
   return false;
+}
+
+bool isRetryableHttpFetchError(const std::string &fetch_err,
+                               uint32_t response_status_code,
+                               const HttpStreamFetcher::TransferDiagnostics &diagnostics) {
+  if (fetch_err == "http fetch cancelled" || fetch_err == "consume http payload failed") {
+    return false;
+  }
+  if (response_status_code == 504) {
+    return true;
+  }
+  if (response_status_code >= 500 && response_status_code < 600 &&
+      !diagnostics.headers_emitted) {
+    return true;
+  }
+  return fetch_err == "Timeout was reached" ||
+         fetch_err == "Failure when receiving data from the peer";
+}
+
+uint32_t nextHttpRetryDelayMs(uint32_t retry_attempt) {
+  if (retry_attempt == 0) {
+    return kHttpRetryBaseDelayMs;
+  }
+  uint64_t delay = static_cast<uint64_t>(kHttpRetryBaseDelayMs)
+                   << std::min<uint32_t>(retry_attempt, 3);
+  delay = std::min<uint64_t>(delay, kHttpRetryMaxDelayMs);
+  return static_cast<uint32_t>(delay);
+}
+
+void joinOrDetachIfSelf(std::thread &thread) {
+  if (!thread.joinable()) {
+    return;
+  }
+  if (thread.get_id() == std::this_thread::get_id()) {
+    WarnL << "skip self join for thread " << std::this_thread::get_id()
+          << ", detaching instead";
+    thread.detach();
+    return;
+  }
+  thread.join();
 }
 
 } // namespace
@@ -485,7 +530,9 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     state.http.fast_start_candidate = true;
     state.http.fast_start_granted = false;
     state.http.first_chunk_emitted = false;
+    state.http.retry_attempt = 0;
     state.http.queued_since = std::chrono::steady_clock::now();
+    state.http.retry_not_before = std::chrono::steady_clock::time_point{};
     state.http.method = method_upper;
     state.http.request_headers = headers;
     state.http.request_body = body;
@@ -493,6 +540,15 @@ bool EsFileFerryPacker::addTask(const std::string &task_id,
     uint64_t generation = 0;
     {
       std::lock_guard<std::mutex> lock(_mtx);
+      auto existing = _task_registry.tasks.find(task_id);
+      if (existing != _task_registry.tasks.end() && existing->second.http.active) {
+        const auto old_generation = existing->second.generation;
+        if (_http_fetch_engine) {
+          _http_fetch_engine->cancelTask(task_id, old_generation);
+        }
+        clearTaskHttpBufferLocked(existing->second);
+        existing->second.http.active = false;
+      }
       refreshUnifiedTaskProfileLocked(state, true);
       generation = ++_task_registry.generation;
       state.generation = generation;
@@ -552,6 +608,9 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
       task_generation = it->second.generation;
       sent_bytes = it->second.send.sent_bytes;
       file_size = it->second.source.file_size;
+      if (_http_fetch_engine && task_generation != 0) {
+        _http_fetch_engine->cancelTask(task_id, task_generation);
+      }
       erasePendingHttpFetchLocked(task_id, it->second.generation);
       clearTaskHttpBufferLocked(it->second);
     }
@@ -566,9 +625,6 @@ void EsFileFerryPacker::removeTask(const std::string &task_id) {
         << " http_pending:" << http_pending
         << " sent_bytes:" << sent_bytes
         << " file_size:" << file_size;
-  if (_http_fetch_engine && task_generation != 0) {
-    _http_fetch_engine->cancelTask(task_id, task_generation);
-  }
   if (buffer_cv) {
     buffer_cv->notify_all();
   }
@@ -601,9 +657,7 @@ void EsFileFerryPacker::clearTasks() {
     buffer_cv->notify_all();
   }
   for (auto &thread : http_join_threads) {
-    if (thread.joinable()) {
-      thread.join();
-    }
+    joinOrDetachIfSelf(thread);
   }
   if (should_schedule_http) {
     maybeStartPendingHttpFetches();
@@ -625,12 +679,21 @@ bool EsFileFerryPacker::onBootstrapTimer() {
 }
 
 bool EsFileFerryPacker::onPaceTimer() {
-  std::lock_guard<std::mutex> lock(_mtx);
-  if (_packet_runtime.packet_thread_exit) {
-    return false;
+  bool should_try_start_http = false;
+  {
+    std::lock_guard<std::mutex> lock(_mtx);
+    if (_packet_runtime.packet_thread_exit) {
+      return false;
+    }
+    if (!_task_registry.tasks.empty() && _packet_runtime.callback) {
+      _packet_runtime.packet_sem.post();
+    }
+    should_try_start_http =
+        !_packet_runtime.downstream_congested &&
+        !_http_runtime.pending_fetches.empty();
   }
-  if (!_task_registry.tasks.empty() && _packet_runtime.callback) {
-    _packet_runtime.packet_sem.post();
+  if (should_try_start_http) {
+    maybeStartPendingHttpFetches();
   }
   return true;
 }
@@ -686,9 +749,7 @@ void EsFileFerryPacker::packetThreadLoop() {
       _http_fetch_engine->reapCompleted(http_join_threads);
     }
     for (auto &thread : http_join_threads) {
-      if (thread.joinable()) {
-        thread.join();
-      }
+      joinOrDetachIfSelf(thread);
     }
   };
   while (true) {
@@ -1263,6 +1324,11 @@ EsFileFerryPacker::collectHttpFetchLaunchesLocked() {
     if (!task.http.source || !task.http.queued || task.http.active) {
       continue;
     }
+    if (task.http.retry_not_before != std::chrono::steady_clock::time_point{} &&
+        now < task.http.retry_not_before) {
+      deferred.emplace_back(item);
+      continue;
+    }
     const auto normal_active_fetches =
         _http_runtime.active_fetches > granted_active_fetches
             ? _http_runtime.active_fetches - granted_active_fetches
@@ -1415,6 +1481,17 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
   request.method = method;
   request.headers = headers;
   request.body = body;
+  request.should_abort = [this, task_id, generation]() {
+    std::lock_guard<std::mutex> lock(_mtx);
+    if (_packet_runtime.packet_thread_exit) {
+      return true;
+    }
+    auto it = _task_registry.tasks.find(task_id);
+    if (it == _task_registry.tasks.end()) {
+      return true;
+    }
+    return it->second.generation != generation || !it->second.http.active;
+  };
   const auto fetch_begin = std::chrono::steady_clock::now();
   request.on_chunk = [this, task_id, generation](const uint8_t *data, size_t size) {
     if (!data || size == 0) {
@@ -1645,13 +1722,49 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         }
         buffer_cv = task.http.buffer.cv;
         if (!ok) {
-          task.http.failed = true;
-          task.http.error = fetch_err.empty() ? "http fetch failed" : fetch_err;
-          clearTaskHttpBufferLocked(task);
-          final_buffered_bytes = task.http.buffer.buffered_bytes;
+          const auto effective_error =
+              fetch_err.empty() ? std::string("http fetch failed") : fetch_err;
+          const bool retryable =
+              !task.send.info_sent && task.http.received_bytes == 0 &&
+              isRetryableHttpFetchError(effective_error, response_status_code,
+                                        diagnostics) &&
+              task.http.retry_attempt < kHttpRetryMaxAttempts;
+          if (retryable) {
+            const auto delay_ms = nextHttpRetryDelayMs(task.http.retry_attempt);
+            task.http.retry_attempt++;
+            task.http.failed = false;
+            task.http.error.clear();
+            task.http.queued = true;
+            task.http.retry_not_before =
+                std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(delay_ms);
+            task.http.headers_ready = false;
+            task.http.status_code = 0;
+            task.http.received_bytes = 0;
+            task.http.size_known = false;
+            task.http.response_meta_payload.clear();
+            task.source.file_size = 0;
+            clearTaskHttpBufferLocked(task);
+            final_buffered_bytes = task.http.buffer.buffered_bytes;
+            erasePendingHttpFetchLocked(task_id, generation);
+            _http_runtime.pending_fetches.emplace_back(task_id, generation);
+            WarnL << "http fetch retry scheduled task_id:" << task_id
+                  << " generation:" << generation
+                  << " retry_attempt:" << task.http.retry_attempt
+                  << " delay_ms:" << delay_ms
+                  << " fetch_err:" << effective_error
+                  << " status:" << response_status_code;
+          } else {
+            task.http.failed = true;
+            task.http.error = effective_error;
+            clearTaskHttpBufferLocked(task);
+            final_buffered_bytes = task.http.buffer.buffered_bytes;
+          }
         } else {
           task.http.failed = false;
           task.http.error.clear();
+          task.http.retry_attempt = 0;
+          task.http.retry_not_before = std::chrono::steady_clock::time_point{};
         }
       }
       recomputeAllTaskRateProfilesLocked(false);
