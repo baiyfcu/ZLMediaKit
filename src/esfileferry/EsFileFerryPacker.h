@@ -224,6 +224,8 @@ private:
         bool fast_start_granted = false;
         bool first_chunk_emitted = false;
         uint32_t retry_attempt = 0;
+        std::chrono::steady_clock::time_point buffer_nonempty_since;
+        std::chrono::steady_clock::time_point last_chunk_emit_at;
         std::chrono::steady_clock::time_point queued_since;
         std::chrono::steady_clock::time_point active_since;
         std::chrono::steady_clock::time_point retry_not_before;
@@ -304,19 +306,16 @@ private:
     // 作用：发送端跟不上时，对单任务施加背压，避免某一路长期占满内存。
     static constexpr size_t kDefaultMaxHttpBufferBlocksPerTask = 8;
     // 单个 HTTP 任务的默认最大缓冲字节数。
-    // 推导关系：chunk_bytes * blocks_per_task。
+    // 默认取 512KB：与 EsFileGlobalOptions 保持一致，保证 0 回退路径语义一致。
     static constexpr uint64_t kDefaultMaxHttpBufferedBytesPerTask =
-        static_cast<uint64_t>(kDefaultHttpBufferChunkBytes) *
-        kDefaultMaxHttpBufferBlocksPerTask;
+        512 * 1024;
     // 视频专网默认 HTTP 拉取并发窗口。
-    // 作用：限制同时处于 HTTP 拉取态的任务数量，避免 50 路任务同时拉取放大连接、源站压力和内存。
-    // 默认取 6：适合作为 50 路以上视频/大 JSON 混合下载场景的均衡基线。
-    static constexpr size_t kDefaultHttpFetchConcurrency = 6;
+    // 作用：限制同时处于 HTTP 拉取态的任务数量，默认与 EsFileGlobalOptions 保持一致。
+    static constexpr size_t kDefaultHttpFetchConcurrency = 150;
     // 视频专网默认 HTTP 全局缓冲上限。
-    // 推导关系：单任务缓冲上限 * HTTP 并发窗口 = 4MB * 6 = 24MB。
-    // 用法：提高 HTTP 并发时通常也要同步评估该值，避免瞬时内存放大。
+    // 默认取 128MB：与 EsFileGlobalOptions 保持一致，避免 reset/构造默认值漂移。
     static constexpr uint64_t kDefaultMaxHttpBufferedBytes =
-        kDefaultMaxHttpBufferedBytesPerTask * kDefaultHttpFetchConcurrency;
+        128 * 1024 * 1024;
     // Bootstrap 发送间隔。
     // 作用：在建立传输后周期性发送引导 NAL，帮助接收端快速进入可解码态。
     static constexpr uint32_t kDefaultBootstrapIntervalMs = 2000;
@@ -324,9 +323,9 @@ private:
     static constexpr uint32_t kDefaultPaceIntervalMs = 20;
     // 视频专网默认的单轮调度发送预算。
     // 作用：限制单轮调度的总出流量，保障多路公平轮转而不是被大视频或大 JSON 长时间独占。
-    // 默认取 8MB：适合作为统一公平轮转场景下的吞吐/公平折中值。
+    // 默认取 4MB：与 EsFileGlobalOptions 保持一致。
     static constexpr uint64_t kDefaultSchedulerRoundBudgetBytes =
-        8 * 1024 * 1024;
+        4 * 1024 * 1024;
     // 单任务 HTTP 默认缓冲上限统一收敛为单一值，不再按旧业务分类拆分。
     static constexpr uint64_t kDefaultUnifiedBufferedBytes =
         kDefaultMaxHttpBufferedBytesPerTask;
@@ -426,7 +425,7 @@ private:
     bool refreshFastStartGrantLocked(TaskState &task,
                                      std::chrono::steady_clock::time_point now);
     // 标记 HTTP 任务已完成首个 FileChunk 发出
-    void markHttpFirstChunkEmitted(const std::string &task_id, uint64_t generation);
+    void markHttpChunkEmitted(const std::string &task_id, uint64_t generation);
     // 启动单个 HTTP 拉取任务
     void launchHttpFetchTask(const std::string &task_id, uint64_t generation);
 

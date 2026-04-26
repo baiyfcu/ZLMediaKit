@@ -701,6 +701,57 @@ int main() {
     File::delete_file(min_emit_file, false);
 
     packer.clearTasks();
+    clearCollectedPackets();
+    EsFileGlobalOptions idle_emit_options;
+    idle_emit_options.packet_chunk_bytes = 128 * 1024;
+    idle_emit_options.scheduler_round_budget_bytes = 128 * 1024;
+    idle_emit_options.min_emit_payload_bytes = 512 * 1024;
+    idle_emit_options.http_pull_total_rate_mbps = 1;
+    idle_emit_options.http_pull_concurrency_limit = 1;
+    packer.setGlobalOptions(idle_emit_options);
+    std::atomic<size_t> idle_emit_chunk_count{0};
+    std::atomic<int64_t> idle_emit_first_delay_ms{-1};
+    auto idle_emit_start = std::chrono::steady_clock::now();
+    auto idle_emit_collector = [&](const std::string &task_id,
+                                   std::vector<uint8_t> &&packet,
+                                   const EsFilePacketHeader &header) {
+        const auto packet_size = packet.size();
+        const auto packet_hex = packet.empty() ? std::string() : hexmem(packet.data(), 6);
+        std::lock_guard<std::mutex> lock(mtx);
+        if (task_id == EsFileFerryPacker::kBootstrapTaskId) {
+            ++bootstrap_count;
+            bootstrap_packets.emplace_back(std::move(packet));
+            assert(packet_size >= 4);
+        } else {
+            task_packets.emplace_back(std::move(packet));
+            assert(header.magic == kEsFilePacketMagic);
+        }
+        if (task_id == "http_idle_emit_task" &&
+            header.type == EsFilePacketType::FileChunk &&
+            idle_emit_chunk_count.fetch_add(1) == 0) {
+            idle_emit_first_delay_ms.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - idle_emit_start)
+                    .count());
+        }
+        DebugL << "task_id: " << task_id << ", packet size: " << packet_size
+               << ",hex:" << packet_hex;
+        cv.notify_all();
+    };
+    packer.setPacketCallback(idle_emit_collector);
+    idle_emit_start = std::chrono::steady_clock::now();
+    assert(packer.addHttpTask("http_idle_emit_task", http_base + "/test/large.mp4",
+                              "GET", {}, "", "large.mp4"));
+    const bool idle_emit_ready = waitUntil(std::chrono::milliseconds(2500), [&]() {
+        return idle_emit_chunk_count.load() >= 1;
+    }, std::chrono::milliseconds(20));
+    assert(idle_emit_ready);
+    assert(idle_emit_first_delay_ms.load() >= 0);
+    assert(idle_emit_first_delay_ms.load() < 1800);
+    packer.clearTasks();
+    packer.setPacketCallback(packet_collector);
+
+    packer.clearTasks();
     packer.setSchedulerRoundBudgetBytes(0);
     packer.setMaxHttpFetchConcurrency(0);
     packer.setGlobalOptions(EsFileGlobalOptions{});

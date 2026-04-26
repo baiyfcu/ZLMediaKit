@@ -80,6 +80,7 @@ constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
 constexpr uint32_t kHttpRetryMaxAttempts = 3;
 constexpr uint32_t kHttpRetryBaseDelayMs = 1500;
 constexpr uint32_t kHttpRetryMaxDelayMs = 8000;
+constexpr uint32_t kHttpBufferedIdleEmitProtectMs = 1000;
 
 uint64_t mbpsToBytesPerSec(uint64_t mbps) {
   return (mbps * kBitsPerMegabit) / kBitsPerByte;
@@ -975,7 +976,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           refillTokenBucket(task.control.emit_bucket);
           emit_token_quota = peekTokenBucketBytes(task.control.emit_bucket);
           min_emit_payload_bytes = _global_options.min_emit_payload_bytes;
-          if (emit_token_quota == 0) {
+          if (!task.http.source && emit_token_quota == 0) {
             break;
           }
           if (task.http.source) {
@@ -983,23 +984,39 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                 task.http.buffer.chunks.empty()) {
               no_data = true;
             } else {
+              const auto now = std::chrono::steady_clock::now();
               const auto buffered = task.http.buffer.buffered_bytes;
               const bool http_stream_finished = !task.http.queued && !task.http.active;
+              auto emit_progress_since = task.http.last_chunk_emit_at;
+              if (task.http.buffer_nonempty_since > emit_progress_since) {
+                emit_progress_since = task.http.buffer_nonempty_since;
+              }
+              const bool allow_idle_protect_emit =
+                  min_emit_payload_bytes > 0 &&
+                  emit_progress_since != std::chrono::steady_clock::time_point{} &&
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - emit_progress_since)
+                          .count() >= kHttpBufferedIdleEmitProtectMs;
               const bool allow_tail_emit =
                   http_stream_finished &&
                   min_emit_payload_bytes > 0 &&
                   buffered < min_emit_payload_bytes;
+              if (emit_token_quota == 0 && !allow_idle_protect_emit) {
+                break;
+              }
               if (min_emit_payload_bytes > 0 &&
                   emit_token_quota < min_emit_payload_bytes &&
-                  !allow_tail_emit) {
+                  !allow_tail_emit &&
+                  !allow_idle_protect_emit) {
                 break;
               }
               if (min_emit_payload_bytes > 0 &&
                   buffered < min_emit_payload_bytes &&
-                  !allow_tail_emit) {
+                  !allow_tail_emit &&
+                  !allow_idle_protect_emit) {
                 break;
               }
-              if (allow_tail_emit) {
+              if (allow_tail_emit || allow_idle_protect_emit) {
                 read_len = static_cast<size_t>(std::min<uint64_t>(
                     _global_options.packet_chunk_bytes, buffered));
               } else {
@@ -1046,6 +1063,10 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                 if (copied == 0) {
                   no_data = true;
                 } else {
+                  if (task.http.buffer.buffered_bytes == 0) {
+                    task.http.buffer_nonempty_since =
+                        std::chrono::steady_clock::time_point{};
+                  }
                   if (copied < read_len) {
                     read_len = copied;
                     packet_header.payload_len = static_cast<uint32_t>(copied);
@@ -1205,9 +1226,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
         }
         if (emitPacket(task_id, std::move(packet), packet_header)) {
           ++packet_count;
-        if (http_chunk_mode) {
-          markHttpFirstChunkEmitted(task_id, generation);
-        }
+          if (http_chunk_mode) {
+            markHttpChunkEmitted(task_id, generation);
+          }
         }
       }
 
@@ -1268,6 +1289,7 @@ void EsFileFerryPacker::clearTaskHttpBufferLocked(TaskState &task) {
   task.http.buffer.chunks.clear();
   task.http.buffer.buffered_bytes = 0;
   task.http.buffer.front_chunk_offset = 0;
+  task.http.buffer_nonempty_since = std::chrono::steady_clock::time_point{};
 }
 
 void EsFileFerryPacker::erasePendingHttpFetchLocked(const std::string &task_id,
@@ -1413,18 +1435,20 @@ bool EsFileFerryPacker::refreshFastStartGrantLocked(
   return true;
 }
 
-void EsFileFerryPacker::markHttpFirstChunkEmitted(const std::string &task_id,
-                                                  uint64_t generation) {
+void EsFileFerryPacker::markHttpChunkEmitted(const std::string &task_id,
+                                             uint64_t generation) {
   std::lock_guard<std::mutex> lock(_mtx);
   auto it = _task_registry.tasks.find(task_id);
   if (it == _task_registry.tasks.end() || it->second.generation != generation ||
-      !it->second.http.source || it->second.http.first_chunk_emitted) {
+      !it->second.http.source) {
     return;
   }
   auto &task = it->second;
+  const bool first_chunk = !task.http.first_chunk_emitted;
   task.http.first_chunk_emitted = true;
+  task.http.last_chunk_emit_at = std::chrono::steady_clock::now();
   const bool changed = refreshFastStartGrantLocked(task, std::chrono::steady_clock::now());
-  if (changed) {
+  if (first_chunk && changed) {
     recomputeAllTaskRateProfilesLocked(false);
   }
 }
@@ -1611,6 +1635,11 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           chunk->size = copy_len;
           consumeTokenBucketBytes(task.control.fetch_bucket, copy_len);
           task.http.received_bytes += copy_len;
+          if (task.http.buffer.buffered_bytes == 0 ||
+              task.http.buffer_nonempty_since ==
+                  std::chrono::steady_clock::time_point{}) {
+            task.http.buffer_nonempty_since = std::chrono::steady_clock::now();
+          }
           task.http.buffer.buffered_bytes += copy_len;
           _http_runtime.total_buffered_bytes += copy_len;
           task.http.buffer.chunks.emplace_back(std::move(chunk));
