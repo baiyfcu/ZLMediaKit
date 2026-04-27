@@ -71,16 +71,25 @@ EsFileFerryPacker::~EsFileFerryPacker() {
 }
 
 namespace {
+// 这组常量统一控制慢日志阈值、令牌等待步进以及 HTTP 重试节奏。
 constexpr int64_t kHttpBufferWaitSlowLogMs = 1000;
 constexpr int64_t kEmitPacketSlowLogMs = 1000;
 constexpr int64_t kRateLimitWaitStepMs = 20;
 constexpr bool kEnableAnnexBPayloadEscape = true;
 constexpr uint64_t kBitsPerByte = 8;
 constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
-constexpr uint32_t kHttpRetryMaxAttempts = 3;
-constexpr uint32_t kHttpRetryBaseDelayMs = 1500;
-constexpr uint32_t kHttpRetryMaxDelayMs = 8000;
+// 源站高并发时首个可服务窗口可能要等待数分钟，秒级重试会过快耗尽预算，
+// 让任务在真正有机会成功前就被判失败。
+constexpr uint32_t kHttpRetryMaxAttempts = 5;
+constexpr uint32_t kHttpRetryInitialDelayMs = 30 * 1000;
+constexpr uint32_t kHttpRetryMaxDelayMs = 4 * 60 * 1000;
+// 当 HTTP 缓冲长时间保持非空时，允许发出更小的数据块，用于打破僵持并
+// 尽快把任务缓冲排到恢复水位以下。
 constexpr uint32_t kHttpBufferedIdleEmitProtectMs = 1000;
+// 高并发下对已暂停拉流或高水位任务倾斜 emit 配额，优先排空它们的缓冲，
+// 让上游 fetch 更早恢复。
+constexpr size_t kFetchPausedEmitQuotaWeight = 4;
+constexpr size_t kHighBufferedEmitQuotaWeight = 2;
 
 uint64_t mbpsToBytesPerSec(uint64_t mbps) {
   return (mbps * kBitsPerMegabit) / kBitsPerByte;
@@ -300,10 +309,7 @@ bool isRetryableHttpFetchError(const std::string &fetch_err,
 }
 
 uint32_t nextHttpRetryDelayMs(uint32_t retry_attempt) {
-  if (retry_attempt == 0) {
-    return kHttpRetryBaseDelayMs;
-  }
-  uint64_t delay = static_cast<uint64_t>(kHttpRetryBaseDelayMs)
+  uint64_t delay = static_cast<uint64_t>(kHttpRetryInitialDelayMs)
                    << std::min<uint32_t>(retry_attempt, 3);
   delay = std::min<uint64_t>(delay, kHttpRetryMaxDelayMs);
   return static_cast<uint32_t>(delay);
@@ -471,8 +477,15 @@ void EsFileFerryPacker::maybeUpdateHttpFetchControlLocked(TaskState &task) {
 }
 
 void EsFileFerryPacker::maybeUpdateAllHttpFetchControlsLocked() {
+  bool fetch_pause_changed = false;
   for (auto &entry : _task_registry.tasks) {
+    const bool was_fetch_paused = entry.second.http.fetch_paused;
     maybeUpdateHttpFetchControlLocked(entry.second);
+    fetch_pause_changed =
+        fetch_pause_changed || (was_fetch_paused != entry.second.http.fetch_paused);
+  }
+  if (fetch_pause_changed) {
+    recomputeAllTaskRateProfilesLocked(false);
   }
 }
 
@@ -931,16 +944,50 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
     }
   }
 
-  // Data plane: all schedulable tasks enter one equal-weight fair round.
+  // Data plane: paused or near-full HTTP tasks get a larger share so their
+  // internal buffers drain quickly and fetch can resume.
   auto round_ids =
       downstream_congested ? std::vector<std::string>{}
                            : snapshotSchedulableTaskIds();
   if (!round_ids.empty() && total_payload_quota_bytes > 0) {
     round_ids = pickFairRound(round_ids);
     const auto active_count = round_ids.size();
+    std::vector<size_t> round_weights(active_count, 1);
+    uint64_t total_round_weight = 0;
+    {
+      std::lock_guard<std::mutex> lock(_mtx);
+      for (size_t i = 0; i < active_count; ++i) {
+        auto it = _task_registry.tasks.find(round_ids[i]);
+        size_t weight = 1;
+        if (it != _task_registry.tasks.end()) {
+          const auto &task = it->second;
+          if (task.http.source) {
+            if (task.http.fetch_paused) {
+              weight = kFetchPausedEmitQuotaWeight;
+            } else if (task.control.max_buffered_bytes > 0 &&
+                       task.http.buffer.buffered_bytes >=
+                           task.control.resume_buffered_bytes) {
+              weight = kHighBufferedEmitQuotaWeight;
+            }
+          }
+        }
+        round_weights[i] = weight;
+        total_round_weight += weight;
+      }
+    }
+    if (total_round_weight == 0) {
+      total_round_weight = static_cast<uint64_t>(active_count);
+    }
+    uint64_t accumulated_weight = 0;
     for (size_t i = 0; i < active_count; ++i) {
       const auto &task_id = round_ids[i];
-      uint64_t quota = computeTaskQuota(total_payload_quota_bytes, active_count, i);
+      const auto next_accumulated_weight =
+          accumulated_weight + static_cast<uint64_t>(round_weights[i]);
+      uint64_t quota =
+          (total_payload_quota_bytes * next_accumulated_weight) /
+              total_round_weight -
+          (total_payload_quota_bytes * accumulated_weight) / total_round_weight;
+      accumulated_weight = next_accumulated_weight;
       while (quota > 0) {
         uint64_t offset = 0;
         uint32_t seq = 0;
@@ -1084,6 +1131,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                   maybeUpdateAllHttpFetchControlsLocked();
                   consumeTokenBucketBytes(task.control.emit_bucket, read_len);
                   task.send.sent_bytes += read_len;
+                  touchTransferRateWindowLocked(task.actual_emit_rate,
+                                                task.send.sent_bytes,
+                                                std::chrono::steady_clock::now());
                   task.send.next_seq++;
                   quota = read_len >= quota ? 0 : quota - read_len;
                   buffer_cv = task.http.buffer.cv;
@@ -1142,6 +1192,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
                                 read_len);
                     consumeTokenBucketBytes(task.control.emit_bucket, read_len);
                     task.send.sent_bytes += read_len;
+                    touchTransferRateWindowLocked(task.actual_emit_rate,
+                                                  task.send.sent_bytes,
+                                                  std::chrono::steady_clock::now());
                     task.send.next_seq++;
                     quota = read_len >= quota ? 0 : quota - read_len;
                     can_emit_packet = true;
@@ -1221,6 +1274,9 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           }
           consumeTokenBucketBytes(task.control.emit_bucket, read_size);
           task.send.sent_bytes += read_size;
+          touchTransferRateWindowLocked(task.actual_emit_rate,
+                                        task.send.sent_bytes,
+                                        std::chrono::steady_clock::now());
           task.send.next_seq++;
           quota = read_size >= quota ? 0 : quota - read_size;
         }
@@ -1407,6 +1463,9 @@ bool EsFileFerryPacker::refreshFastStartGrantLocked(
   if (task.http.first_chunk_emitted) {
     should_release = true;
     reason = "first_chunk_emitted";
+  } else if (task.http.headers_ready) {
+    should_release = true;
+    reason = "headers_ready";
   } else if (!_packet_runtime.callback) {
     should_release = true;
     reason = "packet_callback_missing";
@@ -1635,6 +1694,9 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           chunk->size = copy_len;
           consumeTokenBucketBytes(task.control.fetch_bucket, copy_len);
           task.http.received_bytes += copy_len;
+          touchTransferRateWindowLocked(task.http.actual_download_rate,
+                                        task.http.received_bytes,
+                                        std::chrono::steady_clock::now());
           if (task.http.buffer.buffered_bytes == 0 ||
               task.http.buffer_nonempty_since ==
                   std::chrono::steady_clock::time_point{}) {
@@ -1679,33 +1741,44 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
           uint64_t content_length = 0;
           const bool has_content_length =
               tryParseContentLength(headers_in, content_length);
-          std::lock_guard<std::mutex> lock(_mtx);
-          if (_packet_runtime.packet_thread_exit) {
-            return;
+          bool fast_start_released = false;
+          {
+            std::lock_guard<std::mutex> lock(_mtx);
+            if (_packet_runtime.packet_thread_exit) {
+              return;
+            }
+            auto it = _task_registry.tasks.find(task_id);
+            if (it == _task_registry.tasks.end() || it->second.generation != generation) {
+              return;
+            }
+            auto &task = it->second;
+            refreshUnifiedTaskProfileLocked(task, false);
+            recomputeAllTaskRateProfilesLocked(false);
+            task.http.status_code = status_code;
+            task.http.response_meta_payload =
+                buildHttpResponseMetaPayload(status_code, headers_in);
+            task.http.headers_ready = true;
+            fast_start_released =
+                refreshFastStartGrantLocked(task, std::chrono::steady_clock::now());
+            if (has_content_length) {
+              task.source.file_size = content_length;
+              task.http.size_known = true;
+            }
+            InfoL << "http fetch headers task_id:" << task_id
+                  << " generation:" << generation
+                  << " status:" << status_code
+                  << " has_content_length:" << has_content_length
+                  << " content_length:" << content_length
+                  << " response_header_count:" << headers_in.size()
+                  << " url:" << source;
+            _packet_runtime.packet_sem.post();
+            if (fast_start_released) {
+              recomputeAllTaskRateProfilesLocked(false);
+            }
           }
-          auto it = _task_registry.tasks.find(task_id);
-          if (it == _task_registry.tasks.end() || it->second.generation != generation) {
-            return;
+          if (fast_start_released) {
+            maybeStartPendingHttpFetches();
           }
-          auto &task = it->second;
-          refreshUnifiedTaskProfileLocked(task, false);
-          recomputeAllTaskRateProfilesLocked(false);
-          task.http.status_code = status_code;
-          task.http.response_meta_payload =
-              buildHttpResponseMetaPayload(status_code, headers_in);
-          task.http.headers_ready = true;
-          if (has_content_length) {
-            task.source.file_size = content_length;
-            task.http.size_known = true;
-          }
-          InfoL << "http fetch headers task_id:" << task_id
-                << " generation:" << generation
-                << " status:" << status_code
-                << " has_content_length:" << has_content_length
-                << " content_length:" << content_length
-                << " response_header_count:" << headers_in.size()
-                << " url:" << source;
-          _packet_runtime.packet_sem.post();
         };
   request.on_complete =
       [this, task_id, generation, source, method, fetch_begin](
@@ -1841,6 +1914,7 @@ std::vector<EsFilePackTaskInfo> EsFileFerryPacker::getTaskInfos() const {
   std::lock_guard<std::mutex> lock(_mtx);
   std::vector<EsFilePackTaskInfo> infos;
   infos.reserve(_task_registry.tasks.size());
+  const auto now = std::chrono::steady_clock::now();
   for (const auto &it : _task_registry.tasks) {
     EsFilePackTaskInfo info;
     info.task_id = it.second.task_id;
@@ -1848,6 +1922,12 @@ std::vector<EsFilePackTaskInfo> EsFileFerryPacker::getTaskInfos() const {
     info.file_name = it.second.source.file_name;
     info.file_size = it.second.source.file_size;
     info.sent_bytes = it.second.send.sent_bytes;
+    info.actual_download_bps = getTransferRateWindowBpsLocked(
+        it.second.http.actual_download_rate, it.second.http.received_bytes, now);
+    info.actual_emit_bps = getTransferRateWindowBpsLocked(
+        it.second.actual_emit_rate, it.second.send.sent_bytes, now);
+    info.fetch_quota_bps = it.second.control.fetch_bucket.rate_bps;
+    info.emit_quota_bps = it.second.control.emit_bucket.rate_bps;
     info.next_seq = it.second.send.next_seq;
     info.info_sent = it.second.send.info_sent;
     info.completed = it.second.send.end_sent;
@@ -2100,14 +2180,15 @@ void EsFileFerryPacker::recomputeAllTaskRateProfilesLocked(bool reset_buckets) {
   size_t active_http_fetch_count = 0;
   size_t schedulable_task_count = 0;
   // Dynamic denominators:
-  // - fetch side shares total rate across currently active HTTP fetches;
+  // - fetch side shares total rate across HTTP fetches that are still allowed
+  //   to pull data from upstream;
   // - emit side shares total rate across current data-schedulable tasks.
   for (auto &item : _task_registry.tasks) {
     auto &task = item.second;
     if (task.send.end_sent) {
       continue;
     }
-    if (task.http.source && task.http.active) {
+    if (task.http.source && task.http.active && !task.http.fetch_paused) {
       ++active_http_fetch_count;
     }
     if (isTaskDataSchedulable(task)) {
@@ -2139,7 +2220,8 @@ void EsFileFerryPacker::refreshTaskRateBucketsLocked(
   const bool rate_limit_enabled = total_emit_rate_bytes_per_sec > 0;
 
   if (!task.send.end_sent && rate_limit_enabled) {
-    if (task.http.source && task.http.active && active_http_fetch_count > 0) {
+    if (task.http.source && task.http.active && !task.http.fetch_paused &&
+        active_http_fetch_count > 0) {
       fetch_rate_bps =
           total_fetch_rate_bytes_per_sec / active_http_fetch_count;
     }
@@ -2207,6 +2289,38 @@ void EsFileFerryPacker::refillTokenBucket(TokenBucket &bucket) {
   bucket.tokens =
       std::min(bucket.burst_bytes, bucket.tokens + refill_bytes);
   bucket.last_refill = now;
+}
+
+void EsFileFerryPacker::touchTransferRateWindowLocked(
+    TransferRateWindow &window, uint64_t total_bytes,
+    std::chrono::steady_clock::time_point now) {
+  window.samples.emplace_back(now, total_bytes);
+  const auto window_begin = now - std::chrono::seconds(1);
+  while (window.samples.size() > 2 && window.samples.front().first < window_begin) {
+    window.samples.pop_front();
+  }
+  if (window.samples.size() < 2) {
+    window.rate_bps = 0;
+    return;
+  }
+  const auto &first = window.samples.front();
+  const auto &last = window.samples.back();
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(last.first - first.first)
+          .count();
+  if (elapsed_ms <= 0 || last.second < first.second) {
+    window.rate_bps = 0;
+    return;
+  }
+  window.rate_bps = ((last.second - first.second) * 1000) /
+                    static_cast<uint64_t>(elapsed_ms);
+}
+
+uint64_t EsFileFerryPacker::getTransferRateWindowBpsLocked(
+    TransferRateWindow &window, uint64_t total_bytes,
+    std::chrono::steady_clock::time_point now) {
+  touchTransferRateWindowLocked(window, total_bytes, now);
+  return window.rate_bps;
 }
 
 uint64_t EsFileFerryPacker::peekTokenBucketBytes(TokenBucket &bucket) {

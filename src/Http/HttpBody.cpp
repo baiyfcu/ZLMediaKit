@@ -388,7 +388,8 @@ private:
         case EsFilePacketType::FileChunk:
         case EsFilePacketType::FileEnd: {
             auto terminal_event = event.type == EsFilePacketType::FileEnd || event.completed;
-            if (!_header_emitted) {
+            if (!_header_emitted && !_logged_chunk_before_file_info) {
+                _logged_chunk_before_file_info = true;
                 WarnL << "play channel chunk arrived before file info, task_id:" << _task_id
                       << " event_type:" << EsFilePacketTypeToString(event.type)
                       << " payload_len:" << event.payload.size()
@@ -469,12 +470,6 @@ private:
             return;
         }
         if (!_header_emitted) {
-            if (!_pending_body.empty()) {
-                WarnL << "replace play channel pending body before header, task_id:" << _task_id
-                      << " old_count:" << _pending_body.size()
-                      << " new_size:" << buf->size();
-                _pending_body.clear();
-            }
             _pending_body.emplace_back(buf);
             return;
         }
@@ -544,6 +539,7 @@ private:
     int _response_code = 200;
     HttpHeader _response_header;
     bool _header_emitted = false;
+    bool _logged_chunk_before_file_info = false;
     std::deque<Buffer::Ptr> _pending_body;
     std::atomic_bool _task_registered{false};
     std::atomic_bool _completed{false};

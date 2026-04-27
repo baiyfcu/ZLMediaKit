@@ -31,6 +31,14 @@ struct EsFilePackTaskInfo {
     uint64_t file_size = 0;
     // 已发送字节数
     uint64_t sent_bytes = 0;
+    // 最近 1 秒窗口的真实下载速度（HTTP 拉流侧）
+    uint64_t actual_download_bps = 0;
+    // 最近 1 秒窗口的真实发送速度（协议发包侧）
+    uint64_t actual_emit_bps = 0;
+    // 当前 fetch 令牌桶配额，仅用于诊断/对比
+    uint64_t fetch_quota_bps = 0;
+    // 当前 emit 令牌桶配额，仅用于诊断/对比
+    uint64_t emit_quota_bps = 0;
     // 下一个包序号
     uint32_t next_seq = 0;
     // FileInfo 是否已发送
@@ -42,10 +50,10 @@ struct EsFilePackTaskInfo {
 struct EsFileGlobalOptions {
     // 单个 FileChunk 的默认业务分片大小。
     // 取 128KB：兼顾多路并发时的平滑度与包数量。
-    size_t packet_chunk_bytes = 128 * 1024;
+    size_t packet_chunk_bytes = 64 * 1024;
     // 单轮调度的默认发送预算。
     // 该值只控制单轮调度粒度与线程占用时长，不承担总体限速语义。
-    uint64_t scheduler_round_budget_bytes = 4 * 1024 * 1024;
+    uint64_t scheduler_round_budget_bytes = 2 * 1024 * 1024;
     // FileChunk 的最小发送门限（仅对 FileChunk 生效）。
     // emit token 小于该值时延后发送，等待 token 累积；尾包可放行。
     uint64_t min_emit_payload_bytes = 32 * 1024;
@@ -57,15 +65,60 @@ struct EsFileGlobalOptions {
     uint64_t http_pull_total_buffer_limit_bytes = 128 * 1024 * 1024;
     // 单任务 HTTP 回源缓冲上限。
     // 默认保持 512KB：100 路都需保活时建议压到 512KB-1MB。
-    uint64_t http_pull_per_task_buffer_limit_bytes = 512 * 1024;
+    uint64_t http_pull_per_task_buffer_limit_bytes = 256 * 1024;
     // 当前配置名沿用 HTTP pull 语义，
     // 但一阶段重构后也作为统一发送面的总体速率上限使用。
     // 单位：Mb/s，按 1 Mbps = 1024 * 1024 bit/s 换算。
     uint64_t http_pull_total_rate_mbps = 450;
     // 为新 HTTP 任务预留的 fast-start active 槽位。
     size_t http_pull_fast_start_slot_reserve = 2;
-    // fast-start granted 的首包保护窗口。
-    uint32_t http_pull_fast_start_protection_ms = 2000;
+    // fast-start granted 的首包/首个 HTTP 响应头保护窗口。
+    // 新任务至少应推进到 headers/FileInfo 阶段，避免在高并发下过早释放。
+    uint32_t http_pull_fast_start_protection_ms = 10000;
+
+    // 获取默认配置 config_index 对应的选项 
+    // config_index: 0-3 对应 1-4 个默认配置
+    // 0: 低并发（小于100 路）
+    // 1: 中并发（150 路）
+    // 2: 高并发（300 路）
+    static EsFileGlobalOptions getDefaultOptions(int config_index = 0){
+        EsFileGlobalOptions options;
+        if(config_index == 0){
+            options.packet_chunk_bytes = 128 * 1024;
+            options.scheduler_round_budget_bytes = 4 * 1024 * 1024;
+            options.min_emit_payload_bytes = 32 * 1024;
+            options.http_pull_concurrency_limit = 120;
+            options.http_pull_total_buffer_limit_bytes = 128 * 1024 * 1024;
+            options.http_pull_per_task_buffer_limit_bytes = 512 * 1024;
+            options.http_pull_total_rate_mbps = 450;
+            options.http_pull_fast_start_slot_reserve = 2;
+            options.http_pull_fast_start_protection_ms = 10000;
+        }else if(config_index == 1){
+            options.packet_chunk_bytes = 64 * 1024;
+            options.scheduler_round_budget_bytes = 2 * 1024 * 1024;
+            options.min_emit_payload_bytes = 16 * 1024;
+            options.http_pull_concurrency_limit = 150;
+            options.http_pull_total_buffer_limit_bytes = 140 * 1024 * 1024;
+            options.http_pull_per_task_buffer_limit_bytes = 256 * 1024;
+            options.http_pull_total_rate_mbps = 450;
+            options.http_pull_fast_start_slot_reserve = 3;
+            options.http_pull_fast_start_protection_ms = 10000;
+        }else if(config_index == 2){
+            options.packet_chunk_bytes = 64 * 1024;
+            options.scheduler_round_budget_bytes = 2 * 1024 * 1024;
+            options.min_emit_payload_bytes = 16 * 1024;
+
+            options.http_pull_concurrency_limit = 200;
+            options.http_pull_total_buffer_limit_bytes = 160 * 1024 * 1024;
+            options.http_pull_per_task_buffer_limit_bytes = 256 * 1024;
+
+            options.http_pull_total_rate_mbps = 450;
+            options.http_pull_fast_start_slot_reserve = 4;
+            options.http_pull_fast_start_protection_ms = 10000;
+        }else{
+        }
+        return options;
+    }
 };
 
 class EsFileFerryPacker {
@@ -166,6 +219,38 @@ public:
         return it != _task_registry.tasks.end() ? it->second.control.emit_bucket.rate_bps : 0;
     }
 
+    bool testSetTaskFetchPaused(const std::string &task_id, bool paused) {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        if (it == _task_registry.tasks.end()) {
+            return false;
+        }
+        it->second.http.fetch_paused = paused;
+        recomputeAllTaskRateProfilesLocked(false);
+        return true;
+    }
+
+    std::vector<uint64_t> testSetTaskFetchPausedAndGetRates(
+        const std::string &task_id, bool paused,
+        const std::vector<std::string> &task_ids) {
+        std::lock_guard<std::mutex> lock(_mtx);
+        auto it = _task_registry.tasks.find(task_id);
+        if (it == _task_registry.tasks.end()) {
+            return {};
+        }
+        it->second.http.fetch_paused = paused;
+        recomputeAllTaskRateProfilesLocked(false);
+        std::vector<uint64_t> rates;
+        rates.reserve(task_ids.size());
+        for (const auto &id : task_ids) {
+            auto task_it = _task_registry.tasks.find(id);
+            rates.emplace_back(task_it != _task_registry.tasks.end()
+                                   ? task_it->second.control.fetch_bucket.rate_bps
+                                   : 0);
+        }
+        return rates;
+    }
+
 private:
     struct HttpChunkBuffer {
         explicit HttpChunkBuffer(size_t capacity) : data(capacity) {}
@@ -197,6 +282,11 @@ private:
         std::chrono::steady_clock::time_point last_refill;
     };
 
+    struct TransferRateWindow {
+        std::deque<std::pair<std::chrono::steady_clock::time_point, uint64_t>> samples;
+        uint64_t rate_bps = 0;
+    };
+
     struct TaskControlState {
         uint64_t max_buffered_bytes = 0;
         uint64_t resume_buffered_bytes = 0;
@@ -214,6 +304,7 @@ private:
         bool size_known = false;
         uint32_t status_code = 0;
         uint64_t received_bytes = 0;
+        mutable TransferRateWindow actual_download_rate;
         std::string error;
         std::string method;
         HttpHeaders request_headers;
@@ -261,6 +352,7 @@ private:
         TaskHttpRuntimeState http;
         // 任务级流控态
         TaskControlState control;
+        mutable TransferRateWindow actual_emit_rate;
     };
 
     struct TaskRegistryState {
@@ -402,6 +494,14 @@ private:
         bool reset_buckets);
     // 更新令牌桶
     static void refillTokenBucket(TokenBucket &bucket);
+    // 更新最近 1 秒窗口的真实传输速率采样
+    static void touchTransferRateWindowLocked(
+        TransferRateWindow &window, uint64_t total_bytes,
+        std::chrono::steady_clock::time_point now);
+    // 获取最近 1 秒窗口的真实传输速率
+    static uint64_t getTransferRateWindowBpsLocked(
+        TransferRateWindow &window, uint64_t total_bytes,
+        std::chrono::steady_clock::time_point now);
     // 当前令牌桶可用的字节数
     static uint64_t peekTokenBucketBytes(TokenBucket &bucket);
     // 从令牌桶消费字节数

@@ -294,12 +294,15 @@ int main() {
 
     {
         EsFileGlobalOptions defaults;
-        assert(defaults.packet_chunk_bytes == 128 * 1024);
-        assert(defaults.scheduler_round_budget_bytes == 4 * 1024 * 1024);
+        assert(defaults.packet_chunk_bytes == 64 * 1024);
+        assert(defaults.scheduler_round_budget_bytes == 2 * 1024 * 1024);
+        assert(defaults.min_emit_payload_bytes == 32 * 1024);
         assert(defaults.http_pull_concurrency_limit == 150);
         assert(defaults.http_pull_total_buffer_limit_bytes == 128 * 1024 * 1024);
-        assert(defaults.http_pull_per_task_buffer_limit_bytes == 512 * 1024);
+        assert(defaults.http_pull_per_task_buffer_limit_bytes == 256 * 1024);
         assert(defaults.http_pull_total_rate_mbps == 450);
+        assert(defaults.http_pull_fast_start_slot_reserve == 2);
+        assert(defaults.http_pull_fast_start_protection_ms == 10000);
     }
 
     std::mutex mtx;
@@ -560,6 +563,25 @@ int main() {
     assert(packer.testGetTaskFetchRateBps("share_mp4_task_2") == expected_fetch_rate);
     assert(packer.testGetTaskFetchRateBps("share_download_task") ==
            expected_fetch_rate);
+    const std::vector<std::string> shared_task_ids = {
+        "share_api_task", "share_mp4_task_1", "share_mp4_task_2",
+        "share_download_task"};
+    const uint64_t expected_unpaused_fetch_rate =
+        mbpsToBytesPerSec(shared_rate_options.http_pull_total_rate_mbps) / 3;
+    const auto paused_fetch_rates = packer.testSetTaskFetchPausedAndGetRates(
+        "share_api_task", true, shared_task_ids);
+    assert(paused_fetch_rates.size() == shared_task_ids.size());
+    assert(paused_fetch_rates[0] == 0);
+    assert(paused_fetch_rates[1] == expected_unpaused_fetch_rate);
+    assert(paused_fetch_rates[2] == expected_unpaused_fetch_rate);
+    assert(paused_fetch_rates[3] == expected_unpaused_fetch_rate);
+    const auto resumed_fetch_rates = packer.testSetTaskFetchPausedAndGetRates(
+        "share_api_task", false, shared_task_ids);
+    assert(resumed_fetch_rates.size() == shared_task_ids.size());
+    assert(resumed_fetch_rates[0] == expected_fetch_rate);
+    assert(resumed_fetch_rates[1] == expected_fetch_rate);
+    assert(resumed_fetch_rates[2] == expected_fetch_rate);
+    assert(resumed_fetch_rates[3] == expected_fetch_rate);
     const bool equal_emit_ready = waitUntil(std::chrono::milliseconds(5000), [&]() {
         std::vector<uint64_t> active_emit_rates;
         for (const auto &task_id : {"share_api_task", "share_mp4_task_1",
@@ -748,6 +770,18 @@ int main() {
     assert(idle_emit_ready);
     assert(idle_emit_first_delay_ms.load() >= 0);
     assert(idle_emit_first_delay_ms.load() < 1800);
+    const bool idle_emit_rate_visible = waitUntil(std::chrono::milliseconds(1500), [&]() {
+        auto infos = packer.getTaskInfos();
+        for (const auto &info : infos) {
+            if (info.task_id == "http_idle_emit_task" &&
+                info.actual_emit_bps > 0 &&
+                info.emit_quota_bps > 0) {
+                return true;
+            }
+        }
+        return false;
+    }, std::chrono::milliseconds(20));
+    assert(idle_emit_rate_visible);
     packer.clearTasks();
     packer.setPacketCallback(packet_collector);
 
