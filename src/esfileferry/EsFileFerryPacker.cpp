@@ -78,8 +78,9 @@ constexpr bool kEnableAnnexBPayloadEscape = true;
 constexpr uint64_t kBitsPerByte = 8;
 constexpr uint64_t kBitsPerMegabit = 1024 * 1024;
 constexpr uint32_t kHttpRetryMaxAttempts = 3;
+constexpr uint32_t kHttpPreHeaderRetryWindowMs = 15 * 60 * 1000;
 constexpr uint32_t kHttpRetryBaseDelayMs = 1500;
-constexpr uint32_t kHttpRetryMaxDelayMs = 8000;
+constexpr uint32_t kHttpRetryMaxDelayMs = 60 * 1000;
 constexpr uint32_t kHttpBufferedIdleEmitProtectMs = 1000;
 
 uint64_t mbpsToBytesPerSec(uint64_t mbps) {
@@ -304,7 +305,7 @@ uint32_t nextHttpRetryDelayMs(uint32_t retry_attempt) {
     return kHttpRetryBaseDelayMs;
   }
   uint64_t delay = static_cast<uint64_t>(kHttpRetryBaseDelayMs)
-                   << std::min<uint32_t>(retry_attempt, 3);
+                   << std::min<uint32_t>(retry_attempt, 6);
   delay = std::min<uint64_t>(delay, kHttpRetryMaxDelayMs);
   return static_cast<uint32_t>(delay);
 }
@@ -883,6 +884,7 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
       uint64_t file_size = 0;
       uint32_t next_seq = 0;
       std::vector<uint8_t> http_meta_payload;
+      std::shared_ptr<std::condition_variable> buffer_cv;
       {
         std::lock_guard<std::mutex> lock(_mtx);
         auto it = _task_registry.tasks.find(task_id);
@@ -922,7 +924,11 @@ size_t EsFileFerryPacker::processTickPackets(uint64_t total_payload_quota_bytes)
           !it->second.send.info_sent) {
         it->second.send.info_sent = true;
         it->second.send.next_seq++;
+        buffer_cv = it->second.http.buffer.cv;
         dirty = true;
+      }
+      if (buffer_cv) {
+        buffer_cv->notify_all();
       }
     }
     if (dirty) {
@@ -1540,6 +1546,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         std::unique_lock<std::mutex> lock(_mtx);
         bool waited_for_buffer = false;
         bool waited_for_rate = false;
+        bool waited_for_info = false;
         const auto wait_begin = std::chrono::steady_clock::now();
         while (true) {
           auto it = _task_registry.tasks.find(task_id);
@@ -1562,6 +1569,13 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             logChunkAbort("null_buffer_cv", task.generation,
                           task.http.buffer.buffered_bytes, true);
             return false;
+          }
+          if (!task.send.info_sent) {
+            waited_for_buffer = true;
+            waited_for_info = true;
+            buffer_cv->wait_for(
+                lock, std::chrono::milliseconds(kRateLimitWaitStepMs));
+            continue;
           }
           if (_packet_runtime.downstream_congested) {
             waited_for_buffer = true;
@@ -1655,9 +1669,13 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             auto it = _task_registry.tasks.find(task_id);
             const auto buffered_bytes =
                 it != _task_registry.tasks.end() ? it->second.http.buffer.buffered_bytes : 0;
+            const auto info_sent =
+                it != _task_registry.tasks.end() ? it->second.send.info_sent : false;
             WarnL << "http chunk buffer wait, task_id:" << task_id
                   << " wait_ms:" << wait_ms
+                  << " waited_for_info:" << waited_for_info
                   << " waited_for_rate:" << waited_for_rate
+                  << " info_sent:" << info_sent
                   << " task_buffered_bytes:" << buffered_bytes
                   << " total_buffered_bytes:" << _http_runtime.total_buffered_bytes
                   << " chunk_block_size:" << kDefaultHttpBufferChunkBytes
@@ -1753,11 +1771,22 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
         if (!ok) {
           const auto effective_error =
               fetch_err.empty() ? std::string("http fetch failed") : fetch_err;
+          const auto now = std::chrono::steady_clock::now();
+          uint64_t queued_wait_ms = 0;
+          if (task.http.queued_since != std::chrono::steady_clock::time_point{}) {
+            queued_wait_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - task.http.queued_since)
+                    .count());
+          }
+          const bool within_pre_header_retry_window =
+              queued_wait_ms < kHttpPreHeaderRetryWindowMs;
           const bool retryable =
               !task.send.info_sent && task.http.received_bytes == 0 &&
               isRetryableHttpFetchError(effective_error, response_status_code,
                                         diagnostics) &&
-              task.http.retry_attempt < kHttpRetryMaxAttempts;
+              (task.http.retry_attempt < kHttpRetryMaxAttempts ||
+               within_pre_header_retry_window);
           if (retryable) {
             const auto delay_ms = nextHttpRetryDelayMs(task.http.retry_attempt);
             task.http.retry_attempt++;
@@ -1765,7 +1794,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             task.http.error.clear();
             task.http.queued = true;
             task.http.retry_not_before =
-                std::chrono::steady_clock::now() +
+                now +
                 std::chrono::milliseconds(delay_ms);
             task.http.headers_ready = false;
             task.http.status_code = 0;
@@ -1780,6 +1809,7 @@ void EsFileFerryPacker::launchHttpFetchTask(const std::string &task_id,
             WarnL << "http fetch retry scheduled task_id:" << task_id
                   << " generation:" << generation
                   << " retry_attempt:" << task.http.retry_attempt
+                  << " queued_wait_ms:" << queued_wait_ms
                   << " delay_ms:" << delay_ms
                   << " fetch_err:" << effective_error
                   << " status:" << response_status_code;
