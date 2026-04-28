@@ -134,8 +134,10 @@ private:
     // 控制流 task_id
     static constexpr const char *kBootstrapTaskId = "__bootstrap__";
 
-    // 全局互斥锁
-    mutable std::mutex _mtx;
+    // 原始字节缓冲区互斥锁
+    mutable std::mutex _buffer_mtx;
+    // task 回调/运行态/错误信息互斥锁
+    mutable std::mutex _task_mtx;
     // 最近一次错误信息
     std::string _last_error;
     // 待解析字节缓冲区
