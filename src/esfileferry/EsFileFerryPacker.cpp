@@ -947,6 +947,9 @@ bool EsFileFerryPacker::tryEmitTaskChunk(const std::string &task_id,
 
   {
     std::lock_guard<std::mutex> lock(_mtx);
+    if (!_packet_runtime.callback) {
+      return false;
+    }
     auto it = _task_registry.tasks.find(task_id);
     if (it == _task_registry.tasks.end() || it->second.send.end_sent ||
         !isTaskDataSchedulable(it->second)) {
@@ -1173,6 +1176,9 @@ bool EsFileFerryPacker::emitFileEndPacket(const std::string &task_id) {
   TaskState end_task;
   {
     std::lock_guard<std::mutex> lock(_mtx);
+    if (!_packet_runtime.callback) {
+      return false;
+    }
     auto it = _task_registry.tasks.find(task_id);
     if (it == _task_registry.tasks.end() || !isTaskReadyToEmitEnd(it->second)) {
       return false;
@@ -1182,17 +1188,27 @@ bool EsFileFerryPacker::emitFileEndPacket(const std::string &task_id) {
     end_task.task_id = it->second.task_id;
     end_task.source.file_name = it->second.source.file_name;
     end_task.source.file_size = it->second.source.file_size;
-    it->second.send.next_seq++;
-    it->second.send.end_sent = true;
-    it->second.source.stream.reset();
-    clearTaskHttpBufferLocked(it->second);
   }
 
   auto end_header = makePacketHeader(end_task, EsFilePacketType::FileEnd,
                                      end_offset, 0, 0, end_seq,
                                      nextRelativeTimestampMs());
   auto end_packet = buildPacket(end_task, end_header, {});
-  return emitPacket(task_id, std::move(end_packet), end_header);
+  if (!emitPacket(task_id, std::move(end_packet), end_header)) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(_mtx);
+  auto it = _task_registry.tasks.find(task_id);
+  if (it == _task_registry.tasks.end() || it->second.send.end_sent ||
+      !isTaskReadyToEmitEnd(it->second)) {
+    return false;
+  }
+  it->second.send.next_seq++;
+  it->second.send.end_sent = true;
+  it->second.source.stream.reset();
+  clearTaskHttpBufferLocked(it->second);
+  return true;
 }
 
 size_t EsFileFerryPacker::processTickPackets(size_t max_packet_count) {
@@ -1918,60 +1934,66 @@ bool EsFileFerryPacker::emitPacket(
     std::lock_guard<std::mutex> lock(_mtx);
     cb = _packet_runtime.callback;
   }
-  if (cb) {
-    auto header_out = header;
-    if (task_id != kBootstrapTaskId &&
-        header_out.type == EsFilePacketType::FileInfo &&
-        encodeFileInfoPayloadBase64(packet)) {
-      header_out.flags = static_cast<uint16_t>(
-          header_out.flags | kEsFileFlagFileInfoPayloadBase64);
-      size_t prefix_size = 0;
-      if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
-                                        prefix_size)) {
-        EsFilePacketHeader tmp_header;
-        if (DecodeEsFilePacketHeader(packet.data() + prefix_size,
-                                     packet.size() - prefix_size, tmp_header)) {
-          header_out.payload_len = tmp_header.payload_len;
-          header_out.total_len = tmp_header.total_len;
-        }
+  if (!cb) {
+    WarnL << "skip ferry packet without callback, task_id:" << task_id
+          << " type:" << EsFilePacketTypeToString(header.type)
+          << " seq:" << header.seq
+          << " payload_len:" << header.payload_len;
+    return false;
+  }
+
+  auto header_out = header;
+  if (task_id != kBootstrapTaskId &&
+      header_out.type == EsFilePacketType::FileInfo &&
+      encodeFileInfoPayloadBase64(packet)) {
+    header_out.flags = static_cast<uint16_t>(
+        header_out.flags | kEsFileFlagFileInfoPayloadBase64);
+    size_t prefix_size = 0;
+    if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
+                                      prefix_size)) {
+      EsFilePacketHeader tmp_header;
+      if (DecodeEsFilePacketHeader(packet.data() + prefix_size,
+                                   packet.size() - prefix_size, tmp_header)) {
+        header_out.payload_len = tmp_header.payload_len;
+        header_out.total_len = tmp_header.total_len;
       }
     }
-    if (task_id != kBootstrapTaskId &&
-        _global_options.enable_annexb_payload_escape &&
-        maybeEscapeCarrierPacket(packet)) {
-      header_out.flags =
-          static_cast<uint16_t>(header_out.flags | kEsFileFlagPayloadEscaped);
+  }
+  if (task_id != kBootstrapTaskId &&
+      _global_options.enable_annexb_payload_escape &&
+      maybeEscapeCarrierPacket(packet)) {
+    header_out.flags =
+        static_cast<uint16_t>(header_out.flags | kEsFileFlagPayloadEscaped);
+  }
+  if (task_id != kBootstrapTaskId) {
+    size_t prefix_size = 0;
+    if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
+                                      prefix_size)) {
+      writeU16BEAt(packet, prefix_size + 10, header_out.flags);
     }
-    if (task_id != kBootstrapTaskId) {
-      size_t prefix_size = 0;
-      if (DetectEsFileCarrierPrefixSize(packet.data(), packet.size(),
-                                        prefix_size)) {
-        writeU16BEAt(packet, prefix_size + 10, header_out.flags);
-      }
-    }
-    if (header.type == EsFilePacketType::FileInfo ||
-        header.type == EsFilePacketType::FileEnd) {
-      DebugL << "emit packet callback, task_id:" << task_id
-             << " type:" << EsFilePacketTypeToString(header.type)
-             << " seq:" << header.seq
-             << " offset:" << header.data_offset
-             << " payload_len:" << header.payload_len
-             << " file_size:" << header.file_size
-             << " total_packet_size:" << packet.size();
-    }
-    const auto emit_begin = std::chrono::steady_clock::now();
-    cb(task_id, std::move(packet), header_out);
-    const auto emit_cost_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - emit_begin)
-            .count();
-    if (emit_cost_ms >= kEmitPacketSlowLogMs) {
-      WarnL << "emit packet callback slow, task_id:" << task_id
-            << " type:" << EsFilePacketTypeToString(header_out.type)
-            << " seq:" << header_out.seq
-            << " payload_len:" << header_out.payload_len
-            << " cost_ms:" << emit_cost_ms;
-    }
+  }
+  if (header.type == EsFilePacketType::FileInfo ||
+      header.type == EsFilePacketType::FileEnd) {
+    DebugL << "emit packet callback, task_id:" << task_id
+           << " type:" << EsFilePacketTypeToString(header.type)
+           << " seq:" << header.seq
+           << " offset:" << header.data_offset
+           << " payload_len:" << header.payload_len
+           << " file_size:" << header.file_size
+           << " total_packet_size:" << packet.size();
+  }
+  const auto emit_begin = std::chrono::steady_clock::now();
+  cb(task_id, std::move(packet), header_out);
+  const auto emit_cost_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - emit_begin)
+          .count();
+  if (emit_cost_ms >= kEmitPacketSlowLogMs) {
+    WarnL << "emit packet callback slow, task_id:" << task_id
+          << " type:" << EsFilePacketTypeToString(header_out.type)
+          << " seq:" << header_out.seq
+          << " payload_len:" << header_out.payload_len
+          << " cost_ms:" << emit_cost_ms;
   }
   return true;
 }
