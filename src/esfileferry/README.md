@@ -75,6 +75,96 @@ target_link_libraries(your_target PRIVATE esfileferry)
 
 当 `FileInfo.flags` 包含 `kEsFileFlagFileInfoHasHttpResponseHeaders` 时，`FileInfo.payload` 携带 HTTP 响应头元数据（用于上层回写源站状态码/响应头）。
 
+### 4.4 Payload 编码与转义机制
+
+由于协议包通过视频流（H.264/H.265 NAL 单元）承载传输，payload 中可能包含与 NAL 分隔符冲突的字节序列。因此 Packer 和 UnPacker 需要配合完成编码/转义处理。
+
+#### 4.4.1 FileInfo Base64 编码
+
+**目的**：FileInfo 的 payload 通常包含 HTTP 响应头元数据（如 `:status: 200\ncontent-type: video/mp4\n`），可能包含特殊字符或二进制数据，使用 Base64 编码确保传输安全。
+
+**处理流程**：
+
+```
+Packer 端 (emitPacket):
+    │
+    ├─► 检测包类型为 FileInfo
+    │
+    └─► encodeFileInfoPayloadBase64(packet)
+            │
+            ├─► 提取 payload 并 Base64 编码
+            ├─► 更新 header.payload_len 和 header.total_len
+            └─► 设置 kEsFileFlagFileInfoPayloadBase64 标志
+
+UnPacker 端 (decodePacketAt):
+    │
+    ├─► 检测 FileInfo + kEsFileFlagFileInfoPayloadBase64
+    │
+    └─► decodeBase64() 解码 payload
+```
+
+**相关常量**：
+
+- `kEsFileFlagFileInfoPayloadBase64 = 0x0004`
+- `kEnableFileInfoPayloadBase64 = true` (编译时常量)
+
+#### 4.4.2 FileChunk Annex B 转义
+
+**目的**：协议包通过 NAL 单元承载，NAL 分隔符为 `00 00 00 01` 或 `00 00 01`。如果 payload 中包含这些序列，会被接收端误认为是 NAL 边界，导致解析错误。因此需要对 `00 00 00` 后跟 `00/01/02/03` 的情况进行转义。
+
+**转义规则**：
+
+| 原始数据 | 转义后 |
+|---------|--------|
+| `00 00 00` | `00 00 03 00` |
+| `00 00 01` | `00 00 03 01` |
+| `00 00 02` | `00 00 03 02` |
+| `00 00 03` | `00 00 03 03` |
+
+**反转义规则**：
+
+| 转义数据 | 原始数据 |
+|---------|---------|
+| `00 00 03 XX` (XX <= 0x03) | `00 00 XX` |
+
+**处理流程**：
+
+```
+Packer 端 (emitPacket):
+    │
+    ├─► 对所有非 bootstrap 包
+    │
+    └─► maybeEscapeCarrierPacket(packet)
+            │
+            ├─► needsAnnexBEscape() 检测是否需要转义
+            │       │
+            │       └─► 扫描 payload 中是否存在 00 00 00/01/02/03
+            │
+            └─► escapeAnnexBPayload() 执行转义
+                    │
+                    └─► 设置 kEsFileFlagPayloadEscaped 标志
+
+UnPacker 端 (decodePacketAt):
+    │
+    ├─► 检测 kEsFileFlagPayloadEscaped 标志
+    │
+    └─► 反转义：扫描 00 00 03 并跳过 03 字节
+```
+
+**相关常量**：
+
+- `kEsFileFlagPayloadEscaped = 0x0002`
+- `kEnableAnnexBPayloadEscape = true` (编译时常量)
+
+#### 4.4.3 完整性检查表
+
+| 功能 | Packer 端 | UnPacker 端 | 状态 |
+|------|-----------|-------------|------|
+| FileInfo Base64 编码 | ✅ `encodeFileInfoPayloadBase64()` | ✅ `decodeBase64()` | 完整 |
+| FileChunk Annex B 转义 | ✅ `escapeAnnexBPayload()` | ✅ 反转义逻辑 | 完整 |
+| 标志位同步 | ✅ 写入 header.flags | ✅ 读取 header.flags | 完整 |
+| header 字段更新 | ✅ payload_len, total_len | ✅ 正确处理 | 完整 |
+
 ## 5. 发送侧集成（EsFileFerryPacker）
 
 ### 5.1 典型流程
