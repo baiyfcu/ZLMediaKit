@@ -670,7 +670,7 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
         return nullptr;
     }
 
-     LARGE_INTEGER FileSize; 
+     LARGE_INTEGER FileSize;
      GetFileSizeEx(hfile, &FileSize); //GetFileSize函数的拓展，可用于获取大于4G的文件大小
      file_size = FileSize.QuadPart;
 
@@ -686,7 +686,7 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
 
     if (addr_ == nullptr) {
         mmap_close(hfile, hmapping, addr_);
-		WarnL << "MapViewOfFile() " << file_path << " failed:";
+        WarnL << "MapViewOfFile() " << file_path << " failed:";
         return nullptr;
     }
 
@@ -717,8 +717,15 @@ static std::shared_ptr<char> getSharedMmap(const string &file_path, int64_t &fil
 }
 
 HttpFileBody::HttpFileBody(const string &file_path, bool use_mmap) {
+
+    // 判断是否为目录，避免对目录进行mmap操作，导致程序崩溃。
+    if (File::is_dir(file_path)) {
+        _read_to = -1;
+        return;
+    }
+
     if (use_mmap ) {
-        _map_addr = getSharedMmap(file_path, _read_to);       
+        _map_addr = getSharedMmap(file_path, _read_to);
     }
 
     if (!_map_addr && _read_to != -1) {
@@ -812,7 +819,7 @@ Buffer::Ptr HttpFileBody::readData(size_t size) {
             // Data is read
             ret->setSize(iRead);
             _file_offset += iRead;
-            return std::move(ret);
+            return ret;
         }
         // 读取文件异常，文件真实长度小于声明长度  [AUTO-TRANSLATED:89d09f9b]
         // File reading exception, the actual length of the file is less than the declared length
@@ -1276,7 +1283,7 @@ string HttpMultiFormBody::multiFormBodyPrefix(const HttpArgs &args, const string
          << "file"
          << "\"; filename=\"" << fileName << "\"\r\n";
     body << "Content-Type: application/octet-stream\r\n\r\n";
-    return std::move(body);
+    return body;
 }
 
 HttpBufferBody::HttpBufferBody(Buffer::Ptr buffer) {
@@ -1291,4 +1298,55 @@ Buffer::Ptr HttpBufferBody::readData(size_t size) {
     return Buffer::Ptr(std::move(_buffer));
 }
 
-} // namespace mediakit
+// ─────────────────────────────────────────────────────────────────────────────
+// HttpFileStorage — write-only body backed by a file on disk
+// ─────────────────────────────────────────────────────────────────────────────
+
+HttpFileStorage::HttpFileStorage(std::string file_path) {
+    _fp = fopen(file_path.data(), "wb");
+    if (!_fp) {
+        throw std::runtime_error("HttpFileStorage: failed to open file: " + file_path + ", err: " + toolkit::get_uv_errmsg());
+    }
+    _path = std::move(file_path);
+}
+
+HttpFileStorage::~HttpFileStorage() {
+    if (_fp) {
+        fflush(_fp);
+        fclose(_fp);
+        _fp = nullptr;
+    }
+    if (_written != _content_size || !_written) {
+        // 删除不完整的文件
+        File::delete_file(_path);
+    }
+}
+
+void HttpFileStorage::writeData(const char *data, size_t size, uint64_t content_size) {
+    _content_size = content_size;
+    if (!_fp) {
+        throw std::runtime_error("HttpFileStorage: file not open");
+    }
+    if (size == 0) {
+        return;
+    }
+    auto written = fwrite(data, 1, size, _fp);
+    if (written != size) {
+        throw std::runtime_error("HttpFileStorage: fwrite failed, expected " + std::to_string(size) + ", got " + std::to_string(written));
+    }
+    _written += written;
+}
+
+int64_t HttpFileStorage::remainSize() {
+    return 0;
+}
+
+Buffer::Ptr HttpFileStorage::readData(size_t size) {
+    return nullptr;
+}
+
+const std::string &HttpFileStorage::filePath() const {
+    return _path;
+ }
+
+} // namespace kule

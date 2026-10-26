@@ -30,7 +30,22 @@ bool loadIniConfig(const char *ini_path) {
         ini = exePath() + ".ini";
     }
     try {
-        mINI::Instance().parseFile(ini);
+        mINI tmp;
+        tmp.parseFile(ini);
+
+        auto &ref = mINI::Instance();
+        for (auto &pr : tmp) {
+            if (ref.find(pr.first) == ref.end()) {
+                // 新增键
+                WarnL << "unknow config: " << pr.first << " = " << pr.second;
+                ref.emplace(pr);
+            } else {
+                // 更新键
+                ref[pr.first] = pr.second;
+            }
+        }
+        // 更新注释和排序
+        ref.updateFrom(tmp);
         NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
         return true;
     } catch (std::exception &) {
@@ -42,31 +57,33 @@ bool loadIniConfig(const char *ini_path) {
 // //////////广播名称///////////  [AUTO-TRANSLATED:439b2d74]
 // //////////Broadcast Name///////////
 namespace Broadcast {
-ZLMEDIAKIT_API const string kBroadcastMediaChanged = "kBroadcastMediaChanged";
-ZLMEDIAKIT_API const string kBroadcastRecordMP4 = "kBroadcastRecordMP4";
-ZLMEDIAKIT_API const string kBroadcastRecordTs = "kBroadcastRecordTs";
-ZLMEDIAKIT_API const string kBroadcastHttpRequest = "kBroadcastHttpRequest";
-ZLMEDIAKIT_API const string kBroadcastHttpAccess = "kBroadcastHttpAccess";
-ZLMEDIAKIT_API const string kBroadcastOnGetRtspRealm = "kBroadcastOnGetRtspRealm";
-ZLMEDIAKIT_API const string kBroadcastOnRtspAuth = "kBroadcastOnRtspAuth";
-ZLMEDIAKIT_API const string kBroadcastMediaPlayed = "kBroadcastMediaPlayed";
-ZLMEDIAKIT_API const string kBroadcastMediaPublish = "kBroadcastMediaPublish";
-ZLMEDIAKIT_API const string kBroadcastFlowReport = "kBroadcastFlowReport";
-ZLMEDIAKIT_API const string kBroadcastReloadConfig = "kBroadcastReloadConfig";
-ZLMEDIAKIT_API const string kBroadcastPlayChannelTaskEvent = "kBroadcastPlayChannelTaskEvent";
-ZLMEDIAKIT_API const string kBroadcastShellLogin = "kBroadcastShellLogin";
-ZLMEDIAKIT_API const string kBroadcastNotFoundStream = "kBroadcastNotFoundStream";
-ZLMEDIAKIT_API const string kBroadcastStreamNoneReader = "kBroadcastStreamNoneReader";
-ZLMEDIAKIT_API const string kBroadcastHttpBeforeAccess = "kBroadcastHttpBeforeAccess";
-ZLMEDIAKIT_API const string kBroadcastSendRtpStopped = "kBroadcastSendRtpStopped";
-ZLMEDIAKIT_API const string kBroadcastRtpServerTimeout = "kBroadcastRtpServerTimeout";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpConnecting = "kBroadcastRtcSctpConnecting";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpConnected = "kBroadcastRtcSctpConnected";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpFailed = "kBroadcastRtcSctpFailed";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpClosed = "kBroadcastRtcSctpClosed";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpSend = "kBroadcastRtcSctpSend";
-ZLMEDIAKIT_API const string kBroadcastRtcSctpReceived = "kBroadcastRtcSctpReceived";
-ZLMEDIAKIT_API const string kBroadcastPlayerCountChanged = "kBroadcastPlayerCountChanged";
+const string kBroadcastMediaChanged = "kBroadcastMediaChanged";
+const string kBroadcastRecordMP4 = "kBroadcastRecordMP4";
+const string kBroadcastRecordTs = "kBroadcastRecordTs";
+const string kBroadcastHttpRequest = "kBroadcastHttpRequest";
+const string kBroadcastBeforeHttpRequest = "kBroadcastBeforeHttpRequest";
+const string kBroadcastHttpAccess = "kBroadcastHttpAccess";
+const string kBroadcastOnGetRtspRealm = "kBroadcastOnGetRtspRealm";
+const string kBroadcastOnRtspAuth = "kBroadcastOnRtspAuth";
+const string kBroadcastMediaPlayed = "kBroadcastMediaPlayed";
+const string kBroadcastMediaPublish = "kBroadcastMediaPublish";
+const string kBroadcastFlowReport = "kBroadcastFlowReport";
+const string kBroadcastReloadConfig = "kBroadcastReloadConfig";
+const string kBroadcastShellLogin = "kBroadcastShellLogin";
+const string kBroadcastNotFoundStream = "kBroadcastNotFoundStream";
+const string kBroadcastStreamNoneReader = "kBroadcastStreamNoneReader";
+const string kBroadcastHttpBeforeAccess = "kBroadcastHttpBeforeAccess";
+const string kBroadcastSendRtpStopped = "kBroadcastSendRtpStopped";
+const string kBroadcastRtpServerTimeout = "kBroadcastRtpServerTimeout";
+const string kBroadcastRtcSctpConnecting = "kBroadcastRtcSctpConnecting";
+const string kBroadcastRtcSctpConnected = "kBroadcastRtcSctpConnected";
+const string kBroadcastRtcSctpFailed = "kBroadcastRtcSctpFailed";
+const string kBroadcastRtcSctpClosed = "kBroadcastRtcSctpClosed";
+const string kBroadcastRtcSctpSend = "kBroadcastRtcSctpSend";
+const string kBroadcastRtcSctpReceived = "kBroadcastRtcSctpReceived";
+const string kBroadcastPlayerCountChanged = "kBroadcastPlayerCountChanged";
+const string kBroadcastPlayerProxyFailed = "kBroadcastPlayerProxyFailed";
+const string kBroadcastCreateMuxer = "kBroadcastCreateMuxer";
 
 } // namespace Broadcast
 
@@ -74,21 +91,21 @@ ZLMEDIAKIT_API const string kBroadcastPlayerCountChanged = "kBroadcastPlayerCoun
 // General Configuration Items
 namespace General {
 #define GENERAL_FIELD "general."
-ZLMEDIAKIT_API const string kMediaServerId = GENERAL_FIELD "mediaServerId";
-ZLMEDIAKIT_API const string kFlowThreshold = GENERAL_FIELD "flowThreshold";
-ZLMEDIAKIT_API const string kStreamNoneReaderDelayMS = GENERAL_FIELD "streamNoneReaderDelayMS";
-ZLMEDIAKIT_API const string kMaxStreamWaitTimeMS = GENERAL_FIELD "maxStreamWaitMS";
-ZLMEDIAKIT_API const string kEnableVhost = GENERAL_FIELD "enableVhost";
-ZLMEDIAKIT_API const string kResetWhenRePlay = GENERAL_FIELD "resetWhenRePlay";
-ZLMEDIAKIT_API const string kMergeWriteMS = GENERAL_FIELD "mergeWriteMS";
-ZLMEDIAKIT_API const string kCheckNvidiaDev = GENERAL_FIELD "check_nvidia_dev";
-ZLMEDIAKIT_API const string kEnableFFmpegLog = GENERAL_FIELD "enable_ffmpeg_log";
-ZLMEDIAKIT_API const string kWaitTrackReadyMS = GENERAL_FIELD "wait_track_ready_ms";
-ZLMEDIAKIT_API const string kWaitAudioTrackDataMS = GENERAL_FIELD "wait_audio_track_data_ms";
-ZLMEDIAKIT_API const string kWaitAddTrackMS = GENERAL_FIELD "wait_add_track_ms";
-ZLMEDIAKIT_API const string kUnreadyFrameCache = GENERAL_FIELD "unready_frame_cache";
-ZLMEDIAKIT_API const string kBroadcastPlayerCountChanged = GENERAL_FIELD "broadcast_player_count_changed";
-ZLMEDIAKIT_API const string kListenIP = GENERAL_FIELD "listen_ip";
+const string kMediaServerId = GENERAL_FIELD "mediaServerId";
+const string kFlowThreshold = GENERAL_FIELD "flowThreshold";
+const string kStreamNoneReaderDelayMS = GENERAL_FIELD "streamNoneReaderDelayMS";
+const string kMaxStreamWaitTimeMS = GENERAL_FIELD "maxStreamWaitMS";
+const string kEnableVhost = GENERAL_FIELD "enableVhost";
+const string kResetWhenRePlay = GENERAL_FIELD "resetWhenRePlay";
+const string kMergeWriteMS = GENERAL_FIELD "mergeWriteMS";
+const string kCheckNvidiaDev = GENERAL_FIELD "check_nvidia_dev";
+const string kEnableFFmpegLog = GENERAL_FIELD "enable_ffmpeg_log";
+const string kWaitTrackReadyMS = GENERAL_FIELD "wait_track_ready_ms";
+const string kWaitAudioTrackDataMS = GENERAL_FIELD "wait_audio_track_data_ms";
+const string kWaitAddTrackMS = GENERAL_FIELD "wait_add_track_ms";
+const string kUnreadyFrameCache = GENERAL_FIELD "unready_frame_cache";
+const string kBroadcastPlayerCountChanged = GENERAL_FIELD "broadcast_player_count_changed";
+const string kListenIP = GENERAL_FIELD "listen_ip";
 
 static onceToken token([]() {
     mINI::Instance()[kFlowThreshold] = 1024;
@@ -111,32 +128,32 @@ static onceToken token([]() {
 } // namespace General
 
 namespace Protocol {
-ZLMEDIAKIT_API const string kModifyStamp = string(kFieldName) + "modify_stamp";
-ZLMEDIAKIT_API const string kEnableAudio = string(kFieldName) + "enable_audio";
-ZLMEDIAKIT_API const string kAddMuteAudio = string(kFieldName) + "add_mute_audio";
-ZLMEDIAKIT_API const string kAutoClose = string(kFieldName) + "auto_close";
-ZLMEDIAKIT_API const string kContinuePushMS = string(kFieldName) + "continue_push_ms";
-ZLMEDIAKIT_API const string kPacedSenderMS = string(kFieldName) + "paced_sender_ms";
+const string kModifyStamp = string(kFieldName) + "modify_stamp";
+const string kEnableAudio = string(kFieldName) + "enable_audio";
+const string kAddMuteAudio = string(kFieldName) + "add_mute_audio";
+const string kAutoClose = string(kFieldName) + "auto_close";
+const string kContinuePushMS = string(kFieldName) + "continue_push_ms";
+const string kPacedSenderMS = string(kFieldName) + "paced_sender_ms";
 
-ZLMEDIAKIT_API const string kEnableHls = string(kFieldName) + "enable_hls";
-ZLMEDIAKIT_API const string kEnableHlsFmp4 = string(kFieldName) + "enable_hls_fmp4";
-ZLMEDIAKIT_API const string kEnableMP4 = string(kFieldName) + "enable_mp4";
-ZLMEDIAKIT_API const string kEnableRtsp = string(kFieldName) + "enable_rtsp";
-ZLMEDIAKIT_API const string kEnableRtmp = string(kFieldName) + "enable_rtmp";
-ZLMEDIAKIT_API const string kEnableTS = string(kFieldName) + "enable_ts";
-ZLMEDIAKIT_API const string kEnableFMP4 = string(kFieldName) + "enable_fmp4";
+const string kEnableHls = string(kFieldName) + "enable_hls";
+const string kEnableHlsFmp4 = string(kFieldName) + "enable_hls_fmp4";
+const string kEnableMP4 = string(kFieldName) + "enable_mp4";
+const string kEnableRtsp = string(kFieldName) + "enable_rtsp";
+const string kEnableRtmp = string(kFieldName) + "enable_rtmp";
+const string kEnableTS = string(kFieldName) + "enable_ts";
+const string kEnableFMP4 = string(kFieldName) + "enable_fmp4";
 
-ZLMEDIAKIT_API const string kMP4AsPlayer = string(kFieldName) + "mp4_as_player";
-ZLMEDIAKIT_API const string kMP4MaxSecond = string(kFieldName) + "mp4_max_second";
-ZLMEDIAKIT_API const string kMP4SavePath = string(kFieldName) + "mp4_save_path";
+const string kMP4AsPlayer = string(kFieldName) + "mp4_as_player";
+const string kMP4MaxSecond = string(kFieldName) + "mp4_max_second";
+const string kMP4SavePath = string(kFieldName) + "mp4_save_path";
 
-ZLMEDIAKIT_API const string kHlsSavePath = string(kFieldName) + "hls_save_path";
+const string kHlsSavePath = string(kFieldName) + "hls_save_path";
 
-ZLMEDIAKIT_API const string kHlsDemand = string(kFieldName) + "hls_demand";
-ZLMEDIAKIT_API const string kRtspDemand = string(kFieldName) + "rtsp_demand";
-ZLMEDIAKIT_API const string kRtmpDemand = string(kFieldName) + "rtmp_demand";
-ZLMEDIAKIT_API const string kTSDemand = string(kFieldName) + "ts_demand";
-ZLMEDIAKIT_API const string kFMP4Demand = string(kFieldName) + "fmp4_demand";
+const string kHlsDemand = string(kFieldName) + "hls_demand";
+const string kRtspDemand = string(kFieldName) + "rtsp_demand";
+const string kRtmpDemand = string(kFieldName) + "rtmp_demand";
+const string kTSDemand = string(kFieldName) + "ts_demand";
+const string kFMP4Demand = string(kFieldName) + "fmp4_demand";
 
 static onceToken token([]() {
     mINI::Instance()[kModifyStamp] = (int)ProtocolOption::kModifyStampRelative;
@@ -172,22 +189,24 @@ static onceToken token([]() {
 // //////////HTTP Configuration///////////
 namespace Http {
 #define HTTP_FIELD "http."
-ZLMEDIAKIT_API const string kSendBufSize = HTTP_FIELD "sendBufSize";
-ZLMEDIAKIT_API const string kMaxReqSize = HTTP_FIELD "maxReqSize";
-ZLMEDIAKIT_API const string kKeepAliveSecond = HTTP_FIELD "keepAliveSecond";
-ZLMEDIAKIT_API const string kCharSet = HTTP_FIELD "charSet";
-ZLMEDIAKIT_API const string kRootPath = HTTP_FIELD "rootPath";
-ZLMEDIAKIT_API const string kVirtualPath = HTTP_FIELD "virtualPath";
-ZLMEDIAKIT_API const string kNotFound = HTTP_FIELD "notFound";
-ZLMEDIAKIT_API const string kDirMenu = HTTP_FIELD "dirMenu";
-ZLMEDIAKIT_API const string kForbidCacheSuffix = HTTP_FIELD "forbidCacheSuffix";
-ZLMEDIAKIT_API const string kForwardedIpHeader = HTTP_FIELD "forwarded_ip_header";
-ZLMEDIAKIT_API const string kAllowCrossDomains = HTTP_FIELD "allow_cross_domains";
-ZLMEDIAKIT_API const string kAllowIPRange = HTTP_FIELD "allow_ip_range";
+const string kSendBufSize = HTTP_FIELD "sendBufSize";
+const string kMaxReqSize = HTTP_FIELD "maxReqSize";
+const string kMaxUploadSize = HTTP_FIELD "maxUploadSize";
+const string kKeepAliveSecond = HTTP_FIELD "keepAliveSecond";
+const string kCharSet = HTTP_FIELD "charSet";
+const string kRootPath = HTTP_FIELD "rootPath";
+const string kVirtualPath = HTTP_FIELD "virtualPath";
+const string kNotFound = HTTP_FIELD "notFound";
+const string kDirMenu = HTTP_FIELD "dirMenu";
+const string kForbidCacheSuffix = HTTP_FIELD "forbidCacheSuffix";
+const string kForwardedIpHeader = HTTP_FIELD "forwarded_ip_header";
+const string kAllowOrigins = HTTP_FIELD "allow_origins";
+const string kAllowIPRange = HTTP_FIELD "allow_ip_range";
 
 static onceToken token([]() {
     mINI::Instance()[kSendBufSize] = 64 * 1024;
     mINI::Instance()[kMaxReqSize] = 4 * 10240;
+    mINI::Instance()[kMaxUploadSize] = 1024ULL * 1024 * 1024;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirMenu] = true;
     mINI::Instance()[kVirtualPath] = "";
@@ -206,7 +225,9 @@ static onceToken token([]() {
                                              << endl;
     mINI::Instance()[kForbidCacheSuffix] = "";
     mINI::Instance()[kForwardedIpHeader] = "";
-    mINI::Instance()[kAllowCrossDomains] = 1;
+    // 默认允许所有域名跨域
+    // Allow all origins by default
+    mINI::Instance()[kAllowOrigins] = "*";
     mINI::Instance()[kAllowIPRange] = "::1,127.0.0.1,172.16.0.0-172.31.255.255,192.168.0.0-192.168.255.255,10.0.0.0-10.255.255.255";
 });
 
@@ -216,7 +237,7 @@ static onceToken token([]() {
 // //////////SHELL Configuration///////////
 namespace Shell {
 #define SHELL_FIELD "shell."
-ZLMEDIAKIT_API const string kMaxReqSize = SHELL_FIELD "maxReqSize";
+const string kMaxReqSize = SHELL_FIELD "maxReqSize";
 
 static onceToken token([]() { mINI::Instance()[kMaxReqSize] = 1024; });
 } // namespace Shell
@@ -225,12 +246,12 @@ static onceToken token([]() { mINI::Instance()[kMaxReqSize] = 1024; });
 // //////////RTSP Server Configuration///////////
 namespace Rtsp {
 #define RTSP_FIELD "rtsp."
-ZLMEDIAKIT_API const string kAuthBasic = RTSP_FIELD "authBasic";
-ZLMEDIAKIT_API const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
-ZLMEDIAKIT_API const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
-ZLMEDIAKIT_API const string kDirectProxy = RTSP_FIELD "directProxy";
-ZLMEDIAKIT_API const string kLowLatency = RTSP_FIELD"lowLatency";
-ZLMEDIAKIT_API const string kRtpTransportType = RTSP_FIELD"rtpTransportType";
+const string kAuthBasic = RTSP_FIELD "authBasic";
+const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
+const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
+const string kDirectProxy = RTSP_FIELD "directProxy";
+const string kLowLatency = RTSP_FIELD"lowLatency";
+const string kRtpTransportType = RTSP_FIELD"rtpTransportType";
 
 static onceToken token([]() {
     // 默认Md5方式认证  [AUTO-TRANSLATED:6155d989]
@@ -248,16 +269,16 @@ static onceToken token([]() {
 // //////////RTMP Server Configuration///////////
 namespace Rtmp {
 #define RTMP_FIELD "rtmp."
-ZLMEDIAKIT_API const string kHandshakeSecond = RTMP_FIELD "handshakeSecond";
-ZLMEDIAKIT_API const string kKeepAliveSecond = RTMP_FIELD "keepAliveSecond";
-ZLMEDIAKIT_API const string kDirectProxy = RTMP_FIELD "directProxy";
-ZLMEDIAKIT_API const string kEnhanced = RTMP_FIELD "enhanced";
+const string kHandshakeSecond = RTMP_FIELD "handshakeSecond";
+const string kKeepAliveSecond = RTMP_FIELD "keepAliveSecond";
+const string kDirectProxy = RTMP_FIELD "directProxy";
+const string kEnhanced = RTMP_FIELD "enhanced";
 
 static onceToken token([]() {
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;
-    mINI::Instance()[kEnhanced] = 0;
+    mINI::Instance()[kEnhanced] = 1;
 });
 } // namespace Rtmp
 
@@ -265,11 +286,15 @@ static onceToken token([]() {
 // //////////RTP Configuration///////////
 namespace Rtp {
 #define RTP_FIELD "rtp."
-ZLMEDIAKIT_API const string kVideoMtuSize = RTP_FIELD "videoMtuSize";
-ZLMEDIAKIT_API const string kAudioMtuSize = RTP_FIELD "audioMtuSize";
-ZLMEDIAKIT_API const string kRtpMaxSize = RTP_FIELD "rtpMaxSize";
-ZLMEDIAKIT_API const string kLowLatency = RTP_FIELD "lowLatency";
-ZLMEDIAKIT_API const string kH264StapA = RTP_FIELD "h264_stap_a";
+// RTP打包最大MTU,公网情况下更小  [AUTO-TRANSLATED:869f5c4b]
+// Maximum RTP packet MTU, smaller for public networks
+const string kVideoMtuSize = RTP_FIELD "videoMtuSize";
+const string kAudioMtuSize = RTP_FIELD "audioMtuSize";
+// rtp包最大长度限制，单位是KB  [AUTO-TRANSLATED:aee4bffc]
+// Maximum RTP packet length limit, in KB
+const string kRtpMaxSize = RTP_FIELD "rtpMaxSize";
+const string kLowLatency = RTP_FIELD "lowLatency";
+const string kH264StapA = RTP_FIELD "h264_stap_a";
 
 static onceToken token([]() {
     mINI::Instance()[kVideoMtuSize] = 1400;
@@ -284,9 +309,15 @@ static onceToken token([]() {
 // //////////Multicast Configuration///////////
 namespace MultiCast {
 #define MULTI_FIELD "multicast."
-ZLMEDIAKIT_API const string kAddrMin = MULTI_FIELD "addrMin";
-ZLMEDIAKIT_API const string kAddrMax = MULTI_FIELD "addrMax";
-ZLMEDIAKIT_API const string kUdpTTL = MULTI_FIELD "udpTTL";
+// 组播分配起始地址  [AUTO-TRANSLATED:069db91d]
+// Multicast allocation starting address
+const string kAddrMin = MULTI_FIELD "addrMin";
+// 组播分配截止地址  [AUTO-TRANSLATED:6d3fc54c]
+// Multicast allocation ending address
+const string kAddrMax = MULTI_FIELD "addrMax";
+// 组播TTL  [AUTO-TRANSLATED:c7c5339c]
+// Multicast TTL
+const string kUdpTTL = MULTI_FIELD "udpTTL";
 
 static onceToken token([]() {
     mINI::Instance()[kAddrMin] = "239.0.0.0";
@@ -299,12 +330,12 @@ static onceToken token([]() {
 // //////////Recording Configuration///////////
 namespace Record {
 #define RECORD_FIELD "record."
-ZLMEDIAKIT_API const string kAppName = RECORD_FIELD "appName";
-ZLMEDIAKIT_API const string kSampleMS = RECORD_FIELD "sampleMS";
-ZLMEDIAKIT_API const string kFileBufSize = RECORD_FIELD "fileBufSize";
-ZLMEDIAKIT_API const string kFastStart = RECORD_FIELD "fastStart";
-ZLMEDIAKIT_API const string kFileRepeat = RECORD_FIELD "fileRepeat";
-ZLMEDIAKIT_API const string kEnableFmp4 = RECORD_FIELD "enableFmp4";
+const string kAppName = RECORD_FIELD "appName";
+const string kSampleMS = RECORD_FIELD "sampleMS";
+const string kFileBufSize = RECORD_FIELD "fileBufSize";
+const string kFastStart = RECORD_FIELD "fastStart";
+const string kFileRepeat = RECORD_FIELD "fileRepeat";
+const string kEnableFmp4 = RECORD_FIELD "enableFmp4";
 
 static onceToken token([]() {
     mINI::Instance()[kAppName] = "record";
@@ -320,15 +351,17 @@ static onceToken token([]() {
 // //////////HLS Related Configuration///////////
 namespace Hls {
 #define HLS_FIELD "hls."
-ZLMEDIAKIT_API const string kSegmentDuration = HLS_FIELD "segDur";
-ZLMEDIAKIT_API const string kSegmentNum = HLS_FIELD "segNum";
-ZLMEDIAKIT_API const string kSegmentKeep = HLS_FIELD "segKeep";
-ZLMEDIAKIT_API const string kSegmentDelay = HLS_FIELD "segDelay";
-ZLMEDIAKIT_API const string kSegmentRetain = HLS_FIELD "segRetain";
-ZLMEDIAKIT_API const string kFileBufSize = HLS_FIELD "fileBufSize";
-ZLMEDIAKIT_API const string kBroadcastRecordTs = HLS_FIELD "broadcastRecordTs";
-ZLMEDIAKIT_API const string kDeleteDelaySec = HLS_FIELD "deleteDelaySec";
-ZLMEDIAKIT_API const string kFastRegister = HLS_FIELD "fastRegister";
+const string kSegmentDuration = HLS_FIELD "segDur";
+const string kSegmentNum = HLS_FIELD "segNum";
+const string kSegmentKeep = HLS_FIELD "segKeep";
+const string kSegmentDelay = HLS_FIELD "segDelay";
+const string kSegmentRetain = HLS_FIELD "segRetain";
+const string kFileBufSize = HLS_FIELD "fileBufSize";
+const string kBroadcastRecordTs = HLS_FIELD "broadcastRecordTs";
+const string kDeleteDelaySec = HLS_FIELD "deleteDelaySec";
+const string kFastRegister = HLS_FIELD "fastRegister";
+const string kFmp4SegExt = HLS_FIELD "fmp4SegExt";
+const string kProgramDateTime = HLS_FIELD "programDateTime";
 
 static onceToken token([]() {
     mINI::Instance()[kSegmentDuration] = 2;
@@ -340,6 +373,8 @@ static onceToken token([]() {
     mINI::Instance()[kBroadcastRecordTs] = false;
     mINI::Instance()[kDeleteDelaySec] = 10;
     mINI::Instance()[kFastRegister] = false;
+    mINI::Instance()[kFmp4SegExt] = ".mp4";
+    mINI::Instance()[kProgramDateTime] = false;
 });
 } // namespace Hls
 
@@ -347,16 +382,17 @@ static onceToken token([]() {
 // //////////Rtp Proxy Related Configuration///////////
 namespace RtpProxy {
 #define RTP_PROXY_FIELD "rtp_proxy."
-ZLMEDIAKIT_API const string kDumpDir = RTP_PROXY_FIELD "dumpDir";
-ZLMEDIAKIT_API const string kTimeoutSec = RTP_PROXY_FIELD "timeoutSec";
-ZLMEDIAKIT_API const string kPortRange = RTP_PROXY_FIELD "port_range";
-ZLMEDIAKIT_API const string kH264PT = RTP_PROXY_FIELD "h264_pt";
-ZLMEDIAKIT_API const string kH265PT = RTP_PROXY_FIELD "h265_pt";
-ZLMEDIAKIT_API const string kPSPT = RTP_PROXY_FIELD "ps_pt";
-ZLMEDIAKIT_API const string kOpusPT = RTP_PROXY_FIELD "opus_pt";
-ZLMEDIAKIT_API const string kGopCache = RTP_PROXY_FIELD "gop_cache";
-ZLMEDIAKIT_API const string kRtpG711DurMs = RTP_PROXY_FIELD "rtp_g711_dur_ms";
-ZLMEDIAKIT_API const string kUdpRecvSocketBuffer = RTP_PROXY_FIELD "udp_recv_socket_buffer";
+const string kDumpDir = RTP_PROXY_FIELD "dumpDir";
+const string kTimeoutSec = RTP_PROXY_FIELD "timeoutSec";
+const string kPortRange = RTP_PROXY_FIELD "port_range";
+const string kH264PT = RTP_PROXY_FIELD "h264_pt";
+const string kH265PT = RTP_PROXY_FIELD "h265_pt";
+const string kPSPT = RTP_PROXY_FIELD "ps_pt";
+const string kOpusPT = RTP_PROXY_FIELD "opus_pt";
+const string kGopCache = RTP_PROXY_FIELD "gop_cache";
+const string kRtpG711DurMs = RTP_PROXY_FIELD "rtp_g711_dur_ms";
+const string kUdpRecvSocketBuffer = RTP_PROXY_FIELD "udp_recv_socket_buffer";
+const std::string kMergeFrame = RTP_PROXY_FIELD "merge_frame";
 
 static onceToken token([]() {
     mINI::Instance()[kDumpDir] = "";
@@ -369,26 +405,29 @@ static onceToken token([]() {
     mINI::Instance()[kGopCache] = 1;
     mINI::Instance()[kRtpG711DurMs] = 100;
     mINI::Instance()[kUdpRecvSocketBuffer] = 4 * 1024 * 1024;
+    mINI::Instance()[kMergeFrame] = 1;
 });
 } // namespace RtpProxy
 
 namespace Client {
-ZLMEDIAKIT_API const string kNetAdapter = "net_adapter";
-ZLMEDIAKIT_API const string kRtpType = "rtp_type";
-ZLMEDIAKIT_API const string kRtspBeatType = "rtsp_beat_type";
-ZLMEDIAKIT_API const string kRtspUser = "rtsp_user";
-ZLMEDIAKIT_API const string kRtspPwd = "rtsp_pwd";
-ZLMEDIAKIT_API const string kRtspPwdIsMD5 = "rtsp_pwd_md5";
-ZLMEDIAKIT_API const string kTimeoutMS = "protocol_timeout_ms";
-ZLMEDIAKIT_API const string kMediaTimeoutMS = "media_timeout_ms";
-ZLMEDIAKIT_API const string kBeatIntervalMS = "beat_interval_ms";
-ZLMEDIAKIT_API const string kBenchmarkMode = "benchmark_mode";
-ZLMEDIAKIT_API const string kWaitTrackReady = "wait_track_ready";
-ZLMEDIAKIT_API const string kPlayTrack = "play_track";
-ZLMEDIAKIT_API const string kProxyUrl = "proxy_url";
-ZLMEDIAKIT_API const string kRtspSpeed = "rtsp_speed";
-ZLMEDIAKIT_API const string kLatency = "latency";
-ZLMEDIAKIT_API const string kPassPhrase = "passPhrase";
+const string kNetAdapter = "net_adapter";
+const string kRtpType = "rtp_type";
+const string kRtspBeatType = "rtsp_beat_type";
+const string kRtspUser = "rtsp_user";
+const string kRtspPwd = "rtsp_pwd";
+const string kRtspPwdIsMD5 = "rtsp_pwd_md5";
+const string kTimeoutMS = "protocol_timeout_ms";
+const string kMediaTimeoutMS = "media_timeout_ms";
+const string kBeatIntervalMS = "beat_interval_ms";
+const string kBenchmarkMode = "benchmark_mode";
+const string kWaitTrackReady = "wait_track_ready";
+const string kPlayTrack = "play_track";
+const string kProxyUrl = "proxy_url";
+const string kRtspSpeed = "rtsp_speed";
+const string kSchema = "schema";
+const string kLatency = "latency";
+const string kPassPhrase = "passPhrase";
+const string kCustomHeader = "custom_header";
 } // namespace Client
 
 } // namespace mediakit

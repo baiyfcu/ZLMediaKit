@@ -1,4 +1,4 @@
-﻿# MIT License
+# MIT License
 #
 # Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
 #
@@ -21,7 +21,7 @@
 # SOFTWARE.
 #
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.1.3...3.26)
 
 # 加载自定义模块
 # Load custom modules
@@ -32,16 +32,19 @@ project(ZLMediaKit LANGUAGES C CXX)
 # 使能 C++11
 # Enable C++11
 set(CMAKE_CXX_STANDARD 11)
+# -fPIC
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ENABLE_API "Enable C API SDK" ON)
 option(ENABLE_API_STATIC_LIB "Enable mk_api static lib" OFF)
 option(ENABLE_ASAN "Enable Address Sanitize" OFF)
-option(ENABLE_CXX_API "Enable C++ API SDK as shared library" OFF)
+option(ENABLE_CXX_API "Enable C++ API SDK" OFF)
 option(ENABLE_FAAC "Enable FAAC" OFF)
 option(ENABLE_FFMPEG "Enable FFmpeg" OFF)
 option(ENABLE_HLS "Enable HLS" ON)
 option(ENABLE_JEMALLOC_STATIC "Enable static linking to the jemalloc library" OFF)
 option(ENABLE_JEMALLOC_DUMP "Enable jemalloc to dump malloc statistics" OFF)
+option(ENABLE_TCMALLOC "Enable linking to the tcmalloc library" OFF)
 option(ENABLE_MEM_DEBUG "Enable Memory Debug" OFF)
 option(ENABLE_MP4 "Enable MP4" ON)
 option(ENABLE_MSVC_MT "Enable MSVC Mt/Mtd lib" ON)
@@ -52,15 +55,18 @@ option(ENABLE_RTPPROXY "Enable RTPPROXY" ON)
 option(ENABLE_SERVER "Enable Server" ON)
 option(ENABLE_SERVER_LIB "Enable server as android static library" OFF)
 option(ENABLE_SRT "Enable SRT" ON)
-option(ENABLE_FERRY "Enable Ferry" ON)
 option(ENABLE_TESTS "Enable Tests" ON)
 option(ENABLE_SCTP "Enable SCTP" ON)
 option(ENABLE_WEBRTC "Enable WebRTC" ON)
 option(ENABLE_X264 "Enable x264" OFF)
-option(ENABLE_WEPOLL "Enable wepoll" ON)
 option(ENABLE_VIDEOSTACK "Enable video stack" OFF)
 option(DISABLE_REPORT "Disable report to report.zlmediakit.com" OFF)
 option(USE_SOLUTION_FOLDERS "Enable solution dir supported" ON)
+option(ENABLE_OBJCOPY "Enable use objcopy to generate debug info file" ON)
+# 编译静态库
+option(BUILD_SHARED_LIBS "Build shared instead of static" OFF)
+option(ENABLE_PYTHON "Enable python plugin" OFF)
+
 ##############################################################################
 # 设置socket默认缓冲区大小为256k.如果设置为0则不设置socket的默认缓冲区大小,使用系统内核默认值(设置为0仅对linux有效)
 # Set the default buffer size of the socket to 256k. If set to 0, the default buffer size of the socket will not be set,
@@ -79,16 +85,6 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE INTERNAL "" FORCE)
 
 # TODO: include 当前目录会导致 server 编译出错, 待排除
 set(CMAKE_INCLUDE_CURRENT_DIR OFF)
-
-if(ENABLE_CXX_API)
-  add_definitions(-DENABLE_CXX_API)
-  if(WIN32 AND ENABLE_MSVC_MT)
-    set(ENABLE_MSVC_MT OFF)
-    message(WARNING "Windows下C++ API SDK只支持md/mdd,ENABLE_MSVC_MT set off")
-  endif()
-else()
-  add_definitions(-DMediaKit_STATIC)
-endif ()
 
 # 安装路径
 # Install path
@@ -112,20 +108,11 @@ else()
 endif()
 
 string(TOLOWER ${CMAKE_SYSTEM_NAME} SYSTEM_NAME_LOWER)
+# 设置输出目录, 包括 bin, lib 以及其他文件
+# Windows 也不再区分 32/64
 # Set the output directory, including bin, lib and other files
 # Windows no longer distinguishes 32/64
-#if (CMAKE_SYSTEM_NAME MATCHES "Windows")
-#    if (CMAKE_CL_64)
-#        set(CL_32_64 64)
-#    else ()
-#        set(CL_32_64 32)
-#    endif ()
-#    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}${CL_32_64})
-#    set(OUTPUT_FULL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}${CL_32_64}/${CMAKE_BUILD_TYPE})
-#    message(WARNING "++++++++++++++:${OUTPUT_DIR}/${CMAKE_BUILD_TYPE}")
-#else()
-    set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
-#endif()
+set(OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/release/${SYSTEM_NAME_LOWER}/${CMAKE_BUILD_TYPE})
 set(LIBRARY_OUTPUT_PATH    ${OUTPUT_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${OUTPUT_DIR})
 
@@ -218,7 +205,10 @@ if(UNIX)
   if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
     set(COMPILE_OPTIONS_DEFAULT ${COMPILE_OPTIONS_DEFAULT} "-g3")
   else()
-    set(COMPILE_OPTIONS_DEFAULT ${COMPILE_OPTIONS_DEFAULT} "-g0")
+    find_program(OBJCOPY_FOUND objcopy)
+    if (OBJCOPY_FOUND AND ENABLE_OBJCOPY)
+      set(COMPILE_OPTIONS_DEFAULT ${COMPILE_OPTIONS_DEFAULT} "-g3")
+    endif()
   endif()
 elseif(WIN32)
   if (MSVC)
@@ -230,12 +220,6 @@ elseif(WIN32)
     # disable Windows logo
    string(REPLACE "/nologo" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
    set(CMAKE_STATIC_LINKER_FLAGS "")
-  endif()
-endif()
-
-if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
-  if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
-    include_directories(SYSTEM "/opt/homebrew/include")
   endif()
 endif()
 
@@ -268,14 +252,13 @@ endif()
 # Multiple modules depend on ffmpeg related libraries, unified search
 if(ENABLE_FFMPEG)
   find_package(PkgConfig QUIET)
-  # 查找 ffmpeg/libutil 是否安装
-  # find ffmpeg/libutil installed
+  # 查找 ffmpeg/libavutil 是否安装
+  # find ffmpeg/libavutil installed
   if(PKG_CONFIG_FOUND)
     pkg_check_modules(AVUTIL QUIET IMPORTED_TARGET libavutil)
     if(AVUTIL_FOUND)
       update_cached_list(MK_LINK_LIBRARIES PkgConfig::AVUTIL)
       message(STATUS "found library: ${AVUTIL_LIBRARIES}")
-      message(STATUS "*MK_LINK_LIBRARIES: ${MK_LINK_LIBRARIES}")
     endif()
   endif()
 
@@ -309,8 +292,19 @@ if(ENABLE_FFMPEG)
     endif()
   endif()
 
-  # 查找 ffmpeg/libutil 是否安装
-  # find ffmpeg/libutil installed
+  # 查找 ffmpeg/libavfilter 是否安装
+  # find ffmpeg/libavfilter installed
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(AVFILTER QUIET IMPORTED_TARGET libavfilter)
+    if(AVFILTER_FOUND)
+      update_cached_list(MK_LINK_LIBRARIES PkgConfig::AVFILTER)
+      message(STATUS "found library: ${AVFILTER_LIBRARIES}")
+    endif()
+  endif()
+
+
+  # 查找 ffmpeg/libavutil 是否安装
+  # find ffmpeg/libavutil installed
   if(NOT AVUTIL_FOUND)
     find_package(AVUTIL QUIET)
     if(AVUTIL_FOUND)
@@ -353,7 +347,16 @@ if(ENABLE_FFMPEG)
     endif()
   endif()
 
-  if(AVUTIL_FOUND AND AVCODEC_FOUND AND SWSCALE_FOUND AND SWRESAMPLE_FOUND)
+  if(NOT AVFILTER_FOUND)
+    find_package(AVFILTER QUIET)
+    if(AVFILTER_FOUND)
+      include_directories(SYSTEM ${AVFILTER_INCLUDE_DIR})
+      update_cached_list(MK_LINK_LIBRARIES ${AVFILTER_LIBRARIES})
+      message(STATUS "found library: ${AVFILTER_LIBRARIES}")
+    endif()
+  endif()
+
+  if(AVUTIL_FOUND AND AVCODEC_FOUND AND SWSCALE_FOUND AND SWRESAMPLE_FOUND AND AVFILTER_FOUND)
     update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FFMPEG)
     update_cached_list(MK_LINK_LIBRARIES ${CMAKE_DL_LIBS})
   else()
@@ -361,8 +364,6 @@ if(ENABLE_FFMPEG)
     message(WARNING "ffmpeg related functions not found")
   endif()
 endif()
-
-message(STATUS "MK_LINK_LIBRARIES: ${MK_LINK_LIBRARIES} ENABLE_FFMPEG:${ENABLE_FFMPEG}")
 
 if(ENABLE_MEM_DEBUG)
   update_cached_list(MK_LINK_LIBRARIES
@@ -416,12 +417,27 @@ if(JEMALLOC_FOUND)
   endif ()
 endif()
 
+# 查找 tcmalloc 是否安装
+# find tcmalloc installed
+if(ENABLE_TCMALLOC)
+  find_package(TCMALLOC QUIET)
+  if(TCMALLOC_FOUND)
+    message(STATUS "Link with tcmalloc library: ${TCMALLOC_LIBRARIES}")
+    update_cached_list(MK_LINK_LIBRARIES ${TCMALLOC_LIBRARIES})
+  else()
+    set(ENABLE_TCMALLOC OFF)
+    message(WARNING "tcmalloc 相关功能未找到")
+  endif()
+endif()
+
 # 查找 openssl 是否安装
 # find openssl installed
 find_package(OpenSSL QUIET)
 if(OPENSSL_FOUND AND ENABLE_OPENSSL)
   message(STATUS "found library: ${OPENSSL_LIBRARIES}, ENABLE_OPENSSL defined")
-  include_directories(${OPENSSL_INCLUDE_DIR})
+  # BEFORE: 保证 openssl 头文件与实际链接的 openssl 库来自同一套安装(优先于 homebrew 的 include),
+  # 否则会出现头文件一套、链接库另一套导致的编译错误/运行期不一致。
+  include_directories(BEFORE SYSTEM ${OPENSSL_INCLUDE_DIR})
   update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_OPENSSL)
   update_cached_list(MK_LINK_LIBRARIES ${OPENSSL_LIBRARIES})
   if(CMAKE_SYSTEM_NAME MATCHES "Linux" AND OPENSSL_USE_STATIC_LIBS)
@@ -470,7 +486,7 @@ if(FAAC_FOUND AND ENABLE_FAAC)
 endif()
 
 if(WIN32)
-  update_cached_list(MK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi advapi32 kernel32)
+  update_cached_list(MK_LINK_LIBRARIES WS2_32 Iphlpapi shlwapi)
 elseif(ANDROID)
   update_cached_list(MK_LINK_LIBRARIES log)
 elseif(NOT ANDROID OR IOS)
@@ -490,12 +506,17 @@ if(ENABLE_SRT)
   update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_SRT)
 endif()
 
-if(ENABLE_FERRY)
-  find_package(CURL REQUIRED)
-  update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_FERRY)
-  update_cached_list(MK_LINK_LIBRARIES CURL::libcurl)
+if(ENABLE_WEBRTC)
+  # 查找 srtp 是否安装
+  find_package(SRTP QUIET)
+  if(SRTP_FOUND AND ENABLE_OPENSSL)
+    message(STATUS "found library: ${SRTP_LIBRARIES}, ENABLE_WEBRTC defined")
+    update_cached_list(MK_COMPILE_DEFINITIONS ENABLE_WEBRTC)
+  else()
+    set(ENABLE_WEBRTC OFF)
+    message(WARNING "srtp 未找到, WebRTC 相关功能打开失败")
+  endif()
 endif()
-
 # ----------------------------------------------------------------------------
 # Solution folders:
 # ----------------------------------------------------------------------------
@@ -520,8 +541,16 @@ endif()
 
 ##############################################################################
 
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
+    # 此处仅作为兜底: 让 homebrew 安装的第三方库头文件也能被找到。
+    # 必须放在所有 find_package 之后, 否则 homebrew 的头文件会覆盖 vcpkg/pkg-config 找到的同名库头文件,
+    # 导致头文件与实际链接的库版本不一致(例如 homebrew 的 openssl 头文件 vs vcpkg 的 openssl 库)。
+    include_directories(SYSTEM "/opt/homebrew/include")
+  endif()
+endif()
+
 # for version.h
-update_cached_list(ZLM_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # for assert.h
@@ -529,15 +558,13 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/3rdpart)
 
 add_subdirectory(3rdpart)
 
-if(ENABLE_SRT)
-  add_subdirectory(srt)
-endif()
-message(STATUS "MK_LINK_LIBRARIES1: ${MK_LINK_LIBRARIES}")
 add_subdirectory(src)
 
 add_subdirectory(ext-codec)
 
-
+if(ENABLE_SRT)
+  add_subdirectory(srt)
+endif()
 
 if(ENABLE_WEBRTC)
   add_subdirectory(webrtc)
@@ -545,10 +572,6 @@ endif()
 
 if(ENABLE_API)
   add_subdirectory(api)
-endif()
-
-if(ENABLE_TESTS AND ENABLE_FERRY AND ESFILEFERRY_BUILD_TESTS)
-  add_subdirectory(src/esfileferry/tests)
 endif()
 
 ##############################################################################
@@ -578,6 +601,7 @@ endif()
 #cpp测试demo程序
 #cpp test demo program
 if (ENABLE_TESTS)
+  enable_testing()
   add_subdirectory(tests)
 endif ()
 
@@ -587,6 +611,9 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/www" DESTINATION ${EXECUTABLE_OUTPUT_PATH
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/config.ini" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/default.pem" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 
+if (ENABLE_FFMPEG)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/DejaVuSans.ttf" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+endif ()
 # 拷贝VideoStack 无视频流时默认填充的背景图片
 # Copy the default background image used by VideoStack when there is no video stream
 if (ENABLE_VIDEOSTACK AND ENABLE_FFMPEG AND ENABLE_X264)

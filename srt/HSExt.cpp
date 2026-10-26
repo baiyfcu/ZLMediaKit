@@ -34,7 +34,7 @@ std::string HSExtMessage::dump() {
     _StrPrinter printer;
     printer << "srt version : " << std::hex << srt_version << " srt flag : " << std::hex << srt_flag
             << " recv_tsbpd_delay=" << recv_tsbpd_delay << " send_tsbpd_delay = " << send_tsbpd_delay;
-    return std::move(printer);
+    return printer;
 }
 
 bool HSExtMessage::storeToData() {
@@ -63,15 +63,19 @@ bool HSExtStreamID::loadFromData(uint8_t *buf, size_t len) {
     if (buf == NULL || len < 4) {
         return false;
     }
-    _data = BufferRaw::create();
-    _data->assign((char *)buf, len);
+    // Read the header without copying the (potentially attacker-inflated) declared length.
+    // The caller must guarantee that `len` bytes are actually readable from `buf`.
+    extension_type = loadUint16(buf);
+    extension_length = loadUint16(buf + 2);
 
-    HSExt::loadHeader();
-
-    size_t content_size = extension_length * 4;
+    const size_t content_size = static_cast<size_t>(extension_length) * 4;
     if (len < content_size + 4) {
         return false;
     }
+
+    _data = BufferRaw::create();
+    _data->assign((char *)buf, content_size + 4);
+
     streamid.clear();
     char *ptr = _data->data() + 4;
 
@@ -83,8 +87,10 @@ bool HSExtStreamID::loadFromData(uint8_t *buf, size_t len) {
         ptr += 4;
     }
     char zero = 0x00;
-    if (streamid.back() == zero) {
-        streamid.erase(streamid.find_first_of(zero), streamid.size());
+    if (!streamid.empty()) {
+        if (streamid.back() == zero) {
+            streamid.erase(streamid.find_first_of(zero), streamid.size());
+        }
     }
     return true;
 }
@@ -128,7 +134,7 @@ bool HSExtStreamID::storeToData() {
 std::string HSExtStreamID::dump() {
     _StrPrinter printer;
     printer << " streamid : " << streamid;
-    return std::move(printer);
+    return printer;
 }
 
 size_t KeyMaterial::getContentSize() {
@@ -261,7 +267,7 @@ std::string KeyMaterial::dump() {
         << " sLen : " << _slen 
         << " salt : " << std::hex << _salt.data()
         << " kLen : " << _klen;
-    return std::move(printer);
+    return printer;
 }
 
 bool HSExtKeyMaterial::loadFromData(uint8_t *buf, size_t len) {

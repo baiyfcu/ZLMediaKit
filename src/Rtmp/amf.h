@@ -88,7 +88,26 @@ public:
     template<typename TP>
     TP load();
 
+    // 剩余未解析的字节数
+    // Number of bytes not yet parsed
+    size_t remain() const;
+
+    friend std::string amfLoadLeadingString(AMFDecoder &dec);
+
 private:
+    class DepthGuard {
+    public:
+        explicit DepthGuard(AMFDecoder &decoder);
+        ~DepthGuard();
+        DepthGuard(const DepthGuard &) = delete;
+        DepthGuard(DepthGuard &&) = delete;
+        DepthGuard &operator=(const DepthGuard &) = delete;
+        DepthGuard &operator=(DepthGuard &&) = delete;
+
+    private:
+        AMFDecoder &_decoder;
+    };
+
     std::string load_key();
     AMFValue load_object();
     AMFValue load_ecma();
@@ -100,7 +119,18 @@ private:
     const toolkit::BufferLikeString &buf;
     size_t pos;
     int version;
+    size_t depth = 0;
+
+    static constexpr size_t kMaxDepth = 64;
 };
+
+// 加载首个字符串, 自动跳过最多两个前置AMF0 number; 若没有数据则返回空字符串
+// 兼容某些不规范的推流器(例如宇视摄像机在@setDataFrame前插入多余的AMF number)
+// Load the first string, skipping at most two leading AMF0 numbers; returns an
+// empty string if the stream contains no data.
+// Compatible with some non-standard publishers (e.g. Uniview cameras insert
+// redundant AMF numbers before @setDataFrame)
+std::string amfLoadLeadingString(AMFDecoder &dec);
 
 class AMFEncoder {
 public:

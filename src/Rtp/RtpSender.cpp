@@ -35,16 +35,17 @@ RtpSender::~RtpSender() {
     }
 }
 
-void RtpSender::startSend(const MediaSourceEvent::SendRtpArgs &args, const function<void(uint16_t local_port, const SockException &ex)> &cb){
+void RtpSender::startSend(const MediaSourceEvent &sender, const MediaSourceEvent::SendRtpArgs &args, const function<void(uint16_t local_port, const SockException &ex)> &cb){
+    _muxer = sender.getMuxer(MediaSource::NullMediaSource());
     _args = args;
     if (!_interface) {
         // 重连时不重新创建对象  [AUTO-TRANSLATED:b788cd5d]
         // Do not recreate the object when reconnecting
         auto lam = [this](std::shared_ptr<List<Buffer::Ptr>> list) { onFlushRtpList(std::move(list)); };
         switch (args.data_type) {
-            case MediaSourceEvent::SendRtpArgs::kRtpPS: _interface = std::make_shared<RtpCachePS>(lam, atoi(args.ssrc.data()), args.pt, true); break;
-            case MediaSourceEvent::SendRtpArgs::kRtpTS: _interface = std::make_shared<RtpCachePS>(lam, atoi(args.ssrc.data()), args.pt, false); break;
-            case MediaSourceEvent::SendRtpArgs::kRtpES: _interface = std::make_shared<RtpCacheRaw>(lam, atoi(args.ssrc.data()), args.pt, args.only_audio); break;
+            case MediaSourceEvent::SendRtpArgs::kRtpPS: _interface = std::make_shared<RtpCachePS>(lam, stoll(args.ssrc), args.pt, true); break;
+            case MediaSourceEvent::SendRtpArgs::kRtpTS: _interface = std::make_shared<RtpCachePS>(lam, stoll(args.ssrc), args.pt, false); break;
+            case MediaSourceEvent::SendRtpArgs::kRtpES: _interface = std::make_shared<RtpCacheRaw>(lam, stoll(args.ssrc), args.pt, args.only_audio); break;
             default: CHECK(0, "invalid rtp type: " + to_string(args.data_type)); break;
         }
     }
@@ -313,6 +314,21 @@ void RtpSender::onConnect() {
             }
         });
     }
+
+    if (_socket_rtp->sockType() == toolkit::SockNum::Sock_TCP) {
+        // rtp 端口是TCP端口，转发速度应当控制收流速度
+        std::weak_ptr<RtpSender> weak_self = shared_from_this();
+        _socket_rtp->setOnFlush([weak_self]() {
+            if (auto strong_self = weak_self.lock()) {
+                auto muxer = strong_self->_muxer.lock();
+                if (muxer) {
+                    muxer->pause(MediaSource::NullMediaSource(), false);
+                }
+                return true;
+            }
+            return false;
+        });
+    }
     InfoL << "startSend rtp success: " << _socket_rtp->get_peer_ip() << ":" << _socket_rtp->get_peer_port() << ", data_type: " << _args.data_type << ", con_type: " << _args.con_type;
 }
 
@@ -368,7 +384,7 @@ void RtpSender::onSendRtpUdp(const toolkit::Buffer::Ptr &buf, bool check) {
         _rtcp_send_ticker.resetTime();
         // rtcp ssrc为rtp ssrc + 1  [AUTO-TRANSLATED:318fada3]
         // rtcp ssrc is rtp ssrc + 1
-        auto sr = _rtcp_context->createRtcpSR(atoi(_args.ssrc.data()) + 1);
+        auto sr = _rtcp_context->createRtcpSR(stoll(_args.ssrc) + 1);
         // send sender report rtcp
         _socket_rtcp->send(sr);
     }
@@ -433,6 +449,12 @@ void RtpSender::onFlushRtpList(shared_ptr<List<Buffer::Ptr>> rtp_list) {
                 }
                 default: CHECK(0);
             }
+            if (_args.enable_origin_recv_limit && _socket_rtp->sockType() == toolkit::SockNum::Sock_TCP && _socket_rtp->isSocketBusy()) {
+                auto muxer = _muxer.lock();
+                if (muxer) {
+                    muxer->pause(MediaSource::NullMediaSource(), true);
+                }
+            }
         });
     };
     if (_args.con_type != MediaSourceEvent::SendRtpArgs::kVoiceTalk) {
@@ -455,6 +477,50 @@ void RtpSender::onErr(const SockException &ex) {
 
 void RtpSender::setOnClose(std::function<void(const toolkit::SockException &ex)> on_close) {
     _on_close = std::move(on_close);
+}
+
+size_t RtpSender::getSendSpeed() const {
+    size_t ret = 0;
+    if (_socket_rtp) {
+        ret += _socket_rtp->getSendSpeed();
+    }
+    if (_socket_rtcp) {
+        ret += _socket_rtcp->getSendSpeed();
+    }
+    return ret;
+}
+
+size_t RtpSender::getRecvSpeed() const {
+    size_t ret = 0;
+    if (_socket_rtp) {
+        ret += _socket_rtp->getRecvSpeed();
+    }
+    if (_socket_rtcp) {
+        ret += _socket_rtcp->getRecvSpeed();
+    }
+    return ret;
+}
+
+size_t RtpSender::getRecvTotalBytes() const {
+    size_t ret = 0;
+    if (_socket_rtp) {
+        ret += _socket_rtp->getRecvTotalBytes();
+    }
+    if (_socket_rtcp) {
+        ret += _socket_rtcp->getRecvTotalBytes();
+    }
+    return ret;
+}
+
+size_t RtpSender::getSendTotalBytes() const {
+    size_t ret = 0;
+    if (_socket_rtp) {
+        ret += _socket_rtp->getSendTotalBytes();
+    }
+    if (_socket_rtcp) {
+        ret += _socket_rtcp->getSendTotalBytes();
+    }
+    return ret;
 }
 
 } // namespace mediakit

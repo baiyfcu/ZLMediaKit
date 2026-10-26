@@ -25,6 +25,7 @@ void TsPlayer::play(const string &url) {
     setHeaderTimeout((*this)[Client::kTimeoutMS].as<int>());
     setBodyTimeout((*this)[Client::kMediaTimeoutMS].as<int>());
     setMethod("GET");
+    addCustomHeader(this);
     sendRequest(url);
 }
 
@@ -33,18 +34,21 @@ void TsPlayer::teardown() {
 }
 
 void TsPlayer::onResponseCompleted(const SockException &ex) {
+    auto complete_ex = ex;
     if (!_play_result) {
         _play_result = true;
         if (!ex && responseBodyTotalSize() == 0 && responseBodySize() == 0) {
             //if the server does not return any data, it is considered a failure
-            onShutdown(ex);
+            complete_ex = translateShutdownException(ex);
+            onShutdown(complete_ex);
         } else {
             onPlayResult(ex);
         }
     } else {
-        onShutdown(ex);
+        complete_ex = translateShutdownException(ex);
+        onShutdown(complete_ex);
     }
-    HttpTSPlayer::onResponseCompleted(ex);
+    HttpTSPlayer::onResponseCompleted(complete_ex);
 }
 
 void TsPlayer::onResponseBody(const char *buf, size_t size) {
@@ -57,4 +61,11 @@ void TsPlayer::onResponseBody(const char *buf, size_t size) {
     }
 }
 
+size_t TsPlayer::getRecvSpeed() {
+    return TcpClient::getRecvSpeed();
+}
+
+size_t TsPlayer::getRecvTotalBytes() {
+    return TcpClient::getRecvTotalBytes();
+}
 } // namespace mediakit

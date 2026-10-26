@@ -107,7 +107,8 @@ bool H264RtpDecoder::unpackStapA(const RtpPacket::Ptr &rtp, const uint8_t *ptr, 
     auto end = ptr + size;
     while (ptr + 2 < end) {
         uint16_t len = (ptr[0] << 8) | ptr[1];
-        if (!len || ptr + len > end) {
+        // 需将随后的 2 字节 NALU size 字段计入边界，否则 ptr += 2 后读取 len 字节可越界最多 2 字节
+        if (!len || ptr + 2 + len > end) {
             WarnL << "invalid rtp data size:" << len << ",rtp:\r\n" << rtp->dumpString();
             _gop_dropped = true;
             break;
@@ -122,6 +123,11 @@ bool H264RtpDecoder::unpackStapA(const RtpPacket::Ptr &rtp, const uint8_t *ptr, 
 }
 
 bool H264RtpDecoder::mergeFu(const RtpPacket::Ptr &rtp, const uint8_t *ptr, ssize_t size, uint64_t stamp, uint16_t seq){
+    if (size < 2) {
+        WarnL << "FU-A payload too small: " << size << ", rtp:\r\n" << rtp->dumpString();
+        _gop_dropped = true;
+        return false;
+    }
     auto nal_suffix = *ptr & (~0x1F);
     FuFlags *fu = (FuFlags *) (ptr + 1);
     if (fu->start_bit) {
@@ -185,6 +191,11 @@ bool H264RtpDecoder::decodeRtp(const RtpPacket::Ptr &rtp) {
 
         case 28:
             // 28 FU-A Fragmentation unit
+            if (payload_size < 2) {
+                WarnL << "FU-A payload too small: " << payload_size << ", rtp:\r\n" << rtp->dumpString();
+                _gop_dropped = true;
+                return false;
+            }
             return mergeFu(rtp, frame, payload_size, stamp, seq);
 
         default: {

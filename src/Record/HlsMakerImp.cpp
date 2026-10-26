@@ -31,13 +31,17 @@ std::string getDelayPath(const std::string& originalPath) {
 }
 
 HlsMakerImp::HlsMakerImp(bool is_fmp4, const string &m3u8_file, const string &params, uint32_t bufSize, float seg_duration,
-                         uint32_t seg_number, bool seg_keep) : HlsMaker(is_fmp4, seg_duration, seg_number, seg_keep) {
+                         uint32_t seg_number, bool seg_keep, const string &fmp4_seg_ext) : HlsMaker(is_fmp4, seg_duration, seg_number, seg_keep) {
     _poller = EventPollerPool::Instance().getPoller();
     _path_prefix = m3u8_file.substr(0, m3u8_file.rfind('/'));
     _path_hls = m3u8_file;
     _path_hls_delay = getDelayPath(m3u8_file);
+    _path_dash = _path_prefix + "/dash.mpd";
     _params = params;
     _buf_size = bufSize;
+    // 兼容用户配置不带前导点的扩展名(例如 m4s)，统一补上"."  [AUTO-TRANSLATED]
+    // Tolerate user-configured extensions without a leading dot (e.g. m4s) by normalizing to ".m4s"
+    _fmp4_seg_ext = fmp4_seg_ext.empty() ? ".mp4" : (fmp4_seg_ext.front() == '.' ? fmp4_seg_ext : "." + fmp4_seg_ext);
     _file_buf.reset(new char[bufSize], [](char *ptr) { delete[] ptr; });
     _info.folder = _path_prefix;
 }
@@ -79,6 +83,7 @@ void HlsMakerImp::clearCache(bool immediately, bool eof) {
         std::list<std::string> lst;
         lst.emplace_back(_path_hls);
         lst.emplace_back(_path_hls_delay);
+        lst.emplace_back(_path_dash);
         if (!_path_init.empty() && eof) {
             lst.emplace_back(_path_init);
         }
@@ -115,10 +120,9 @@ void HlsMakerImp::saveCurrentDir() {
     }
 
     int maxSegmentDuration = 0;
-    for (auto &tp : _current_dir_seg_list) {
-        int dur = std::get<0>(tp);
-        if (dur > maxSegmentDuration) {
-            maxSegmentDuration = dur;
+    for (auto &info : _current_dir_seg_list) {
+        if (info.duration_ms > maxSegmentDuration) {
+            maxSegmentDuration = info.duration_ms;
         }
     }
 
@@ -133,8 +137,13 @@ void HlsMakerImp::saveCurrentDir() {
         index_str += "#EXT-X-MAP:URI=\"init.mp4\"\n";
     }
     stringstream ss;
-    for (auto &t : _current_dir_seg_list) {
-        ss << "#EXTINF:" << std::setprecision(3) << std::get<0>(t) / 1000.0 << ",\n" << std::get<1>(t) << "\n";
+    for (auto &info : _current_dir_seg_list) {
+        // EXT-X-PROGRAM-DATE-TIME只作用于其后的第一个切片，故每个切片前都写入
+        // EXT-X-PROGRAM-DATE-TIME applies only to the next segment, so write it before each one
+        if (!info.program_date_time.empty()) {
+            ss << "#EXT-X-PROGRAM-DATE-TIME:" << info.program_date_time << "\n";
+        }
+        ss << "#EXTINF:" << std::setprecision(3) << info.duration_ms / 1000.0 << ",\n" << info.name << "\n";
     }
     _current_dir_seg_list.clear();
     index_str += ss.str();
@@ -151,7 +160,7 @@ string HlsMakerImp::onOpenSegment(uint64_t index) {
         auto strHour = getTimeStr("%H");
         auto strTime = getTimeStr("%M-%S");
         auto current_dir = strDate + "/" + strHour + "/";
-        segment_name = current_dir + strTime + "_" + std::to_string(index) + (isFmp4() ? ".mp4" : ".ts");
+        segment_name = current_dir + strTime + "_" + std::to_string(index) + (isFmp4() ? _fmp4_seg_ext : ".ts");
         segment_path = _path_prefix + "/" + segment_name;
         if (isLive()) {
             // 直播
@@ -213,6 +222,12 @@ void HlsMakerImp::onWriteSegment(const char *data, size_t len) {
     if (_media_src) {
         _media_src->onSegmentSize(len);
     }
+    // 由数据流驱动: 在两次分片flush之间用新的availabilityStartTime/publishTime
+    // 重新发布mpd(仅内存), 使播放器的live edge随媒体速率前进而不是阶跃
+    // Driven by the data flow: republish the mpd (memory only) with a fresh
+    // availabilityStartTime/publishTime between two segment flushes, so the
+    // player's live edge keeps advancing at the media rate instead of stepping
+    refreshDashFile();
 }
 
 void HlsMakerImp::onWriteHls(const std::string &data, bool include_delay) {
@@ -229,12 +244,28 @@ void HlsMakerImp::onWriteHls(const std::string &data, bool include_delay) {
     }
 }
 
+void HlsMakerImp::onWriteDash(const std::string &data, bool memory_only) {
+    if (!memory_only) {
+        auto mpd = makeFile(_path_dash);
+        if (mpd) {
+            fwrite(data.data(), data.size(), 1, mpd.get());
+            mpd.reset();
+        } else {
+            WarnL << "Create dash mpd file failed," << _path_dash << " " << get_uv_errmsg();
+        }
+    }
+    if (_media_src) {
+        _media_src->setMpdFile(data);
+    }
+}
+
 void HlsMakerImp::onFlushLastSegment(uint64_t duration_ms) {
     // 关闭并flush文件到磁盘  [AUTO-TRANSLATED:9798ec4d]
     // Close and flush file to disk
     _file = nullptr;
     if (!isLive() || isKeep()) {
-        _current_dir_seg_list.emplace_back(duration_ms, _info.file_name.erase(0, _current_dir.size()));
+        _current_dir_seg_list.push_back(
+            HlsSegmentInfo { (int)duration_ms, _info.file_name.erase(0, _current_dir.size()), getLastSegmentDateTime() });
     }
     GET_CONFIG(bool, broadcastRecordTs, Hls::kBroadcastRecordTs);
     if (broadcastRecordTs) {

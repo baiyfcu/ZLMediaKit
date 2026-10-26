@@ -13,18 +13,25 @@
 
 #include <unordered_set>
 #include "TsPlayer.h"
+#include "Util/TimeTicker.h"
 
 namespace mediakit {
+
+class HlsDemuxer;
 
 class TsPlayerImp : public PlayerImp<TsPlayer, PlayerBase>, private TrackListener {
 public:
     using Ptr = std::shared_ptr<TsPlayerImp>;
 
     TsPlayerImp(const toolkit::EventPoller::Ptr &poller = nullptr);
+    size_t getRecvSpeed() override;
+    size_t getRecvTotalBytes() override;
 
 private:
     //// TsPlayer override////
     void onResponseBody(const char *buf, size_t size) override;
+    void onManager() override;
+    toolkit::SockException translateShutdownException(const toolkit::SockException &ex) override;
 
 private:
     //// PlayerBase override////
@@ -38,8 +45,14 @@ private:
     void addTrackCompleted() override;
 
 private:
+    void resetMediaFrameCheck();
+
+private:
     DecoderImp::Ptr _decoder;
-    MediaSinkInterface::Ptr _demuxer;
+    std::shared_ptr<HlsDemuxer> _demuxer;
+    uint64_t _last_input_frame_count = 0;
+    toolkit::Ticker _media_frame_ticker;
+    bool _media_frame_timeout = false;
 };
 
 }//namespace mediakit

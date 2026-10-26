@@ -8,7 +8,6 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <algorithm>
 #include <iomanip>
 #include "Util/File.h"
 #include "Common/Parser.h"
@@ -17,8 +16,8 @@
 #include "Record/HlsMediaSource.h"
 #include "HttpConst.h"
 #include "HttpSession.h"
-#include "Util/util.h"
 #include "HttpFileManager.h"
+#include "Common/MultiMediaSourceMuxer.h"
 
 using namespace std;
 using namespace toolkit;
@@ -33,54 +32,12 @@ namespace mediakit {
 // If the player does not access the cookie within 60 seconds, the hls playback authentication will be triggered again.
 static size_t kHlsCookieSecond = 60;
 static size_t kFindSrcIntervalSecond = 3;
-static const string kCookieName = "ZL_COOKIE";
-static const string kVirtualPathCookieName = "X_VPATH";
-
-static string firstPathSegment(const string &path) {
-    auto start = path.find_first_not_of('/');
-    if (start == string::npos) {
-        return string();
-    }
-    auto end = path.find('/', start);
-    auto eq = path.find('=', start);
-    if (eq != string::npos && (end == string::npos || eq < end)) {
-        // Support "/key=http://..." style: virtual key is the left side of '='.
-        return path.substr(start, eq - start);
-    }
-    return path.substr(start, end == string::npos ? string::npos : end - start);
-}
-static StrCaseMap parseVirtualPathMapSafe(const string &str) {
-    auto trim_copy = [](string value) {
-        auto is_space = [](unsigned char c) {
-            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-        };
-        while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) {
-            value.erase(value.begin());
-        }
-        while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) {
-            value.pop_back();
-        }
-        if (value.size() >= 2 &&
-            ((value.front() == '"' && value.back() == '"') ||
-             (value.front() == '\'' && value.back() == '\''))) {
-            value = value.substr(1, value.size() - 2);
-        }
-        return value;
-    };
-    StrCaseMap out;
-    auto parsed = Parser::parseArgs(str, ";", ",");
-    for (auto &item : parsed) {
-        auto key = trim_copy(item.first);
-        auto val = trim_copy(item.second);
-        if (key.empty() || val.empty()) {
-            continue;
-        }
-        out.emplace(std::move(key), std::move(val));
-    }
-    return out;
-}
+static const string kCookieName = "ZLM_HTTP_COOKIE";
 static const string kHlsSuffix = "/hls.m3u8";
 static const string kHlsFMP4Suffix = "/hls.fmp4.m3u8";
+// dash mpd请求后缀, 它与hls.fmp4共用同一个MediaSource与fmp4分片
+// Dash mpd request suffix, it shares the hls.fmp4 media source and fmp4 segments
+static const string kDashSuffix = "/dash.mpd";
 
 struct HttpCookieAttachment {
     // 是否已经查找到过MediaSource  [AUTO-TRANSLATED:b5b9922a]
@@ -95,6 +52,8 @@ struct HttpCookieAttachment {
     // 上次鉴权失败信息,为空则上次鉴权成功  [AUTO-TRANSLATED:de48b753]
     // Last authentication failure information, empty means last authentication succeeded
     string _err_msg;
+    // hls文件根目录
+    string _hls_root_path;
     // hls直播时的其他一些信息，主要用于播放器个数计数以及流量计数  [AUTO-TRANSLATED:790de53a]
     // Other information during hls live broadcast, mainly used for player count and traffic count
     HlsCookieData::Ptr _hls_data;
@@ -154,159 +113,6 @@ private:
     uint8_t _bytes[16];
 };
 
-string buildMediaInfoUrl(Parser &parser) {
-    string request_url = parser.url();
-    if (request_url.empty()) {
-        request_url = "/";
-    } else if (request_url[0] != '/') {
-        request_url.insert(request_url.begin(), '/');
-    }
-    auto trim_copy = [](string value) {
-        auto is_space = [](unsigned char c) {
-            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-        };
-        while (!value.empty() && is_space(static_cast<unsigned char>(value.front()))) {
-            value.erase(value.begin());
-        }
-        while (!value.empty() && is_space(static_cast<unsigned char>(value.back()))) {
-            value.pop_back();
-        }
-        return value;
-    };
-    auto first_token = [&](const string &value) {
-        auto token = value.substr(0, value.find(','));
-        return trim_copy(token);
-    };
-    auto normalize_prefix = [](string prefix) {
-        if (prefix.empty()) {
-            return string("/");
-        }
-        if (prefix[0] != '/') {
-            prefix.insert(prefix.begin(), '/');
-        }
-        while (prefix.size() > 1 && prefix.back() == '/') {
-            prefix.pop_back();
-        }
-        return prefix;
-    };
-    auto should_apply_cookie_fallback = [&](const string &path, const string &first_seg) {
-        static const unordered_set<string> kStaticSegs = {
-            "static", "assets", "js", "css", "img", "fonts", "media", "favicon.ico"
-        };
-        if (kStaticSegs.find(first_seg) != kStaticSegs.end()) {
-            return true;
-        }
-        auto slash_pos = path.find_last_of('/');
-        auto file_name = slash_pos == string::npos ? path : path.substr(slash_pos + 1);
-        return file_name.find('.') != string::npos;
-    };
-    auto get_cookie_value = [&](const string &cookie_header, const string &key) {
-        if (cookie_header.empty() || key.empty()) {
-            return string();
-        }
-        auto items = split(cookie_header, ";");
-        for (auto &item : items) {
-            auto kv = split(item, "=");
-            if (kv.size() < 2) {
-                continue;
-            }
-            auto k = trim_copy(kv[0]);
-            if (k != key) {
-                continue;
-            }
-            auto v = trim_copy(kv[1]);
-            if (!v.empty()) {
-                return v;
-            }
-        }
-        return string();
-    };
-    GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-        return parseVirtualPathMapSafe(str);
-    });
-    const auto request_seg = firstPathSegment(request_url);
-    const bool request_has_virtual_prefix =
-        !request_seg.empty() && virtualPathMap.find(request_seg) != virtualPathMap.end();
-
-    string referer = trim_copy(parser["Referer"]);
-    string referer_scheme;
-    string referer_host;
-    string referer_path = "/";
-    if (!referer.empty()) {
-        auto scheme_pos = referer.find("://");
-        if (scheme_pos != string::npos) {
-            referer_scheme = referer.substr(0, scheme_pos);
-            const auto host_begin = scheme_pos + 3;
-            const auto host_end = referer.find_first_of("/?#", host_begin);
-            referer_host = host_end == string::npos ? referer.substr(host_begin)
-                                                    : referer.substr(host_begin, host_end - host_begin);
-            if (host_end != string::npos) {
-                const auto path_end = referer.find_first_of("?#", host_end);
-                referer_path = referer.substr(
-                    host_end, path_end == string::npos ? string::npos : path_end - host_end);
-            }
-            referer_path = normalize_prefix(referer_path);
-        }
-    }
-
-    auto forwarded_proto = first_token(parser["X-Forwarded-Proto"]);
-    std::transform(forwarded_proto.begin(), forwarded_proto.end(), forwarded_proto.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (forwarded_proto != "http" && forwarded_proto != "https") {
-        forwarded_proto.clear();
-    }
-    auto forwarded_host = first_token(parser["X-Forwarded-Host"]);
-    auto forwarded_prefix = normalize_prefix(first_token(parser["X-Forwarded-Prefix"]));
-    if (first_token(parser["X-Forwarded-Prefix"]).empty()) {
-        forwarded_prefix.clear();
-    }
-
-    string resolved_prefix = forwarded_prefix;
-    if (!request_has_virtual_prefix && !resolved_prefix.empty()) {
-        auto seg = firstPathSegment(resolved_prefix);
-        if (seg.empty() || virtualPathMap.find(seg) == virtualPathMap.end()) {
-            resolved_prefix.clear();
-        }
-    }
-    if (!request_has_virtual_prefix &&
-        resolved_prefix.empty() &&
-        should_apply_cookie_fallback(request_url, request_seg)) {
-        if (request_seg.empty() || virtualPathMap.find(request_seg) == virtualPathMap.end()) {
-            auto vpath_cookie = get_cookie_value(parser["Cookie"], kVirtualPathCookieName);
-            if (!vpath_cookie.empty() && virtualPathMap.find(vpath_cookie) != virtualPathMap.end()) {
-                resolved_prefix = "/" + vpath_cookie;
-            }
-        }
-    }
-    if (!request_has_virtual_prefix && resolved_prefix.empty() && referer_path != "/") {
-        auto referer_seg = firstPathSegment(referer_path);
-        if (!referer_seg.empty() && virtualPathMap.find(referer_seg) != virtualPathMap.end()) {
-            resolved_prefix = "/" + referer_seg;
-        }
-    }
-    if (!resolved_prefix.empty() && resolved_prefix != "/") {
-        auto with_slash = resolved_prefix + "/";
-        if (!start_with(request_url, with_slash) && request_url != resolved_prefix) {
-            request_url = resolved_prefix + request_url;
-        }
-    }
-
-    string final_scheme = !forwarded_proto.empty() ? forwarded_proto : referer_scheme;
-    if (final_scheme.empty()) {
-        final_scheme = "http";
-    }
-    string final_host = !forwarded_host.empty() ? forwarded_host : referer_host;
-    if (final_host.empty()) {
-        final_host = trim_copy(parser["Host"]);
-    }
-    if (final_host.empty()) {
-        final_host = "localhost";
-        WarnL << "buildMediaInfoUrl host empty, fallback localhost, url:" << request_url;
-    }
-    parser.setUrl(request_url);
-    return final_scheme + "://" + final_host + request_url;
-}
-
 }
 
 static UInt128 get_ip_uint64(const std::string &ip) {
@@ -364,7 +170,7 @@ bool HttpFileManager::isIPAllowed(const std::string &ip) {
 
 static std::string fileName(const string &dir, const string &path) {
     auto ret = path.substr(dir.size());
-    if (!ret.empty() && ret.front() == '/') {
+    if (ret.front() == '/') {
         ret.erase(0, 1);
     }
     return ret;
@@ -445,7 +251,7 @@ static bool makeFolderMenu(const string &httpPath, const string &strFullPath, st
     // If it is the root directory, add a virtual directory
     if (httpPath == "/") {
         GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-            return parseVirtualPathMapSafe(str);
+            return Parser::parseArgs(str, ";", ",");
         });
         for (auto &pr : virtualPathMap) {
             file_map.emplace(pr.first, std::make_pair(string("virtual path: ") + pr.first, File::absolutePath("", pr.second)));
@@ -515,36 +321,9 @@ static bool emitHlsPlayed(const Parser &parser, const MediaInfo &media_info, con
     return flag;
 }
 
-class SockInfoImp : public SockInfo{
-public:
-    using Ptr = std::shared_ptr<SockInfoImp>;
-
-    string get_local_ip() override {
-        return _local_ip;
-    }
-
-    uint16_t get_local_port() override {
-        return _local_port;
-    }
-
-    string get_peer_ip() override {
-        return _peer_ip;
-    }
-
-    uint16_t get_peer_port() override {
-        return _peer_port;
-    }
-
-    string getIdentifier() const override {
-        return _identifier;
-    }
-
-    string _local_ip;
-    string _peer_ip;
-    string _identifier;
-    uint16_t _local_port;
-    uint16_t _peer_port;
-};
+static std::string getUidFromParams(const string &params) {
+    return params;
+}
 
 /**
  * 判断http客户端是否有权限访问文件的逻辑步骤
@@ -562,11 +341,11 @@ public:
  
  * [AUTO-TRANSLATED:dfc0f15f]
  */
-static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo &media_info, bool is_dir,
+static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo &media_info, const std::string &file_path, bool is_dir,
                           const function<void(const string &err_msg, const HttpServerCookie::Ptr &cookie)> &callback) {
     // 获取用户唯一id  [AUTO-TRANSLATED:5b1cf4bf]
     // Get the user's unique id
-    auto uid = parser.params();
+    auto uid = getUidFromParams(parser.params());
     auto path = parser.url();
 
     // 先根据http头中的cookie字段获取cookie  [AUTO-TRANSLATED:155cf682]
@@ -601,7 +380,7 @@ static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo
             }
             // 上次鉴权失败，但是如果url参数发生变更，那么也重新鉴权下  [AUTO-TRANSLATED:df9bd345]
             // Last authentication failed, but if the url parameter changes, then re-authenticate
-            if (parser.params().empty() || parser.params() == cookie->getUid()) {
+            if (parser.params().empty() || getUidFromParams(parser.params()) == cookie->getUid()) {
                 // url参数未变，或者本来就没有url参数，那么判断本次请求为重复请求，无访问权限  [AUTO-TRANSLATED:f46b4fca]
                 // The url parameter has not changed, or there is no url parameter at all, then determine that the current request is a duplicate request and has no access permission
                 callback(attach._err_msg, update_cookie ? cookie : nullptr);
@@ -615,17 +394,18 @@ static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo
 
     bool is_hls = media_info.schema == HLS_SCHEMA || media_info.schema == HLS_FMP4_SCHEMA;
 
-    SockInfoImp::Ptr info = std::make_shared<SockInfoImp>();
-    info->_identifier = sender.getIdentifier();
-    info->_peer_ip = sender.get_peer_ip();
-    info->_peer_port = sender.get_peer_port();
-    info->_local_ip = sender.get_local_ip();
-    info->_local_port = sender.get_local_port();
+    weak_ptr<Session> weak_session = static_pointer_cast<Session>(sender.shared_from_this());
 
     // 该用户从来未获取过cookie，这个时候我们广播是否允许该用户访问该http目录  [AUTO-TRANSLATED:8f4b3dd2]
     // This user has never obtained a cookie, at this time we broadcast whether to allow this user to access this http directory
-    HttpSession::HttpAccessPathInvoker accessPathInvoker = [callback, uid, path, is_dir, is_hls, media_info, info]
+    HttpSession::HttpAccessPathInvoker accessPathInvoker = [callback, uid, path, is_dir, is_hls, media_info, weak_session]
             (const string &err_msg, const string &cookie_path_in, int life_second) {
+        auto strong_session = weak_session.lock();
+        if (!strong_session) {
+            // http客户端已经断开，不需要回复  [AUTO-TRANSLATED:9a252e21]
+            // The http client has disconnected and does not need to reply
+            return;
+        }
         HttpServerCookie::Ptr cookie;
         if (life_second) {
             // 本次鉴权设置了有效期，我们把鉴权结果缓存在cookie中  [AUTO-TRANSLATED:5a12f48e]
@@ -647,11 +427,11 @@ static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo
             if (is_hls) {
                 // hls相关信息  [AUTO-TRANSLATED:37893a71]
                 // hls related information
-                attach->_hls_data = std::make_shared<HlsCookieData>(media_info, info);
+                attach->_hls_data = std::make_shared<HlsCookieData>(media_info, strong_session);
             }
-           toolkit::Any any;
-           any.set(std::move(attach));
-           callback(err_msg, HttpCookieManager::Instance().addCookie(kCookieName, uid, life_second, std::move(any)));
+            toolkit::Any any;
+            any.set(std::move(attach));
+            callback(err_msg, HttpCookieManager::Instance().addCookie(kCookieName, uid, life_second, std::move(any)));
         } else {
             callback(err_msg, nullptr);
         }
@@ -666,7 +446,7 @@ static void canAccessPath(Session &sender, const Parser &parser, const MediaInfo
 
     // 事件未被拦截，则认为是http下载请求  [AUTO-TRANSLATED:7d449ccc]
     // The event was not intercepted, it is considered an http download request
-    bool flag = NOTICE_EMIT(BroadcastHttpAccessArgs, Broadcast::kBroadcastHttpAccess, parser, path, is_dir, accessPathInvoker, sender);
+    bool flag = NOTICE_EMIT(BroadcastHttpAccessArgs, Broadcast::kBroadcastHttpAccess, parser, path, file_path, is_dir, accessPathInvoker, sender);
     if (!flag) {
         // 此事件无人监听，我们默认都有权限访问  [AUTO-TRANSLATED:e1524c0f]
         // No one is listening to this event, we assume that everyone has permission to access it by default
@@ -698,6 +478,8 @@ static string pathCat(const string &a, const string &b){
     return a + '/' + b;
 }
 
+static string getFilePath(const Parser &parser,const MediaInfo &media_info, Session *sender, const string &customRootPath = "");
+
 /**
  * 访问文件
  * @param sender 事件触发者
@@ -711,33 +493,34 @@ static string pathCat(const string &a, const string &b){
  * @param media_info http url information
  * @param file_path Absolute file path
  * @param cb Callback object
- 
+
  * [AUTO-TRANSLATED:2d840fe6]
  */
 static void accessFile(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &file_path, const HttpFileManager::invoker &cb) {
-    bool is_hls = end_with(file_path, kHlsSuffix) || end_with(file_path, kHlsFMP4Suffix);
-    if (!is_hls && !File::fileExist(file_path)) {
-        // 文件不存在且不是hls,那么直接返回404  [AUTO-TRANSLATED:7aae578b]
-        // The file does not exist and is not hls, so directly return 404
-        sendNotFound(cb);
-        return;
-    }
+    bool is_dash = end_with(file_path, kDashSuffix);
+    bool is_hls = is_dash || end_with(file_path, kHlsSuffix) || end_with(file_path, kHlsFMP4Suffix);
     if (is_hls) {
-        // hls，那么移除掉后缀获取真实的stream_id并且修改协议为HLS  [AUTO-TRANSLATED:94b5818a]
-        // hls, then remove the suffix to get the real stream_id and change the protocol to HLS
+        // hls或dash，那么移除掉后缀获取真实的stream_id并且修改协议为HLS  [AUTO-TRANSLATED:94b5818a]
+        // hls or dash, then remove the suffix to get the real stream_id and change the protocol to HLS
         if (end_with(file_path, kHlsSuffix)) {
             const_cast<string &>(media_info.schema) = HLS_SCHEMA;
             replace(const_cast<string &>(media_info.stream), kHlsSuffix, "");
         } else {
+            // dash共用hls.fmp4的MediaSource
+            // Dash shares the hls.fmp4 media source
             const_cast<string &>(media_info.schema) = HLS_FMP4_SCHEMA;
-            replace(const_cast<string &>(media_info.stream), kHlsFMP4Suffix, "");
+            if (is_dash) {
+                replace(const_cast<string &>(media_info.stream), kDashSuffix, "");
+            } else {
+                replace(const_cast<string &>(media_info.stream), kHlsFMP4Suffix, "");
+            }
         }
     }
 
     weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
     // 判断是否有权限访问该文件  [AUTO-TRANSLATED:b7f595f5]
     // Determine whether you have permission to access this file
-    canAccessPath(sender, parser, media_info, false, [cb, file_path, parser, is_hls, media_info, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
+    canAccessPath(sender, parser, media_info, file_path, false, [cb, file_path, parser, is_hls, is_dash, media_info, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
         auto strongSession = weakSession.lock();
         if (!strongSession) {
             // http客户端已经断开，不需要回复  [AUTO-TRANSLATED:9a252e21]
@@ -782,12 +565,19 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
             invoker.responseFile(parser.getHeader(), httpHeader, file_content.empty() ? file_path : file_content, !is_hls && !is_forbid_cache, file_content.empty());
         };
 
+        if (cookie) {
+            auto &attach = cookie->getAttach<HttpCookieAttachment>();
+            if (!attach._hls_root_path.empty()) {
+                // 强制替换为真实hls路径
+                const_cast<std::string &>(file_path) = getFilePath(parser, media_info, nullptr, attach._hls_root_path);
+            }
+        }
         if (!is_hls || !cookie) {
-            // 不是hls或访问m3u8文件不带cookie, 直接回复文件或404  [AUTO-TRANSLATED:64e5d19b]
-            // Not hls or accessing m3u8 files without cookies, directly reply to the file or 404
+            // 不是hls/dash或访问m3u8/mpd文件不带cookie, 直接回复文件或404  [AUTO-TRANSLATED:64e5d19b]
+            // Not hls/dash or accessing m3u8/mpd files without cookies, directly reply to the file or 404
             response_file(cookie, cb, file_path, parser);
             if (is_hls) {
-                WarnL << "access m3u8 file without cookie:" << file_path;
+                WarnL << "access m3u8/mpd file without cookie:" << file_path;
             }
             return;
         }
@@ -795,9 +585,9 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
         auto &attach = cookie->getAttach<HttpCookieAttachment>();
         auto src = attach._hls_data->getMediaSource();
         if (src) {
-            // 直接从内存获取m3u8索引文件(而不是从文件系统)  [AUTO-TRANSLATED:c772e342]
-            // Get the m3u8 index file directly from memory (instead of from the file system)
-            response_file(cookie, cb, file_path, parser, src->getIndexFile());
+            // 直接从内存获取m3u8/mpd索引文件(而不是从文件系统)  [AUTO-TRANSLATED:c772e342]
+            // Get the m3u8/mpd index file directly from memory (instead of from the file system)
+            response_file(cookie, cb, file_path, parser, is_dash ? src->getMpdFile() : src->getIndexFile());
             return;
         }
         if (attach._find_src && attach._find_src_ticker.elapsedTime() < kFindSrcIntervalSecond * 1000) {
@@ -809,7 +599,7 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
 
         // hls流可能未注册，MediaSource::findAsync可以触发not_found事件，然后再按需推拉流  [AUTO-TRANSLATED:f4acd717]
         // The hls stream may not be registered, MediaSource::findAsync can trigger the not_found event, and then push and pull the stream on demand
-        MediaSource::findAsync(media_info, strongSession, [response_file, cookie, cb, file_path, parser](const MediaSource::Ptr &src) {
+        MediaSource::findAsync(media_info, strongSession, [response_file, cookie, cb, file_path, parser, is_dash](const MediaSource::Ptr &src) {
             auto hls = dynamic_pointer_cast<HlsMediaSource>(src);
             if (!hls) {
                 // 流不在线  [AUTO-TRANSLATED:5a6a5695]
@@ -831,142 +621,43 @@ static void accessFile(Session &sender, const Parser &parser, const MediaInfo &m
             // Reset the MediaSource search timer
             attach._find_src_ticker.resetTime();
 
-            // m3u8文件可能不存在, 等待m3u8索引文件按需生成  [AUTO-TRANSLATED:0dbd4df2]
-            // The m3u8 file may not exist, wait for the m3u8 index file to be generated on demand
-            hls->getIndexFile([response_file, file_path, cookie, cb, parser](const string &file) {
+            auto muxer = hls->getMuxer();
+            if (muxer) {
+                attach._hls_root_path = muxer->getOption().hls_save_path;
+            }
+            auto on_index_file = [response_file, file_path, cookie, cb, parser](const string &file) {
                 response_file(cookie, cb, file_path, parser, file);
-            });
+            };
+            if (is_dash) {
+                // mpd文件可能不存在, 等待dash mpd文件按需生成
+                // The mpd file may not exist, wait for the dash mpd file to be generated on demand
+                hls->getMpdFile(on_index_file);
+            } else {
+                // m3u8文件可能不存在, 等待m3u8索引文件按需生成  [AUTO-TRANSLATED:0dbd4df2]
+                // The m3u8 file may not exist, wait for the m3u8 index file to be generated on demand
+                hls->getIndexFile(on_index_file);
+            }
         });
     });
 }
 
-
-static void accessHttpUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
-    weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
-    canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
-        auto strongSession = weakSession.lock();
-        if (!strongSession) {
-            return;
-        }
-        if (!err_msg.empty()) {
-            StrCaseMap headerOut;
-            if (cookie) {
-                headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
-            }
-            cb(401, "text/html", headerOut, std::make_shared<HttpStringBody>(err_msg));
-            return;
-        }
-        auto response_url = [](const HttpServerCookie::Ptr &cookie, const HttpFileManager::invoker &cb, const string &url, const Parser &parser) {
-            StrCaseMap httpHeader;
-            if (cookie) {
-                httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
-            }
-            auto url_body = std::make_shared<HttpUrlBody>(url, parser.getHeader());
-            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body](int code, const StrCaseMap &headerOut) mutable {
-                for (auto &pr : headerOut) {
-                    httpHeader.emplace(pr.first, pr.second);
-                }
-                auto type = HttpFileManager::getContentType(url.data());
-                auto it = httpHeader.find("Content-Type");
-                if (it != httpHeader.end() && !it->second.empty()) {
-                    type = it->second;
-                }
-                cb(code, type, httpHeader, url_body);
-            });
-        };
-        response_url(cookie, cb, url, parser);
-    });
-}
-
-#if ENABLE_FERRY
-static void accessPlayChannelUrl(Session &sender, const Parser &parser, const MediaInfo &media_info, const string &url, const HttpFileManager::invoker &cb){
-    weak_ptr<Session> weakSession = static_pointer_cast<Session>(sender.shared_from_this());
-    canAccessPath(sender, parser, media_info, false, [cb, url, parser, weakSession](const string &err_msg, const HttpServerCookie::Ptr &cookie) {
-        auto strongSession = weakSession.lock();
-        if (!strongSession) {
-            return;
-        }
-        if (!err_msg.empty()) {
-            StrCaseMap headerOut;
-            if (cookie) {
-                headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
-            }
-            cb(401, "text/html", headerOut, std::make_shared<HttpStringBody>(err_msg));
-            return;
-        }
-        auto response_url = [](const HttpServerCookie::Ptr &cookie,
-                               const HttpFileManager::invoker &cb,
-                               const string &url,
-                               const Parser &parser,
-                               const toolkit::EventPoller::Ptr &poller) {
-            auto get_header = [](const StrCaseMap &headers, const char *key) {
-                auto it = headers.find(key);
-                if (it == headers.end()) {
-                    return std::string();
-                }
-                return it->second;
-            };
-            StrCaseMap httpHeader;
-            if (cookie) {
-                httpHeader["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
-            }
-            auto url_body = std::make_shared<PlayChannelUrlBody>(url, parser.getHeader(), poller);
-            url_body->setHeaderReadyCB([cb, url, httpHeader, url_body, get_header](int code, const StrCaseMap &headerOut) mutable {
-                for (auto &pr : headerOut) {
-                    httpHeader.emplace(pr.first, pr.second);
-                }
-                auto type = HttpFileManager::getContentType(url.data());
-                auto it = httpHeader.find("Content-Type");
-                if (it != httpHeader.end() && !it->second.empty()) {
-                    type = it->second;
-                }
-                InfoL << "play channel http response ready, url:" << url
-                      << " code:" << code
-                      << " content_type:" << type
-                      << " content_length:" << get_header(httpHeader, "Content-Length")
-                      << " content_range:" << get_header(httpHeader, "Content-Range")
-                      << " debug_task_id:" << get_header(httpHeader, "X-Play-Channel-Task-Id");
-                cb(code, type, httpHeader, url_body);
-            });
-        };
-        response_url(cookie, cb, url, parser, strongSession->getPoller());
-    });
-}
-#endif
-
-static string getFilePath(const Parser &parser,const MediaInfo &media_info, Session &sender) {
+static string getFilePath(const Parser &parser,const MediaInfo &media_info, Session *sender, const string &customRootPath) {
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
-    GET_CONFIG(string, rootPath, Http::kRootPath);
+    GET_CONFIG(string, httpRootPath, Http::kRootPath);
     GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-        return parseVirtualPathMapSafe(str);
+        return Parser::parseArgs(str, ";", ",");
     });
+
+    auto rootPath = customRootPath.empty() ? httpRootPath : customRootPath;
 
     string url, path, virtual_app;
-    bool virtual_target_is_remote_url = false;
-    string virtual_key;
-    const auto req_seg = firstPathSegment(parser.url());
-    if (!req_seg.empty() && virtualPathMap.find(req_seg) != virtualPathMap.end()) {
-        virtual_key = req_seg;
-    }
-    auto it = virtual_key.empty() ? virtualPathMap.end() : virtualPathMap.find(virtual_key);
+    auto it = virtualPathMap.find(media_info.app);
     if (it != virtualPathMap.end()) {
         // 访问的是virtualPath  [AUTO-TRANSLATED:a36c7b20]
         // Accessing virtualPath
         path = it->second;
-        virtual_target_is_remote_url =
-            start_with(path, "http://") || start_with(path, "https://") ||
-            start_with(path, "rtp-http://") || start_with(path, "rtp-https://");
-        const auto virtual_prefix = "/" + virtual_key;
-        if (parser.url() == virtual_prefix) {
-            url.clear();
-        } else if (start_with(parser.url(), virtual_prefix + "/")) {
-            url = parser.url().substr(virtual_prefix.size());
-        } else if (start_with(parser.url(), virtual_prefix + "=")) {
-            url = parser.url().substr(virtual_prefix.size());
-        } else {
-            url = parser.url();
-        }
-        virtual_app = virtual_key + "/";
+        url = parser.url().substr(1 + media_info.app.size());
+        virtual_app = media_info.app + "/";
     } else {
         // 访问的是rootPath  [AUTO-TRANSLATED:600765f0]
         // Accessing rootPath
@@ -980,11 +671,6 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
             ch = '/';
         }
     }
-    if (virtual_target_is_remote_url && !url.empty() && url.front() == '=') {
-        auto ret = path + url;
-        NOTICE_EMIT(BroadcastHttpBeforeAccessArgs, Broadcast::kBroadcastHttpBeforeAccess, parser, ret, sender);
-        return ret;
-    }
     auto ret = File::absolutePath(enableVhost ? media_info.vhost + url : url, path);
     auto http_root = File::absolutePath(enableVhost ? media_info.vhost + "/" : "/", path);
     if (!start_with(ret, http_root)) {
@@ -992,10 +678,12 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
         // The accessed http file must not be outside the http root directory
         throw std::runtime_error("Attempting to access files outside of the http root directory");
     }
-    // 替换url，防止返回的目录索引网页被注入非法内容  [AUTO-TRANSLATED:463ad1b1]
-    // Replace the url to prevent the returned directory index page from being injected with illegal content
-    const_cast<Parser&>(parser).setUrl("/" + virtual_app + ret.substr(http_root.size()));
-    NOTICE_EMIT(BroadcastHttpBeforeAccessArgs, Broadcast::kBroadcastHttpBeforeAccess, parser, ret, sender);
+    if (sender) {
+        // 替换url，防止返回的目录索引网页被注入非法内容  [AUTO-TRANSLATED:463ad1b1]
+        // Replace the url to prevent the returned directory index page from being injected with illegal content
+        const_cast<Parser&>(parser).setUrl("/" + virtual_app + ret.substr(http_root.size()));
+        NOTICE_EMIT(BroadcastHttpBeforeAccessArgs, Broadcast::kBroadcastHttpBeforeAccess, parser, ret, *sender);
+    }
     return ret;
 }
 
@@ -1008,85 +696,17 @@ static string getFilePath(const Parser &parser,const MediaInfo &media_info, Sess
  * @param sender Event trigger
  * @param parser http request
  * @param cb Callback object
- 
+
  * [AUTO-TRANSLATED:a79c824d]
  */
 void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFileManager::invoker &cb) {
-    // 如果请求通过反向代理进入，优先使用 Referer 的 origin 还原完整 URL。
-    // 避免直接 "referer + fullUrl" 导致路径重复/非法 URL。
-    auto fullUrl = buildMediaInfoUrl(parser);
+    auto fullUrl = "http://" + parser["Host"] + parser.fullUrl();
     MediaInfo media_info(fullUrl);
-    GET_CONFIG_FUNC(StrCaseMap, virtualPathMap, Http::kVirtualPath, [](const string &str) {
-        return parseVirtualPathMapSafe(str);
-    });
-    string vpath_cookie_value;
-    const auto req_seg = firstPathSegment(parser.url());
-    if (!req_seg.empty() && virtualPathMap.find(req_seg) != virtualPathMap.end()) {
-        vpath_cookie_value = req_seg;
-    }
-    if (!req_seg.empty() && vpath_cookie_value.empty()) {
-        string keys;
-        for (auto &it : virtualPathMap) {
-            if (!keys.empty()) {
-                keys += ",";
-            }
-            keys += it.first;
-        }
-        WarnL << "virtual path not matched, req_seg:" << req_seg
-              << " configured_keys:" << keys
-              << " raw_virtual_path_cfg:" << mINI::Instance()[Http::kVirtualPath];
-    }
-    auto cb_with_vpath_cookie =
-        [cb, vpath_cookie_value](int code, const string &content_type, const StrCaseMap &responseHeader, const HttpBody::Ptr &body) {
-            if (vpath_cookie_value.empty()) {
-                cb(code, content_type, responseHeader, body);
-                return;
-            }
-            auto header = responseHeader;
-            // Keep existing cookies, but always refresh X_VPATH to latest explicit virtual prefix.
-            auto range = header.equal_range("Set-Cookie");
-            std::vector<StrCaseMap::iterator> erase_list;
-            for (auto it = range.first; it != range.second; ++it) {
-                if (it->second.find(kVirtualPathCookieName + "=") != string::npos) {
-                    erase_list.emplace_back(it);
-                }
-            }
-            for (auto &it : erase_list) {
-                header.erase(it);
-            }
-            header.emplace("Set-Cookie", kVirtualPathCookieName + "=" + vpath_cookie_value + "; Path=/");
-            cb(code, content_type, header, body);
-        };
-    auto file_path = getFilePath(parser, media_info, sender);
-    if (file_path.size() == 0) {
-        sendNotFound(cb_with_vpath_cookie);
+    auto file_path = getFilePath(parser, media_info, &sender);
+    if (file_path.empty()) {
+        sendNotFound(cb);
         return;
     }
-
-    // 访问的是URL  [AUTO-TRANSLATED:79c824d]
-    // Accessing URL
-    if (start_with(file_path, "http://") || start_with(file_path, "https://")){
-        auto param = parser.params();
-        if(!param.empty()){
-            file_path += "?";
-            file_path += param;
-        }
-        accessHttpUrl(sender, parser, media_info, file_path, cb_with_vpath_cookie);
-        return;
-    }
-#if ENABLE_FERRY
-    // 访问的是基于RTP传输文件URL
-    // Accessing URL base on rtp 
-    if (start_with(file_path, "rtp-http://") || start_with(file_path, "rtp-https://")){
-        auto param = parser.params();
-        if (!param.empty()) {
-            file_path += "?";
-            file_path += param;
-        }
-        accessPlayChannelUrl(sender, parser, media_info, file_path, cb_with_vpath_cookie);
-        return;
-    }
-#endif
     // 访问的是文件夹  [AUTO-TRANSLATED:279974bb]
     // Accessing a folder
     if (File::is_dir(file_path)) {
@@ -1099,7 +719,7 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
                 // 不是文件夹  [AUTO-TRANSLATED:af893469]
                 // Not a folder
                 parser.setUrl(pathCat(parser.url(), indexFile));
-                accessFile(sender, parser, media_info, file_path, cb_with_vpath_cookie);
+                accessFile(sender, parser, media_info, file_path, cb);
                 return;
             }
         }
@@ -1109,12 +729,12 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
         if (!makeFolderMenu(parser.url(), file_path, strMenu)) {
             // 文件夹不存在  [AUTO-TRANSLATED:a2dc6c89]
             // Folder does not exist
-            sendNotFound(cb_with_vpath_cookie);
+            sendNotFound(cb);
             return;
         }
         // 判断是否有权限访问该目录  [AUTO-TRANSLATED:963d02a6]
         // Determine if there is permission to access this directory
-        canAccessPath(sender, parser, media_info, true, [strMenu, cb_with_vpath_cookie](const string &err_msg, const HttpServerCookie::Ptr &cookie) mutable{
+        canAccessPath(sender, parser, media_info, file_path, true, [strMenu, cb](const string &err_msg, const HttpServerCookie::Ptr &cookie) mutable{
             if (!err_msg.empty()) {
                 strMenu = err_msg;
             }
@@ -1122,14 +742,14 @@ void HttpFileManager::onAccessPath(Session &sender, Parser &parser, const HttpFi
             if (cookie) {
                 headerOut["Set-Cookie"] = cookie->getCookie(cookie->getAttach<HttpCookieAttachment>()._path);
             }
-            cb_with_vpath_cookie(err_msg.empty() ? 200 : 401, "text/html", headerOut, std::make_shared<HttpStringBody>(strMenu));
+            cb(err_msg.empty() ? 200 : 401, "text/html", headerOut, std::make_shared<HttpStringBody>(strMenu));
         });
         return;
     }
 
     // 访问的是文件  [AUTO-TRANSLATED:7a400b3c]
     // Accessing a file
-    accessFile(sender, parser, media_info, file_path, cb_with_vpath_cookie);
+    accessFile(sender, parser, media_info, file_path, cb);
 };
 
 
@@ -1197,14 +817,7 @@ void HttpResponseInvokerImp::responseFile(const StrCaseMap &requestHeader,
 
     // 尝试添加Content-Type  [AUTO-TRANSLATED:2c08b371]
     // Try to add Content-Type
-    if (end_with(file, ".css") || end_with(file, ".wasm") || end_with(file, ".png") || end_with(file, ".woff")
-        || end_with(file, ".ico")) {
-        httpHeader.emplace("ETag", "filecache");
-        httpHeader.emplace("Last-Modified:", "Fri, 06 Sep 2024 09:51:18 GMT");
-        httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()));
-    }
-    else
-        httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()) + "; charset=" + charSet);
+    httpHeader.emplace("Content-Type", HttpConst::getHttpContentType(file.data()) + "; charset=" + charSet);
 
     auto &strRange = const_cast<StrCaseMap &>(requestHeader)["Range"];
     int code = 200;
@@ -1230,36 +843,6 @@ void HttpResponseInvokerImp::responseFile(const StrCaseMap &requestHeader,
     // Reply file
     (*this)(code, httpHeader, fileBody);
 }
-
-void HttpResponseInvokerImp::responseUrl(const StrCaseMap &requestHeader,
-                                         const StrCaseMap &responseHeader,
-                                         const std::string &url) const {
-    StrCaseMap &httpHeader = const_cast<StrCaseMap &>(responseHeader);
-    auto url_body = std::make_shared<HttpUrlBody>(url, requestHeader);
-    auto response_header = url_body->responseHeader();
-    for (auto &pr : response_header) {
-        httpHeader.emplace(pr.first, pr.second);
-    }
-    auto code = url_body->responseCode();
-    (*this)(code, httpHeader, url_body);
-}
-
-#if ENABLE_FERRY
-void HttpResponseInvokerImp::responsePlayChannelUrl(const StrCaseMap &requestHeader,
-                                                    const StrCaseMap &responseHeader,
-                                                    const std::string &url) const {
-    StrCaseMap &httpHeader = const_cast<StrCaseMap &>(responseHeader);
-    auto url_body = std::make_shared<PlayChannelUrlBody>(url, requestHeader);
-    auto response_header = url_body->responseHeader();
-    for (auto &pr : response_header) {
-        httpHeader.emplace(pr.first, pr.second);
-    }
-    auto code = url_body->responseCode();
-    (*this)(code, httpHeader, url_body);
-}
-#endif
-
-
 
 HttpResponseInvokerImp::operator bool(){
     return _lambad.operator bool();

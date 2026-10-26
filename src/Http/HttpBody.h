@@ -12,33 +12,17 @@
 #define ZLMEDIAKIT_FILEREADER_H
 
 #include <stdlib.h>
-#include <condition_variable>
-#include <cstdint>
-#include <deque>
-#include <functional>
 #include <memory>
-#include <mutex>
 #include "Network/Buffer.h"
 #include "Util/ResourcePool.h"
 #include "Util/logger.h"
 #include "Thread/WorkThreadPool.h"
-#include "Common/Parser.h"
 
 #ifndef MIN
 #define MIN(a,b) ((a) < (b) ? (a) : (b) )
 #endif //MIN
 
 namespace mediakit {
-
-struct PlayChannelRequestContext {
-    std::string url;
-    std::string source_url;
-    std::string scheme;
-    std::string method = "GET";
-    StrCaseMap request_header;
-    std::string task_id;
-    uint64_t timeout_ms = 30 * 1000;
-};
 
 /**
  * http content部分基类定义
@@ -49,7 +33,15 @@ struct PlayChannelRequestContext {
 class HttpBody : public std::enable_shared_from_this<HttpBody>{
 public:
     using Ptr = std::shared_ptr<HttpBody>;
-    virtual ~HttpBody() = default;
+    virtual ~HttpBody() {
+        if (_on_completed) {
+            try {
+                _on_completed();
+            } catch (std::exception &ex) {
+                ErrorL << ex.what();
+            }
+        }
+    }
 
     /**
      * 剩余数据大小，如果返回-1, 那么就不设置content-length
@@ -105,8 +97,18 @@ public:
         return -1;
     }
 
-    // 连接已断开，允许响应体执行自定义清理/取消逻辑。
-    virtual void onConnectionClosed() {}
+    /**
+     * 写入数据，默认抛出异常表示不支持写入
+     * Write data, default throws exception indicating write not supported
+     */
+    virtual void writeData(const char *data, size_t size, uint64_t content_size) {
+        throw std::runtime_error("HttpBody::writeData not supported");
+    }
+
+    void setOnCompleted(std::function<void()> on_completed) { _on_completed = std::move(on_completed); }
+
+private:
+    std::function<void()> _on_completed;
 };
 
 /**
@@ -146,13 +148,21 @@ private:
     toolkit::Buffer::Ptr _buffer;
 };
 
+class HttpFileBodyBase  : public HttpBody {
+public:
+    using Ptr = std::shared_ptr<HttpFileBodyBase>;
+
+    virtual void setRange(uint64_t offset, uint64_t max_size) = 0;
+    virtual ~HttpFileBodyBase() = default;
+};
+
 /**
  * 文件类型的content
  * File type content
  
  * [AUTO-TRANSLATED:baf9c0f3]
  */
-class HttpFileBody : public HttpBody {
+class HttpFileBody : public HttpFileBodyBase {
 public:
     using Ptr = std::shared_ptr<HttpFileBody>;
 
@@ -178,7 +188,7 @@ public:
      
      * [AUTO-TRANSLATED:30532a4e]
      */
-    void setRange(uint64_t offset, uint64_t max_size);
+    void setRange(uint64_t offset, uint64_t max_size) override;
 
     int64_t remainSize() override;
     toolkit::Buffer::Ptr readData(size_t size) override;
@@ -192,85 +202,36 @@ private:
     toolkit::ResourcePool<toolkit::BufferRaw> _pool;
 };
 
-class HttpUrlBody : public HttpBody {
+/**
+ * 文件写入类型的content，支持通过writeData向文件追加写入
+ * File storage content, supports appending data to a file via writeData
+ */
+class HttpFileStorage : public HttpBody {
 public:
-    using Ptr = std::shared_ptr<HttpUrlBody>;
-    using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
-    HttpUrlBody(const std::string &url, const StrCaseMap &request_header = StrCaseMap());
+    using Ptr = std::shared_ptr<HttpFileStorage>;
 
+    /**
+     * @param file_path 直接以二进制覆盖写入的路径；未完成的上传会删除该路径。需要保护正式文件时，调用方应
+     *                  传入临时路径，并在请求处理完成后自行发布到正式路径。
+     * @param file_path Path opened directly in binary truncate mode and removed after an incomplete upload. To protect
+     *                  a published file, pass a temporary path and publish it from the completed-request handler.
+     */
+    HttpFileStorage(std::string file_path);
+    ~HttpFileStorage() override;
+    HttpFileStorage(const HttpFileStorage &) = delete;
+    HttpFileStorage &operator=(const HttpFileStorage &) = delete;
+
+    void writeData(const char *data, size_t size, uint64_t content_size) override;
     int64_t remainSize() override;
     toolkit::Buffer::Ptr readData(size_t size) override;
-    void readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) override;
-
-    int responseCode() const;
-    StrCaseMap responseHeader() const;
-    bool requestCompleted() const;
-    bool requestSuccess() const;
-    void setHeaderReadyCB(HeaderReadyCB cb);
+    const std::string& filePath() const;
 
 private:
-    void waitHeaderReady() const;
-
-private:
-    mutable std::mutex _mtx;
-    std::deque<toolkit::Buffer::Ptr> _cache;
-    std::function<void(const toolkit::Buffer::Ptr &buf)> _wait_cb;
-    bool _completed = false;
-    bool _header_ready = false;
-    bool _header_cb_fired = false;
-    bool _success = false;
-    int _response_code = 200;
-    StrCaseMap _response_header;
-    std::string _url;
-    StrCaseMap _request_header;
-    std::shared_ptr<void> _alive_token;
-    std::shared_ptr<void> _client_holder;
-    HeaderReadyCB _header_ready_cb;
-    mutable std::condition_variable _header_cv;
+    FILE *_fp = nullptr;
+    uint64_t _written = 0;
+    uint64_t _content_size = 0;
+    std::string _path;
 };
-
-#if ENABLE_FERRY
-class PlayChannelUrlBody : public HttpBody {
-public:
-    using Ptr = std::shared_ptr<PlayChannelUrlBody>;
-    using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
-    PlayChannelUrlBody(const std::string &url,
-                       const StrCaseMap &request_header = StrCaseMap(),
-                       const toolkit::EventPoller::Ptr &poller = nullptr);
-
-    int64_t remainSize() override;
-    toolkit::Buffer::Ptr readData(size_t size) override;
-    void readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) override;
-
-    int responseCode() const;
-    StrCaseMap responseHeader() const;
-    bool requestCompleted() const;
-    bool requestSuccess() const;
-    void setHeaderReadyCB(HeaderReadyCB cb);
-    void onConnectionClosed() override;
-
-private:
-    void waitHeaderReady() const;
-
-private:
-    mutable std::mutex _mtx;
-    std::deque<toolkit::Buffer::Ptr> _cache;
-    std::function<void(const toolkit::Buffer::Ptr &buf)> _wait_cb;
-    bool _completed = false;
-    bool _header_ready = false;
-    bool _header_cb_fired = false;
-    bool _success = false;
-    int _response_code = 200;
-    StrCaseMap _response_header;
-    std::string _url;
-    StrCaseMap _request_header;
-    std::shared_ptr<void> _alive_token;
-    std::shared_ptr<void> _client_holder;
-    std::function<void()> _on_connection_closed;
-    HeaderReadyCB _header_ready_cb;
-    mutable std::condition_variable _header_cv;
-};
-#endif
 
 class HttpArgs;
 
@@ -311,7 +272,7 @@ private:
     int64_t _totalSize;
     std::string _bodyPrefix;
     std::string _bodySuffix;
-    HttpFileBody::Ptr _fileBody;
+    HttpFileBodyBase::Ptr _fileBody;
 };
 
 }//namespace mediakit

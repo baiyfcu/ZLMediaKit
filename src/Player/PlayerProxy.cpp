@@ -8,12 +8,17 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <cstring>
+
 #include "PlayerProxy.h"
 #include "Common/config.h"
 #include "Rtmp/RtmpMediaSource.h"
 #include "Rtmp/RtmpPlayer.h"
 #include "Rtsp/RtspMediaSource.h"
 #include "Rtsp/RtspPlayer.h"
+#if defined(ENABLE_WEBRTC)
+#include "webrtc/WebRtcProxyPlayer.h"
+#endif
 #include "Util/MD5.h"
 #include "Util/logger.h"
 #include "Util/mini.h"
@@ -22,6 +27,61 @@ using namespace toolkit;
 using namespace std;
 
 namespace mediakit {
+
+namespace {
+
+bool isBufferContentEqual(const Buffer::Ptr &lhs, const Buffer::Ptr &rhs) {
+    if (!lhs || !rhs) {
+        return !lhs && !rhs;
+    }
+    return lhs->size() == rhs->size()
+        && (lhs->size() == 0 || memcmp(lhs->data(), rhs->data(), lhs->size()) == 0);
+}
+
+bool isConfigFrameContentEqual(const Frame::Ptr &lhs, const Frame::Ptr &rhs) {
+    if (!lhs || !rhs || lhs->prefixSize() > lhs->size() || rhs->prefixSize() > rhs->size()) {
+        return false;
+    }
+    auto lhs_size = lhs->size() - lhs->prefixSize();
+    auto rhs_size = rhs->size() - rhs->prefixSize();
+    return lhs_size == rhs_size
+        && (lhs_size == 0
+            || memcmp(lhs->data() + lhs->prefixSize(), rhs->data() + rhs->prefixSize(), lhs_size) == 0);
+}
+
+bool isTrackConfigCompatible(const Track::Ptr &track, const Track::Ptr &last_track) {
+    try {
+        auto video_track = dynamic_pointer_cast<VideoTrack>(track);
+        auto last_video_track = dynamic_pointer_cast<VideoTrack>(last_track);
+        if (video_track && last_video_track) {
+            // H264/H265的配置帧保留原始SPS/PPS/VPS，优先比较它们，避免extra data转换失败造成误判。
+            // H264/H265 config frames preserve the original SPS/PPS/VPS; compare them first to avoid extra-data conversion failures.
+            auto frames = video_track->getConfigFrames();
+            auto last_frames = last_video_track->getConfigFrames();
+            if (!frames.empty() || !last_frames.empty()) {
+                if (frames.size() != last_frames.size()) {
+                    return false;
+                }
+                for (size_t i = 0; i < frames.size(); ++i) {
+                    if (!isConfigFrameContentEqual(frames[i], last_frames[i])) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+
+        return isBufferContentEqual(track->getExtraData(), last_track->getExtraData());
+    } catch (const exception &ex) {
+        WarnL << "比较重连轨道初始化配置失败: " << ex.what();
+        return false;
+    } catch (...) {
+        WarnL << "比较重连轨道初始化配置失败: unknown exception";
+        return false;
+    }
+}
+
+} // namespace
 
 PlayerProxy::PlayerProxy(
     const MediaTuple &tuple, const ProtocolOption &option, int retry_count,
@@ -32,7 +92,7 @@ PlayerProxy::PlayerProxy(
     setOnClose(nullptr);
     setOnConnect(nullptr);
     setOnDisconnect(nullptr);
-    
+
     _reconnect_delay_min = reconnect_delay_min > 0 ? reconnect_delay_min : 2;
     _reconnect_delay_max = reconnect_delay_max > 0 ? reconnect_delay_max : 60;
     _reconnect_delay_step = reconnect_delay_step > 0 ? reconnect_delay_step : 3;
@@ -40,6 +100,16 @@ PlayerProxy::PlayerProxy(
     _live_status = 1;
     _repull_count = 0;
     (*this)[Client::kWaitTrackReady] = false;
+}
+
+void PlayerProxy::update(const std::string &url, const toolkit::mINI &args) {
+    CHECK(getPoller()->isCurrentThread());
+    _pull_url = url;
+    this->mINI::clear();
+    (*this)[Client::kWaitTrackReady] = false;
+    for (auto &pr : args) {
+        (*this)[pr.first] = pr.second;
+    }
 }
 
 void PlayerProxy::setPlayCallbackOnce(function<void(const SockException &ex)> cb) {
@@ -51,15 +121,14 @@ void PlayerProxy::setOnClose(function<void(const SockException &ex)> cb) {
 }
 
 void PlayerProxy::setOnDisconnect(std::function<void()> cb) {
-    _on_disconnect = cb ? std::move(cb) : [] () {};
+    _on_disconnect = cb ? std::move(cb) : []() {};
 }
 
-void PlayerProxy::setOnConnect(std::function<void(const TranslationInfo&)> cb) {
-    _on_connect = cb ? std::move(cb) : [](const TranslationInfo&) {};
+void PlayerProxy::setOnConnect(std::function<void(const TranslationInfo &)> cb) {
+    _on_connect = cb ? std::move(cb) : [](const TranslationInfo &) {};
 }
 
-void PlayerProxy::setTranslationInfo()
-{
+void PlayerProxy::setTranslationInfo() {
     _transtalion_info.byte_speed = _media_src ? _media_src->getBytesSpeed() : -1;
     _transtalion_info.start_time_stamp = _media_src ? _media_src->getCreateStamp() : 0;
     _transtalion_info.stream_info.clear();
@@ -72,22 +141,21 @@ void PlayerProxy::setTranslationInfo()
         back.codec_type = track->getTrackType();
         back.codec_name = track->getCodecName();
         switch (back.codec_type) {
-            case TrackAudio : {
+            case TrackAudio: {
                 auto audio_track = dynamic_pointer_cast<AudioTrack>(track);
                 back.audio_sample_rate = audio_track->getAudioSampleRate();
                 back.audio_channel = audio_track->getAudioChannel();
                 back.audio_sample_bit = audio_track->getAudioSampleBit();
                 break;
             }
-            case TrackVideo : {
+            case TrackVideo: {
                 auto video_track = dynamic_pointer_cast<VideoTrack>(track);
                 back.video_width = video_track->getVideoWidth();
                 back.video_height = video_track->getVideoHeight();
                 back.video_fps = video_track->getVideoFps();
                 break;
             }
-            default:
-                break;
+            default: break;
         }
     }
 }
@@ -101,16 +169,20 @@ static int getMaxTrackSize(const std::string &url) {
     return 2;
 }
 
-void PlayerProxy::play(const string &strUrlTmp) {
-    _option.max_track = getMaxTrackSize(strUrlTmp);
+void PlayerProxy::play(const string &url) {
+    _pull_url = url;
+    _option.max_track = getMaxTrackSize(_pull_url);
     weak_ptr<PlayerProxy> weakSelf = shared_from_this();
     std::shared_ptr<int> piFailedCnt(new int(0)); // 连续播放失败次数
-    setOnPlayResult([weakSelf, strUrlTmp, piFailedCnt](const SockException &err) {
+    setOnPlayResult([weakSelf, piFailedCnt](const SockException &err) {
         auto strongSelf = weakSelf.lock();
         if (!strongSelf) {
             return;
         }
-
+        if (err) {
+            NOTICE_EMIT(BroadcastPlayerProxyFailedArgs, Broadcast::kBroadcastPlayerProxyFailed, *strongSelf, err);
+            strongSelf->_status = std::make_shared<std::string>(std::string("play failed: ") + err.what());
+        }
         if (strongSelf->_on_play) {
             strongSelf->_on_play(err);
             strongSelf->_on_play = nullptr;
@@ -118,7 +190,8 @@ void PlayerProxy::play(const string &strUrlTmp) {
 
         if (!err) {
             // 取消定时器,避免hls拉流索引文件因为网络波动失败重连成功后出现循环重试的情况  [AUTO-TRANSLATED:91e5f0c8]
-            // Cancel the timer to avoid the situation where the hls stream index file fails to reconnect due to network fluctuations and then retries in a loop after successful reconnection
+            // Cancel the timer to avoid the situation where the hls stream index file fails to reconnect due to network fluctuations and then retries in a loop
+            // after successful reconnection
             strongSelf->_timer.reset();
             strongSelf->_live_ticker.resetTime();
             strongSelf->_live_status = 0;
@@ -127,30 +200,41 @@ void PlayerProxy::play(const string &strUrlTmp) {
             *piFailedCnt = 0; // 连续播放失败次数清0
             strongSelf->onPlaySuccess();
             strongSelf->setTranslationInfo();
-            strongSelf->_on_connect(strongSelf->_transtalion_info);  
+            strongSelf->_on_connect(strongSelf->_transtalion_info);
 
-            InfoL << "play " << strUrlTmp << " success";
+            InfoL << "play " << strongSelf->_pull_url << " success";
+            strongSelf->_status = std::make_shared<std::string>("playing");
         } else if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
             // 播放失败，延时重试播放  [AUTO-TRANSLATED:d7537c9c]
             // Play failed, retry playing with delay
             strongSelf->_on_disconnect();
-            strongSelf->rePlay(strUrlTmp, (*piFailedCnt)++);
+            strongSelf->rePlay((*piFailedCnt)++);
         } else {
             // 达到了最大重试次数，回调关闭  [AUTO-TRANSLATED:610f31f3]
             // Reached the maximum number of retries, callback to close
+            strongSelf->_muxer.reset();
             strongSelf->_on_close(err);
         }
     });
-    setOnShutdown([weakSelf, strUrlTmp, piFailedCnt](const SockException &err) {
+    setOnShutdown([weakSelf, piFailedCnt](const SockException &err) {
         auto strongSelf = weakSelf.lock();
         if (!strongSelf) {
             return;
         }
+        if (err) {
+            NOTICE_EMIT(BroadcastPlayerProxyFailedArgs, Broadcast::kBroadcastPlayerProxyFailed, *strongSelf, err);
+        }
+        if (strongSelf->_on_play) {
+            strongSelf->_on_play(err);
+            strongSelf->_on_play = nullptr;
+        }
+        strongSelf->_status = std::make_shared<std::string>(std::string("play shutdown: ") + err.what());
 
         // 注销直接拉流代理产生的流：#532  [AUTO-TRANSLATED:c6343a3b]
         // Unregister the stream generated by the direct stream proxy: #532
         strongSelf->setMediaSource(nullptr);
 
+        const bool can_retry = *piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0;
         if (strongSelf->_muxer) {
             auto tracks = strongSelf->MediaPlayer::getTracks(false);
             for (auto &track : tracks) {
@@ -158,10 +242,10 @@ void PlayerProxy::play(const string &strUrlTmp) {
             }
 
             GET_CONFIG(bool, reset_when_replay, General::kResetWhenRePlay);
-            if (reset_when_replay) {
+            // 临时断线且允许保留时，只解除旧播放器输入，避免重置输出媒体源和观看连接。
+            // On a retryable disconnect, detach the old player input without resetting output media sources or viewers.
+            if (reset_when_replay || !can_retry) {
                 strongSelf->_muxer.reset();
-            } else {
-                strongSelf->_muxer->resetTracks();
             }
         }
 
@@ -175,9 +259,9 @@ void PlayerProxy::play(const string &strUrlTmp) {
 
         // 播放异常中断，延时重试播放  [AUTO-TRANSLATED:fee316b2]
         // Play interrupted abnormally, retry playing with delay
-        if (*piFailedCnt < strongSelf->_retry_count || strongSelf->_retry_count < 0) {
+        if (can_retry) {
             strongSelf->_repull_count++;
-            strongSelf->rePlay(strUrlTmp, (*piFailedCnt)++);
+            strongSelf->rePlay((*piFailedCnt)++);
         } else {
             // 达到了最大重试次数，回调关闭  [AUTO-TRANSLATED:610f31f3]
             // Reached the maximum number of retries, callback to close
@@ -185,19 +269,24 @@ void PlayerProxy::play(const string &strUrlTmp) {
         }
     });
     try {
-        MediaPlayer::play(strUrlTmp);
+        _status = std::make_shared<std::string>("connecting");
+        MediaPlayer::play(_pull_url );
     } catch (std::exception &ex) {
+        _status = std::make_shared<std::string>(std::string("play failed: ") + ex.what());
         ErrorL << ex.what();
         onPlayResult(SockException(Err_other, ex.what()));
         return;
     }
-    _pull_url = strUrlTmp;
     setDirectProxy();
 }
 
 void PlayerProxy::setDirectProxy() {
     MediaSource::Ptr mediaSource;
-    if (dynamic_pointer_cast<RtspPlayer>(_delegate)) {
+    if (dynamic_pointer_cast<RtspPlayer>(_delegate)
+#if defined(ENABLE_WEBRTC)
+        || dynamic_pointer_cast<WebRtcProxyPlayer>(_delegate)
+#endif
+    ) {
         // rtsp拉流  [AUTO-TRANSLATED:189cf691]
         // Rtsp stream
         GET_CONFIG(bool, directProxy, Rtsp::kDirectProxy);
@@ -231,39 +320,34 @@ PlayerProxy::~PlayerProxy() {
     }
 }
 
-void PlayerProxy::rePlay(const string &strUrl, int iFailedCnt) {
+void PlayerProxy::rePlay(int iFailedCnt) {
     auto iDelay = MAX(_reconnect_delay_min * 1000, MIN(iFailedCnt * _reconnect_delay_step * 1000, _reconnect_delay_max * 1000));
     weak_ptr<PlayerProxy> weakSelf = shared_from_this();
-    _timer = std::make_shared<Timer>(
-        iDelay / 1000.0f,
-        [weakSelf, strUrl, iFailedCnt]() {
-            // 播放失败次数越多，则延时越长  [AUTO-TRANSLATED:5af39264]
-            // The more times the playback fails, the longer the delay
-            auto strongPlayer = weakSelf.lock();
-            if (!strongPlayer) {
-                return false;
-            }
-            WarnL << "重试播放[" << iFailedCnt << "]:" << strUrl;
-            strongPlayer->MediaPlayer::play(strUrl);
-            strongPlayer->setDirectProxy();
+    _timer = std::make_shared<Timer>(iDelay / 1000.0f, [weakSelf, iFailedCnt]() {
+        // 播放失败次数越多，则延时越长  [AUTO-TRANSLATED:5af39264]
+        // The more times the playback fails, the longer the delay
+        auto strongPlayer = weakSelf.lock();
+        if (!strongPlayer) {
             return false;
-        },
-        getPoller());
+        }
+        WarnL << "重试播放[" << iFailedCnt << "]:" << strongPlayer->_pull_url;
+        strongPlayer->MediaPlayer::play(strongPlayer->_pull_url);
+        strongPlayer->setDirectProxy();
+        return false;
+    }, getPoller());
 }
 
 bool PlayerProxy::close(MediaSource &sender) {
     // 通知其停止推流  [AUTO-TRANSLATED:d69d10d8]
     // Notify it to stop pushing the stream
-    weak_ptr<PlayerProxy> weakSelf = dynamic_pointer_cast<PlayerProxy>(shared_from_this());
-    getPoller()->async_first([weakSelf]() {
-        auto strongSelf = weakSelf.lock();
-        if (!strongSelf) {
-            return;
-        }
-        strongSelf->_muxer.reset();
-        strongSelf->setMediaSource(nullptr);
-        strongSelf->teardown();
-    });
+    // 主动关闭必须同时取消等待中的重连，并阻止teardown回调再次安排重拉。
+    // Active close must cancel pending retries and prevent teardown callbacks from scheduling another pull.
+    _timer.reset();
+    setOnShutdown(nullptr);
+    setOnPlayResult(nullptr);
+    _muxer = nullptr;
+    setMediaSource(nullptr);
+    teardown();
     _on_close(SockException(Err_shutdown, "closed by user"));
     WarnL << "close media: " << sender.getUrl();
     return true;
@@ -293,12 +377,17 @@ float PlayerProxy::getLossRate(MediaSource &sender, TrackType type) {
     return getPacketLossRate(type);
 }
 
+toolkit::EventPoller::Ptr PlayerProxy::getOwnerPoller(MediaSource &sender) {
+    return getPoller();
+}
+
 TranslationInfo PlayerProxy::getTranslationInfo() {
     return _transtalion_info;
 }
 
 void PlayerProxy::onPlaySuccess() {
     GET_CONFIG(bool, reset_when_replay, General::kResetWhenRePlay);
+    bool muxer_created = false;
     if (dynamic_pointer_cast<RtspMediaSource>(_media_src)) {
         // rtsp拉流代理  [AUTO-TRANSLATED:3935cf68]
         // Rtsp stream proxy
@@ -307,48 +396,43 @@ void PlayerProxy::onPlaySuccess() {
             _option.enable_rtsp = false;
             _muxer = std::make_shared<MultiMediaSourceMuxer>(_tuple, getDuration(), _option);
             _option.enable_rtsp = old;
+            muxer_created = true;
         }
     } else if (dynamic_pointer_cast<RtmpMediaSource>(_media_src)) {
         // rtmp拉流代理  [AUTO-TRANSLATED:21173335]
         // Rtmp stream proxy
         if (reset_when_replay || !_muxer) {
-             auto old = _option.enable_rtmp;
+            auto old = _option.enable_rtmp;
             _option.enable_rtmp = false;
             _muxer = std::make_shared<MultiMediaSourceMuxer>(_tuple, getDuration(), _option);
-             _option.enable_rtmp = old;
+            _option.enable_rtmp = old;
+            muxer_created = true;
         }
     } else {
         // 其他拉流代理  [AUTO-TRANSLATED:e5f2e45d]
         // Other stream proxies
         if (reset_when_replay || !_muxer) {
             _muxer = std::make_shared<MultiMediaSourceMuxer>(_tuple, getDuration(), _option);
+            muxer_created = true;
         }
     }
     _muxer->setMediaListener(shared_from_this());
 
     auto videoTrack = getTrack(TrackVideo, false);
-    if (videoTrack) {
-        // 添加视频  [AUTO-TRANSLATED:afc7e0f7]
-        // Add video
-        _muxer->addTrack(videoTrack);
-        // 视频数据写入_mediaMuxer  [AUTO-TRANSLATED:fc07e1c9]
-        // Write video data to _mediaMuxer
-        videoTrack->addDelegate(_muxer);
-    }
-
     auto audioTrack = getTrack(TrackAudio, false);
-    if (audioTrack) {
-        // 添加音频  [AUTO-TRANSLATED:e08e79ce]
-        // Add audio
-        _muxer->addTrack(audioTrack);
-        // 音频数据写入_mediaMuxer  [AUTO-TRANSLATED:69911524]
-        // Write audio data to _mediaMuxer
-        audioTrack->addDelegate(_muxer);
-    }
 
-    // 添加完毕所有track，防止单track情况下最大等待3秒  [AUTO-TRANSLATED:8908bc01]
-    // After adding all tracks, prevent the maximum waiting time of 3 seconds in the case of a single track
-    _muxer->addTrackCompleted();
+    bool add_to_muxer = muxer_created;
+    if (!muxer_created) {
+        auto last_video_track = _muxer->getTrack(TrackVideo, false);
+        auto last_audio_track = _muxer->getTrack(TrackAudio, false);
+        if (shouldResetTracks(videoTrack, audioTrack, last_video_track, last_audio_track)) {
+            // 编解码结构变化时必须重建封装状态；兼容重连只替换输入delegate。
+            // Rebuild muxing state only when the codec structure changes; compatible reconnects only replace input delegates.
+            _muxer->resetTracks();
+            add_to_muxer = true;
+        }
+    }
+    attachPlayerTracks(videoTrack, audioTrack, add_to_muxer);
 
     if (_media_src) {
         // 让_muxer对象拦截一部分事件(比如说录像相关事件)  [AUTO-TRANSLATED:7d27c400]
@@ -357,9 +441,71 @@ void PlayerProxy::onPlaySuccess() {
     }
 }
 
+bool PlayerProxy::isTrackCompatible(const Track::Ptr &track, const Track::Ptr &last_track) {
+    if (!track || !last_track) {
+        return !track && !last_track;
+    }
+    if (track->getIndex() != last_track->getIndex()
+        || track->getCodecId() != last_track->getCodecId()
+        || track->getTrackType() != last_track->getTrackType()
+        || !isTrackConfigCompatible(track, last_track)) {
+        return false;
+    }
+
+    switch (track->getTrackType()) {
+        case TrackVideo: {
+            auto video_track = dynamic_pointer_cast<VideoTrack>(track);
+            auto last_video_track = dynamic_pointer_cast<VideoTrack>(last_track);
+            // FPS波动不改变封装结构，因此仅比较视频尺寸。
+            // FPS changes do not alter the muxing structure, so only video dimensions are compared.
+            return video_track && last_video_track
+                && video_track->getVideoWidth() == last_video_track->getVideoWidth()
+                && video_track->getVideoHeight() == last_video_track->getVideoHeight();
+        }
+        case TrackAudio: {
+            auto audio_track = dynamic_pointer_cast<AudioTrack>(track);
+            auto last_audio_track = dynamic_pointer_cast<AudioTrack>(last_track);
+            return audio_track && last_audio_track
+                && audio_track->getAudioSampleRate() == last_audio_track->getAudioSampleRate()
+                && audio_track->getAudioChannel() == last_audio_track->getAudioChannel()
+                && audio_track->getAudioSampleBit() == last_audio_track->getAudioSampleBit();
+        }
+        default: return true;
+    }
+}
+
+bool PlayerProxy::shouldResetTracks(const Track::Ptr &video_track, const Track::Ptr &audio_track,
+                                    const Track::Ptr &last_video_track, const Track::Ptr &last_audio_track) const {
+    return !isTrackCompatible(video_track, last_video_track)
+        || !isTrackCompatible(audio_track, last_audio_track);
+}
+
+void PlayerProxy::attachPlayerTracks(const Track::Ptr &video_track, const Track::Ptr &audio_track, bool add_to_muxer) {
+    for (auto &track : { video_track, audio_track }) {
+        if (!track) {
+            continue;
+        }
+        if (add_to_muxer) {
+            _muxer->addTrack(track);
+        }
+        track->addDelegate(_muxer);
+    }
+    if (add_to_muxer) {
+        // 显式通知track添加完成，避免单track流等待超时。
+        // Explicitly complete track addition so a single-track stream does not wait for timeout.
+        _muxer->addTrackCompleted();
+    }
+}
+
 int PlayerProxy::getStatus() {
     return _live_status.load();
 }
+
+std::string PlayerProxy::getStatusStr() const {
+    auto status = _status;
+    return status ? *status : "unknown";
+}
+
 uint64_t PlayerProxy::getLiveSecs() {
     if (_live_status == 0) {
         return _live_secs + _live_ticker.elapsedTime() / 1000;

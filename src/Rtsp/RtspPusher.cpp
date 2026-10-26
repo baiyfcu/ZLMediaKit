@@ -277,15 +277,15 @@ void RtspPusher::sendSetup(unsigned int track_idx) {
     switch (_rtp_type) {
         case Rtsp::RTP_TCP: {
             sendRtspRequest("SETUP", control_url, {"Transport",
-                                                   StrPrinter << "RTP/AVP/TCP;unicast;interleaved=" << track->_type * 2
-                                                           << "-" << track->_type * 2 + 1 << ";mode=record"});
+                                                   StrPrinter << "RTP/AVP/TCP;unicast;interleaved=" << track_idx * 2
+                                                           << "-" << track_idx * 2 + 1 << ";mode=\"RECORD\""});
         }
             break;
         case Rtsp::RTP_UDP: {
             createUdpSockIfNecessary(track_idx);
             int port = _rtp_sock[track_idx]->get_local_port();
             sendRtspRequest("SETUP", control_url,
-                            {"Transport", StrPrinter << "RTP/AVP;unicast;client_port=" << port << "-" << port + 1 << ";mode=record"});
+                            {"Transport", StrPrinter << "RTP/AVP;unicast;client_port=" << port << "-" << port + 1 << ";mode=\"RECORD\""});
         }
             break;
         default:
@@ -595,5 +595,34 @@ void RtspPusher::sendRtspRequest(const string &cmd, const string &url,const StrC
     SockSender::send(std::move(printer));
 }
 
+size_t RtspPusher::getSendSpeed() {
+    size_t ret = TcpClient::getSendSpeed();
+    for (auto &rtp : _rtp_sock) {
+        if (rtp) {
+            ret += rtp->getSendSpeed();
+        }
+    }
+    for (auto &rtcp : _rtcp_sock) {
+        if (rtcp) {
+            ret += rtcp->getSendSpeed();
+        }
+    }
 
+    return ret;
+}
+
+size_t RtspPusher::getSendTotalBytes() {
+    size_t ret = TcpClient::getSendTotalBytes();
+    for (auto &rtp : _rtp_sock) {
+        if (rtp) {
+            ret += rtp->getSendTotalBytes();
+        }
+    }
+    for (auto &rtcp : _rtcp_sock) {
+        if (rtcp) {
+            ret += rtcp->getSendTotalBytes();
+        }
+    }
+    return ret;
+}
 } /* namespace mediakit */

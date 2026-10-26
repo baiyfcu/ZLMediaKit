@@ -42,10 +42,6 @@ public:
         _media_src->setListener(shared_from_this());
     }
 
-    void setTimeStamp(uint32_t stamp){
-        _media_src->setTimeStamp(stamp);
-    }
-
     int readerCount() const{
         return _media_src->readerCount();
     }
@@ -79,6 +75,10 @@ public:
         // 缓存尚未清空时，还允许触发inputFrame函数，以便及时清空缓存  [AUTO-TRANSLATED:7cfd4d49]
         // The inputFrame function is still allowed to be triggered when the cache has not been cleared, so that the cache can be cleared in time.
         return _option.rtmp_demand ? (_clear_cache ? true : _enabled) : true;
+    }
+
+    MediaSource::Ptr getMediaSource() const {
+        return _media_src;
     }
 
 private:

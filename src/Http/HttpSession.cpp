@@ -11,17 +11,42 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <set>
 #include "Common/config.h"
 #include "Common/strCoding.h"
 #include "HttpSession.h"
 #include "HttpConst.h"
+#include "Common/Parser.h"
 #include "Util/base64.h"
 #include "Util/SHA1.h"
+#include "Util/util.h"
 
 using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+// 判断该跨域域名是否在白名单内
+// Check whether the cross-origin domain is in the whitelist
+static bool isOriginAllowed(const string &origin) {
+    using OriginSet = std::set<std::string, StrCaseCompare>;
+    GET_CONFIG_FUNC(OriginSet, allow_origins, Http::kAllowOrigins, [](const string &str) {
+        OriginSet ret;
+        for (auto &item : split(str, ",")) {
+            trim(item);
+            if (!item.empty()) {
+                ret.emplace(item);
+            }
+        }
+        return ret;
+    });
+    // 包含*则允许所有域名跨域
+    // Allow all origins when * is configured
+    if (allow_origins.find("*") != allow_origins.end()) {
+        return true;
+    }
+    return allow_origins.find(origin) != allow_origins.end();
+}
 
 HttpSession::HttpSession(const Socket::Ptr &pSock) : Session(pSock) {
     // 设置默认参数  [AUTO-TRANSLATED:ae5b72e6]
@@ -42,16 +67,24 @@ void HttpSession::onHttpRequest_HEAD() {
 
 void HttpSession::onHttpRequest_OPTIONS() {
     KeyValue header;
-    header.emplace("Allow", "GET, POST, HEAD, OPTIONS");
-    GET_CONFIG(bool, allow_cross_domains, Http::kAllowCrossDomains);
-    if (allow_cross_domains) {
-        header.emplace("Access-Control-Allow-Origin", "*");
-        header.emplace("Access-Control-Allow-Headers", "*");
-        header.emplace("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS");
+    header.emplace("Allow", "GET, POST, PUT, HEAD, OPTIONS, DELETE");
+    if (!_origin.empty() && isOriginAllowed(_origin)) {
+        // 回显origin而不是返回*，避免与Access-Control-Allow-Credentials冲突
+        // Echo the origin instead of returning *, to avoid conflicting with Access-Control-Allow-Credentials
+        header.emplace("Access-Control-Allow-Origin", _origin);
+        header.emplace("Access-Control-Allow-Credentials", "true");
+        // 带凭证的请求不支持通配符，此处回显客户端声明的请求头
+        // Credentialed requests do not support wildcards, so echo the headers declared by the client here
+        auto &req_headers = _parser["Access-Control-Request-Headers"];
+        header.emplace("Access-Control-Allow-Headers", req_headers.empty() ? "*" : req_headers);
+        header.emplace("Access-Control-Allow-Methods", "GET, POST, PUT, HEAD, OPTIONS, DELETE");
+        // 预检结果缓存1天，减少预检请求次数
+        // Cache the preflight result for 1 day to reduce preflight requests
+        header.emplace("Access-Control-Max-Age", "86400");
+        // 跨域响应内容随origin变化，提示缓存服务器按Origin区分缓存
+        // The cross-origin response varies with origin, tell caches to vary on Origin
+        header.emplace("Vary", "Origin");
     }
-    header.emplace("Access-Control-Allow-Credentials", "true");
-    header.emplace("Access-Control-Request-Methods", "GET, POST, OPTIONS");
-    header.emplace("Access-Control-Request-Headers", "Accept,Accept-Language,Content-Language,Content-Type");
     sendResponse(200, true, nullptr, header);
 }
 
@@ -61,6 +94,7 @@ ssize_t HttpSession::onRecvHeader(const char *header, size_t len) {
     static onceToken token([]() {
         s_func_map.emplace("GET", &HttpSession::onHttpRequest_GET);
         s_func_map.emplace("POST", &HttpSession::onHttpRequest_POST);
+        s_func_map.emplace("PUT", &HttpSession::onHttpRequest_POST);
         // DELETE命令用于whip/whep用，只用于触发http api  [AUTO-TRANSLATED:f3b7aaea]
         // DELETE command is used for whip/whep, only used to trigger http api
         s_func_map.emplace("DELETE", &HttpSession::onHttpRequest_POST);
@@ -81,7 +115,7 @@ ssize_t HttpSession::onRecvHeader(const char *header, size_t len) {
         return 0;
     }
 
-    size_t content_len;
+    uint64_t content_len;
     auto &content_len_str = _parser["Content-Length"];
     if (content_len_str.empty()) {
         if (it->first == "POST") {
@@ -108,6 +142,68 @@ ssize_t HttpSession::onRecvHeader(const char *header, size_t len) {
         return _on_recv_body ? -1 : 0;
     }
 
+    HttpBody::Ptr body;
+    if (_parser.method() == "PUT" || _parser.method() == "POST") {
+        NOTICE_EMIT(BroadcastBeforeHttpRequestArgs, Broadcast::kBroadcastBeforeHttpRequest, _parser, body, *this);
+    }
+
+    // 自定义HttpBody直接消费网络分片，不经过HttpRequestSplitter的内存缓存；因此maxReqSize只负责选择缓存策略，
+    // 不能作为这里的上传上限，否则未携带Content-Length的正常流式上传会在默认40KB左右被错误拒绝。
+    // A custom HttpBody consumes network fragments directly without HttpRequestSplitter buffering. Therefore maxReqSize
+    // only selects the buffering strategy and must not be used as the upload limit, or normal unknown-length uploads
+    // would be rejected at roughly the default 40KB threshold.
+    if (body) {
+        GET_CONFIG(uint64_t, max_upload_size_config, Http::kMaxUploadSize);
+        // 已知长度可以在接收body前判断是否超限，避免先向HttpBody写入数据再拒绝请求;
+        // 如果上传文件时不指定content-len，也直接拒绝，因为后续没法触发文件上传完毕事件
+        if (content_len > max_upload_size_config) {
+            WarnL << "Http upload size is too huge or no content-len provided: " << content_len << " > " << max_upload_size_config
+                  << ", please set " << Http::kMaxUploadSize << " in config.ini file.";
+            sendResponse(413, true);
+            _parser.clear();
+            // 仍返回不定长body模式并丢弃连接关闭前可能到达的数据，防止splitter把body误当成下一条请求头。
+            // Keep the splitter in variable-body mode and discard data arriving before close, so body bytes are not
+            // interpreted as another request header.
+            _on_recv_body = [](const char *, size_t) { return true; };
+            return -1;
+        }
+
+        size_t received = 0;
+        _on_recv_body = [this, received, content_len, body, it](const char *data, size_t len) mutable {
+            auto remain = content_len - received;
+            if (len > remain) {
+                // 告知HttpFileStorage，写入的数据长度超过content_len，触发文件删除操作
+                body->writeData(data, len, content_len);
+                // 上传的数据超过声明的content-len， 直接拒绝
+                sendResponse(413, true);
+                WarnL << "Upload file size larger than content_len: " << received + len << " > " << content_len;
+                return false;
+            }
+
+            received += len;
+            body->writeData(data, len, content_len);
+            if (received < content_len) {
+                // 还没收满  [AUTO-TRANSLATED:cecc867e]
+                // Not yet received
+                return true;
+            }
+            // 收满了  [AUTO-TRANSLATED:0c9cebd7]
+            // Received full
+            setContentLen(0);
+            _parser.setBody(std::move(body));
+            (this->*(it->second))();
+            _parser.clear();
+            return false;
+        };
+        // 声明后续都是body；Http body在本对象缓冲，不通过HttpRequestSplitter保存  [AUTO-TRANSLATED:0012b6c1]
+        // Declare that the following is all body; Http body is buffered in this object, not saved through HttpRequestSplitter
+        return -1;
+    }
+
+    // 未提供自定义HttpBody时保持原有语义：maxReqSize仅决定是否放弃内存整包缓存并改为分片回调，
+    // 不在本分支中把它扩展为普通请求体的硬上限。
+    // Without a custom HttpBody, preserve the original behavior: maxReqSize only switches from whole-body buffering
+    // to fragment callbacks; it is not extended into a hard limit for ordinary request bodies in this branch.
     if (content_len > _max_req_size) {
         // // 不定长body或超大body ////  [AUTO-TRANSLATED:8d66ee77]
         // // Indefinite length body or oversized body ////
@@ -117,10 +213,9 @@ ssize_t HttpSession::onRecvHeader(const char *header, size_t len) {
         }
 
         size_t received = 0;
-        auto parser = std::move(_parser);
-        _on_recv_body = [this, parser, received, content_len](const char *data, size_t len) mutable {
+        _on_recv_body = [this, received, content_len](const char *data, size_t len) mutable {
             received += len;
-            onRecvUnlimitedContent(parser, data, len, content_len, received);
+            onRecvUnlimitedContent(_parser, data, len, content_len, received);
             if (received < content_len) {
                 // 还没收满  [AUTO-TRANSLATED:cecc867e]
                 // Not yet received
@@ -130,6 +225,7 @@ ssize_t HttpSession::onRecvHeader(const char *header, size_t len) {
             // 收满了  [AUTO-TRANSLATED:0c9cebd7]
             // Received full
             setContentLen(0);
+            _parser.clear();
             return false;
         };
         // 声明后续都是body；Http body在本对象缓冲，不通过HttpRequestSplitter保存  [AUTO-TRANSLATED:0012b6c1]
@@ -218,6 +314,7 @@ bool HttpSession::checkWebSocket() {
     if (Sec_WebSocket_Key.empty()) {
         return false;
     }
+    _is_websocket = true;
     auto Sec_WebSocket_Accept = encodeBase64(SHA1::encode_bin(Sec_WebSocket_Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
 
     KeyValue headerOut;
@@ -228,22 +325,22 @@ bool HttpSession::checkWebSocket() {
         headerOut["Sec-WebSocket-Protocol"] = _parser["Sec-WebSocket-Protocol"];
     }
 
-    auto res_cb = [this, headerOut]() {
-        _live_over_websocket = true;
-        sendResponse(101, false, nullptr, headerOut, nullptr, true);
+    auto res_cb = []() {
+        // 改成先回复http头模式，以解决按需播放场景下websocket请求pending问题：#4553
     };
 
-    auto res_cb_flv = [this, headerOut]() mutable {
-        _live_over_websocket = true;
+    auto res_immediately = [this, headerOut]() mutable {
         headerOut.emplace("Cache-Control", "no-store");
         sendResponse(101, false, nullptr, headerOut, nullptr, true);
+        _live_over_websocket = true;
     };
 
     // 判断是否为websocket-flv  [AUTO-TRANSLATED:31682d7a]
     // Determine whether it is websocket-flv
-    if (checkLiveStreamFlv(res_cb_flv)) {
+    if (checkLiveStreamFlv(res_cb)) {
         // 这里是websocket-flv直播请求  [AUTO-TRANSLATED:4bea5956]
         // This is a websocket-flv live request
+        res_immediately();
         return true;
     }
 
@@ -252,6 +349,7 @@ bool HttpSession::checkWebSocket() {
     if (checkLiveStreamTS(res_cb)) {
         // 这里是websocket-ts直播请求  [AUTO-TRANSLATED:8ab08dd6]
         // This is a websocket-ts live request
+        res_immediately();
         return true;
     }
 
@@ -260,6 +358,7 @@ bool HttpSession::checkWebSocket() {
     if (checkLiveStreamFMP4(res_cb)) {
         // 这里是websocket-fmp4直播请求  [AUTO-TRANSLATED:ccf0c1e2]
         // This is a websocket-fmp4 live request
+        res_immediately();
         return true;
     }
 
@@ -310,6 +409,12 @@ bool HttpSession::checkLiveStream(const string &schema, const string &url_suffix
         return false;
     }
 
+    if (_is_websocket) {
+        _media_info.protocol = overSsl() ? "wss" : "ws";
+    } else {
+        _media_info.protocol = overSsl() ? "https" : "http";
+    }
+
     bool close_flag = !strcasecmp(_parser["Connection"].data(), "close");
     weak_ptr<HttpSession> weak_self = static_pointer_cast<HttpSession>(shared_from_this());
 
@@ -354,7 +459,7 @@ bool HttpSession::checkLiveStream(const string &schema, const string &url_suffix
 
     Broadcast::AuthInvoker invoker = [weak_self, onRes](const string &err) {
         if (auto strong_self = weak_self.lock()) {
-            strong_self->async([onRes, err]() { onRes(err); });
+            strong_self->async([onRes, err]() { onRes(err); }, false);
         }
     };
 
@@ -362,7 +467,7 @@ bool HttpSession::checkLiveStream(const string &schema, const string &url_suffix
     if (!flag) {
         // 该事件无人监听,默认不鉴权  [AUTO-TRANSLATED:e1fbc6ae]
         // No one is listening to this event, no authentication by default
-        onRes("");
+        invoker("");
     }
     return true;
 }
@@ -392,7 +497,7 @@ bool HttpSession::checkLiveStreamFMP4(const function<void()> &cb) {
         _fmp4_reader = fmp4_src->getRing()->attach(getPoller());
         _fmp4_reader->setGetInfoCB([weak_self]() {
             Any ret;
-            ret.set(static_pointer_cast<SockInfo>(weak_self.lock()));
+            ret.set(static_pointer_cast<Session>(weak_self.lock()));
             return ret;
         });
         _fmp4_reader->setDetachCB([weak_self]() {
@@ -442,7 +547,7 @@ bool HttpSession::checkLiveStreamTS(const function<void()> &cb) {
         _ts_reader = ts_src->getRing()->attach(getPoller());
         _ts_reader->setGetInfoCB([weak_self]() {
             Any ret;
-            ret.set(static_pointer_cast<SockInfo>(weak_self.lock()));
+            ret.set(static_pointer_cast<Session>(weak_self.lock()));
             return ret;
         });
         _ts_reader->setDetachCB([weak_self]() {
@@ -657,6 +762,23 @@ void HttpSession::sendResponse(int code,
                                const HttpSession::KeyValue &header,
                                const HttpBody::Ptr &body,
                                bool no_content_length) {
+    if (_live_over_websocket) {
+        WebSocketHeader ws_header;
+        ws_header._fin = true;
+        ws_header._reserved = 0;
+        ws_header._opcode = WebSocketHeader::CLOSE;
+        ws_header._mask_flag = false;
+        uint16_t why = htons(0xFFFF & code);
+        std::string buffer;
+        buffer.append(reinterpret_cast<char *>(&why), 2);
+        if (body && code != 404) {
+            buffer.append(body->readData(body->remainSize())->toString());
+        } else {
+            buffer.append("unknown reason");
+        }
+        WebSocketSplitter::encode(ws_header, std::make_shared<BufferString>(std::move(buffer)));
+        return;
+    }
     GET_CONFIG(string, charSet, Http::kCharSet);
     GET_CONFIG(uint32_t, keepAliveSec, Http::kKeepAliveSecond);
 
@@ -686,10 +808,12 @@ void HttpSession::sendResponse(int code,
     headerOut.emplace("Server", kServerName);
     headerOut.emplace("Connection", bClose ? "close" : "keep-alive");
 
-    GET_CONFIG(bool, allow_cross_domains, Http::kAllowCrossDomains);
-    if (allow_cross_domains && !_origin.empty()) {
+    if (!_origin.empty() && isOriginAllowed(_origin)) {
         headerOut.emplace("Access-Control-Allow-Origin", _origin);
         headerOut.emplace("Access-Control-Allow-Credentials", "true");
+        // 跨域响应内容随origin变化，提示缓存服务器按Origin区分缓存
+        // The cross-origin response varies with origin, tell caches to vary on Origin
+        headerOut.emplace("Vary", "Origin");
     }
 
     if (!bClose) {
@@ -732,7 +856,13 @@ void HttpSession::sendResponse(int code,
     for (auto &pr : header) {
         str += pr.first;
         str += ": ";
-        str += pr.second;
+        // Strip CR and LF from header values to prevent HTTP response splitting (CWE-113).
+        // Any injected \r or \n is silently removed; other characters pass through unchanged.
+        for (char c : pr.second) {
+            if (c != '\r' && c != '\n') {
+                str += c;
+            }
+        }
         str += "\r\n";
     }
     str += "\r\n";

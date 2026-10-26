@@ -15,6 +15,12 @@
 #if !defined(ANDROID)
 #include <execinfo.h>
 #endif//!defined(ANDROID)
+#else
+#include <fcntl.h>
+#include <io.h>
+#include <Windows.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "DbgHelp.lib")
 #endif//!defined(_WIN32)
 
 #include <cstdlib>
@@ -179,6 +185,32 @@ void System::startDaemon(bool &kill_parent_if_failed) {
 #endif // _WIN32
 }
 
+#ifdef _WIN32
+static LONG __stdcall customUnhandledExceptionFilter(EXCEPTION_POINTERS *pException) {
+    // 生成 dump 文件名，带时间戳
+    char dumpPath[MAX_PATH];
+    std::time_t t = std::time(nullptr);
+    std::tm tm;
+#ifdef _MSC_VER
+    localtime_s(&tm, &t);
+#else
+    tm = *std::localtime(&t);
+#endif
+    std::strftime(dumpPath, sizeof(dumpPath), "crash_%Y%m%d_%H%M%S.dmp", &tm);
+
+    HANDLE hFile = CreateFileA(dumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mdei;
+        mdei.ThreadId = GetCurrentThreadId();
+        mdei.ExceptionPointers = pException;
+        mdei.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpNormal, &mdei, nullptr, nullptr);
+        CloseHandle(hFile);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif//!defined(_WIN32)
+
 void System::systemSetup(){
 
 #ifdef ENABLE_JEMALLOC_DUMP
@@ -213,6 +245,26 @@ void System::systemSetup(){
     // Ignore the hang up signal
     signal(SIGHUP, SIG_IGN);
 #endif// ANDROID
+#else
+    // 避免系统弹窗导致程序阻塞，适合无界面或后台服务场景。
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
+#if !defined(__MINGW32__)
+    // 将assert和error时错误输出
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
+#endif
+
+    _setmode(0, _O_BINARY);
+    _setmode(1, _O_BINARY);
+    _setmode(2, _O_BINARY);
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0); 
+    std::ios_base::sync_with_stdio(false);
+
+      // 注册crash自动生成dump（等价core dump）
+    SetUnhandledExceptionFilter(customUnhandledExceptionFilter);
 #endif//!defined(_WIN32)
 }
 

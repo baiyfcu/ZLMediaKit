@@ -279,7 +279,7 @@ std::string HandshakePacket::dump(){
     for(size_t i=0;i<ext_list.size();++i){
         printer<<ext_list[i]->dump()<<"\r\n";
     }
-    return std::move(printer);
+    return printer;
 }
 bool HandshakePacket::loadFromData(uint8_t *buf, size_t len) {
     if (HEADER_SIZE + HS_CONTENT_MIN_SIZE > len) {
@@ -340,24 +340,38 @@ bool HandshakePacket::loadFromData(uint8_t *buf, size_t len) {
 
 bool HandshakePacket::loadExtMessage(uint8_t *buf, size_t len) {
     uint8_t *ptr = buf;
+    uint8_t *end = buf + len;
     ext_list.clear();
     uint16_t type;
     uint16_t length;
     HSExt::Ptr ext;
-    while (ptr < buf + len) {
+    while (ptr < end) {
+        // Ensure the 4-byte extension block header is fully present
+        if (static_cast<size_t>(end - ptr) < 4) {
+            WarnL << "truncated HS EXT header, remaining=" << (end - ptr);
+            break;
+        }
         type = loadUint16(ptr);
         length = loadUint16(ptr + 2);
+        // Attacker-controlled length: verify the declared block size fits in the datagram
+        // before handing it to any loader (which may memcpy the declared length).
+        const size_t block_size = static_cast<size_t>(length) * 4 + 4;
+        if (block_size > static_cast<size_t>(end - ptr)) {
+            WarnL << "HS EXT block exceeds datagram, type=" << type
+                  << " declared=" << block_size << " remaining=" << (end - ptr);
+            break;
+        }
         switch (type) {
             case HSExt::SRT_CMD_HSREQ:
             case HSExt::SRT_CMD_HSRSP: ext = std::make_shared<HSExtMessage>(); break;
             case HSExt::SRT_CMD_SID: ext = std::make_shared<HSExtStreamID>(); break;
             case HSExt::SRT_CMD_KMREQ:
             case HSExt::SRT_CMD_KMRSP: 
-				ext = std::make_shared<HSExtKeyMaterial>(); break;
+                ext = std::make_shared<HSExtKeyMaterial>(); break;
             default: WarnL << "not support ext " << type; break;
         }
         if (ext) {
-            if (ext->loadFromData(ptr, length * 4 + 4)) {
+            if (ext->loadFromData(ptr, block_size)) {
                 ext_list.push_back(std::move(ext));
             } else {
                 WarnL << "parse HS EXT failed type=" << type << " len=" << length;
@@ -365,7 +379,7 @@ bool HandshakePacket::loadExtMessage(uint8_t *buf, size_t len) {
             ext = nullptr;
         }
 
-        ptr += length * 4 + 4;
+        ptr += block_size;
     }
     return true;
 }
@@ -565,11 +579,25 @@ bool NAKPacket::loadFromData(uint8_t *buf, size_t len) {
     LostPair lost;
     while (ptr < end) {
         if ((*ptr) & 0x80) {
+            // 区间模式需要读取8字节，剩余不足则为畸形包  [AUTO-TRANSLATED:e33c05c1]
+            // Range mode reads 8 bytes; insufficient remainder means malformed packet
+            if ((size_t)(end - ptr) < 8) {
+                WarnL << "malformed NAK packet: truncated range CIF, remaining " << (size_t)(end - ptr) << " bytes";
+                lost_list.clear();
+                return false;
+            }
             lost.first = loadUint32(ptr) & 0x7fffffff;
             lost.second = loadUint32(ptr + 4) & 0x7fffffff;
             lost.second += 1;
             ptr += 8;
         } else {
+            // 单点模式需要读取4字节，剩余不足则为畸形包  [AUTO-TRANSLATED:e33c05c1]
+            // Single mode reads 4 bytes; insufficient remainder means malformed packet
+            if ((size_t)(end - ptr) < 4) {
+                WarnL << "malformed NAK packet: truncated single CIF, remaining " << (size_t)(end - ptr) << " bytes";
+                lost_list.clear();
+                return false;
+            }
             lost.first = loadUint32(ptr);
             lost.second = lost.first + 1;
             ptr += 4;
@@ -627,7 +655,7 @@ std::string NAKPacket::dump() {
     for (auto it : lost_list) {
         printer << "[ " << it.first << " , " << it.second - 1 << " ]";
     }
-    return std::move(printer);
+    return printer;
 }
 
 bool MsgDropReqPacket::loadFromData(uint8_t *buf, size_t len) {

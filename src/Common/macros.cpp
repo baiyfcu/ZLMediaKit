@@ -30,9 +30,9 @@ namespace mediakit {
  * [AUTO-TRANSLATED:f214f734]
  */
 #if !defined(ENABLE_VERSION)
-ZLMEDIAKIT_API const char kServerName[] = "ZLMediaKit-8.0(build in " __DATE__ " " __TIME__ ")";
+const char kServerName[] =  "ZLMediaKit-9.0(build in " __DATE__ " " __TIME__ ")";
 #else
-ZLMEDIAKIT_API const char kServerName[] = "ZLMediaKit(git hash:" COMMIT_HASH "/" COMMIT_TIME ",branch:" BRANCH_NAME ",build time:" BUILD_TIME ")";
+const char kServerName[] = "ZLMediaKit(git hash:" COMMIT_HASH "/" COMMIT_TIME ",branch:" BRANCH_NAME ",build time:" BUILD_TIME ")";
 #endif
 
 }//namespace mediakit

@@ -96,6 +96,8 @@ void RtmpSession::onCmd_connect(AMFDecoder &dec) {
     // 赋值rtmp app
     _media_info.app = params["app"].as_string();
 
+    _media_info.protocol = overSsl() ? "rtmps" : "rtmp";
+
     bool ok = true; //(app == APP_NAME);
     AMFValue version(AMF_OBJECT);
     version.set("fmsVer", "FMS/3,0,1,123");
@@ -271,17 +273,7 @@ void RtmpSession::sendPlayResponse(const string &err, const RtmpMediaSource::Ptr
                  "details", _media_info.stream,
                  "clientid", "0"});
 
-    // |RtmpSampleAccess(true, true)
     AMFEncoder invoke;
-    invoke << "|RtmpSampleAccess" << true << true;
-    sendResponse(MSG_DATA, invoke.data());
-
-    //onStatus(NetStream.Data.Start)
-    invoke.clear();
-    AMFValue obj(AMF_OBJECT);
-    obj.set("code", "NetStream.Data.Start");
-    invoke << "onStatus" << obj;
-    sendResponse(MSG_DATA, invoke.data());
 
     //onStatus(NetStream.Play.PublishNotify)
     sendStatus({ "level", "status",
@@ -306,7 +298,7 @@ void RtmpSession::sendPlayResponse(const string &err, const RtmpMediaSource::Ptr
     weak_ptr<RtmpSession> weak_self = static_pointer_cast<RtmpSession>(shared_from_this());
     _ring_reader->setGetInfoCB([weak_self]() {
         Any ret;
-        ret.set(static_pointer_cast<SockInfo>(weak_self.lock()));
+        ret.set(static_pointer_cast<Session>(weak_self.lock()));
         return ret;
     });
     _ring_reader->setReadCB([weak_self](const RtmpMediaSource::RingDataType &pkt) {
@@ -523,7 +515,7 @@ void RtmpSession::onRtmpChunk(RtmpPacket::Ptr packet) {
     case MSG_DATA:
     case MSG_DATA3: {
         AMFDecoder dec(chunk_data.buffer, chunk_data.type_id == MSG_DATA3 ? 3 : 0);
-        std::string type = dec.load<std::string>();
+        std::string type = amfLoadLeadingString(dec);
         if (type == "@setDataFrame") {
             setMetaData(dec);
         } else if (type == "onMetaData") {
@@ -585,13 +577,21 @@ void RtmpSession::onCmd_seek(AMFDecoder &dec) {
 }
 
 void RtmpSession::onSendMedia(const RtmpPacket::Ptr &pkt) {
-    sendRtmp(pkt->type_id, pkt->stream_index, pkt, pkt->time_stamp, pkt->chunk_id);
+    switch (pkt->type_id) {
+        case MSG_AUDIO:
+            sendRtmp(pkt->type_id, STREAM_MEDIA, pkt, pkt->time_stamp, CHUNK_AUDIO);
+            break;
+        case MSG_VIDEO:
+            sendRtmp(pkt->type_id, STREAM_MEDIA, pkt, pkt->time_stamp, CHUNK_VIDEO);
+            break;
+        default:
+            sendRtmp(pkt->type_id, pkt->stream_index, pkt, pkt->time_stamp, pkt->chunk_id);
+            break;
+    }
 }
 
 bool RtmpSession::close(MediaSource &sender) {
-    //此回调在其他线程触发
-    string err = StrPrinter << "close media: " << sender.getUrl();
-    safeShutdown(SockException(Err_shutdown, err));
+    shutdown(SockException(Err_shutdown, "close media: " + sender.getUrl()));
     return true;
 }
 

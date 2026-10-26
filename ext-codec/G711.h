@@ -18,10 +18,6 @@ namespace mediakit{
 
 /**
  * G711音频通道
- * G711 audio channel
- 
- 
- * [AUTO-TRANSLATED:57f8bc08]
  */
 class G711Track : public AudioTrackImp{
 public:
@@ -29,9 +25,10 @@ public:
     G711Track(CodecId codecId, int sample_rate, int channels, int sample_bit)
         : AudioTrackImp(codecId, sample_rate, channels, 16) {}
 
+    toolkit::Buffer::Ptr getExtraData() const override;
+    void setExtraData(const uint8_t *data, size_t size) override;
 private:
-    Sdp::Ptr getSdp(uint8_t payload_type) const override;
-    Track::Ptr clone() const override;
+    Track::Ptr clone() const override { return std::make_shared<G711Track>(*this); }
 };
 
 }//namespace mediakit

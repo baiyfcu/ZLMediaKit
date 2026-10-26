@@ -26,58 +26,20 @@ file(GLOB MediaKit_SRC_LIST
   ${CMAKE_CURRENT_SOURCE_DIR}/*/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/*/*.h)
 
-if(NOT ENABLE_SRT)
-    file(GLOB SRT_SRC_LIST
-        ${CMAKE_CURRENT_SOURCE_DIR}/Srt/*.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/Srt/*.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Srt/*.h)
-    list(REMOVE_ITEM MediaKit_SRC_LIST ${SRT_SRC_LIST})
-endif()
-
-#if(NOT ENABLE_FERRY)
-#    file(GLOB FERRY_SRC_LIST
-#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.c
-#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.cpp
-#        ${CMAKE_CURRENT_SOURCE_DIR}/esfileferry/*.h)
-#    list(REMOVE_ITEM MediaKit_SRC_LIST ${FERRY_SRC_LIST})
-#endif()
-
 if(USE_SOLUTION_FOLDERS AND (NOT GROUP_BY_EXPLORER))
   # 在 IDE 中对文件进行分组, 源文件和头文件分开
   set_file_group("${CMAKE_CURRENT_SOURCE_DIR}" ${MediaKit_SRC_LIST})
 endif()
 
-if(NOT ENABLE_CXX_API OR IOS)
-  # 添加库
-  add_library(zlmediakit STATIC ${MediaKit_SRC_LIST})
-  add_library(ZLMediaKit::MediaKit ALIAS zlmediakit)
-  list(APPEND COMPILE_DEFINITIONS MediaKit_STATIC)
-else()
-  # 在 Windows 下启用导出所有符号的选项
-  if(WIN32)
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
-  endif()
-  # 添加动态库
-  add_definitions(-DMediaKit_EXPORTS)
-  add_library(zlmediakit SHARED ${MediaKit_SRC_LIST})
-  add_library(ZLMediaKit::MediaKit ALIAS zlmediakit)
-  target_link_libraries(zlmediakit
-          PUBLIC ZLMediaKit::ext-codec)
-  # 设置生成的导出库文件 .lib（对于 Windows）
-  set_target_properties(zlmediakit PROPERTIES
-          OUTPUT_NAME zlmediakit  # 输出的 DLL 文件名
-  )
 
-  message(STATUS "MK_LINK_LIBRARIES2: ${MK_LINK_LIBRARIES}")
-
-endif ()
+# 添加库
+add_library(zlmediakit STATIC ${MediaKit_SRC_LIST})
+add_library(ZLMediaKit::MediaKit ALIAS zlmediakit)
 
 set(LINK_LIBRARIES ${MK_LINK_LIBRARIES})
 list(REMOVE_ITEM LINK_LIBRARIES ZLMediaKit::MediaKit)
 set(COMPILE_DEFINITIONS ${MK_COMPILE_DEFINITIONS})
 
-# 输出LINK_LIBRARIES
-message(STATUS "LINK_LIBRARIES: ${LINK_LIBRARIES}")
 target_compile_definitions(zlmediakit
   PUBLIC ${COMPILE_DEFINITIONS})
 target_compile_options(zlmediakit
@@ -97,13 +59,9 @@ update_cached_list(MK_LINK_LIBRARIES ZLMediaKit::MediaKit)
 if(ENABLE_CXX_API)
   # 保留目录结构
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-    DESTINATION ${INSTALL_PATH_INCLUDE}/ZLMediaKit
-    REGEX ".*[.](md|cpp)$" EXCLUDE)
-    if(ENABLE_CXX_API)
-      install(TARGETS zlmediakit
-        DESTINATION ${INSTALL_PATH_BIN})
-    else()
-      install(TARGETS zlmediakit
-        DESTINATION ${INSTALL_PATH_LIB})
-    endif()
+      DESTINATION ${INSTALL_PATH_INCLUDE}/ZLMediaKit
+      FILES_MATCHING
+        PATTERN "*.h")
+  install(TARGETS zlmediakit
+    DESTINATION ${INSTALL_PATH_LIB})
 endif ()

@@ -22,6 +22,8 @@ HlsPlayer::HlsPlayer(const EventPoller::Ptr &poller) {
 void HlsPlayer::play(const string &url) {
     _play_result = false;
     _play_url = url;
+    _last_sequence = -1;
+    _playlist_reload_changed = true;
     setProxyUrl((*this)[Client::kProxyUrl]);
     setAllowResendRequest(true);
     fetchIndexFile();
@@ -36,6 +38,7 @@ void HlsPlayer::fetchIndexFile() {
     }
     setCompleteTimeout((*this)[Client::kTimeoutMS].as<int>());
     setMethod("GET");
+    addCustomHeader(this);
     sendRequest(_play_url);
 }
 
@@ -133,6 +136,10 @@ void HlsPlayer::fetchSegment() {
         if (!(*this)[Client::kNetAdapter].empty()) {
             _http_ts_player->setNetAdapter((*this)[Client::kNetAdapter]);
         }
+    } else {
+        // 每次请求新的ts片段时重置HttpTSPlayer状态
+        _http_ts_player->clear();
+        _http_ts_player->setProxyUrl((*this)[Client::kProxyUrl]);
     }
 
     Ticker ticker;
@@ -146,6 +153,7 @@ void HlsPlayer::fetchSegment() {
             return;
         }
         if (err) {
+            strong_self->onSegmentDownloadFailed(err);
             WarnL << "Download ts segment " << url << " failed:" << err;
             if (err.getErrCode() == Err_timeout) {
                 strong_self->_timeout_multiple = MAX(strong_self->_timeout_multiple + 1, MAX_TIMEOUT_MULTIPLE);
@@ -197,10 +205,12 @@ void HlsPlayer::fetchSegment() {
 
 bool HlsPlayer::onParsed(bool is_m3u8_inner, int64_t sequence, const map<int, ts_segment> &ts_map) {
     if (!is_m3u8_inner) {
+        auto playlist_changed = _last_sequence != sequence;
+        _playlist_reload_changed = playlist_changed;
         // 这是ts播放列表  [AUTO-TRANSLATED:7ce3d81b]
         // This is the ts playlist
         // This is the ts playlist
-        if (_last_sequence == sequence) {
+        if (!playlist_changed) {
             // 如果是重复的ts列表，那么忽略  [AUTO-TRANSLATED:d15a47f3]
             // If it is a duplicate ts list, then ignore it
             // 但是需要注意, 如果当前ts列表为空了, 那么表明直播结束了或者m3u8文件有问题,需要重新拉流  [AUTO-TRANSLATED:438a8df0]
@@ -278,6 +288,7 @@ void HlsPlayer::onResponseHeader(const string &status, const HttpClient::HttpHea
 
 void HlsPlayer::onResponseBody(const char *buf, size_t size) {
     _m3u8.append(buf, size);
+    _recvtotalbytes += getRecvTotalBytes();
 }
 
 void HlsPlayer::onResponseCompleted(const SockException &ex) {
@@ -306,26 +317,22 @@ float HlsPlayer::delaySecond() {
     if (HlsParser::isM3u8() && HlsParser::getTargetDur() > 0) {
         float targetOffset;
         if (HlsParser::isLive()) {
-            // see RFC 8216, Section 4.4.3.8.
-            // 根据rfc刷新index列表的周期应该是分段时间x3, 因为根据规范播放器只处理最后3个Segment  [AUTO-TRANSLATED:07168708]
-            // According to the rfc, the refresh cycle of the index list should be 3 times the segment time, because according to the specification, the player only processes the last 3 Segments
-            // refresh the index list according to rfc cycle should be the segment time x3,
-            // because according to the specification, the player only handles the last 3 segments
-            targetOffset = (float)(3 * HlsParser::getTargetDur());
+            // RFC 8216 Section 6.3.4:
+            // after a changed playlist reload, wait at least one target
+            // duration; after an unchanged reload, wait half a target duration.
+            return _playlist_reload_changed ? (float) HlsParser::getTargetDur()
+                                            : (float) HlsParser::getTargetDur() / 2.0f;
         } else {
             // 点播则一般m3u8文件不会在改变了, 没必要频繁的刷新, 所以按照总时间来进行刷新  [AUTO-TRANSLATED:2ac0a29e]
             // On-demand generally does not change the m3u8 file, there is no need to refresh frequently, so refresh according to the total time
-            // On-demand, the m3u8 file will generally not change, so there is no need to refresh frequently,
             targetOffset = HlsParser::getTotalDuration();
         }
         // 取最小值, 避免因为分段时长不规则而导致的问题  [AUTO-TRANSLATED:073dff48]
         // Take the minimum value to avoid problems caused by irregular segment durations
-        // Take the minimum value to avoid problems caused by irregular segment duration
         if (targetOffset > HlsParser::getTotalDuration()) {
             targetOffset = HlsParser::getTotalDuration();
         }
         // 根据规范为一半的时间  [AUTO-TRANSLATED:07652637]
-        // According to the specification, it is half the time
         // According to the specification, it is half the time
         if (targetOffset / 2 > 1.0f) {
             return targetOffset / 2;
@@ -353,6 +360,13 @@ void HlsPlayer::playDelay(float delay_sec) {
         }, getPoller()));
 }
 
+size_t HlsPlayer::getRecvSpeed() {
+    return TcpClient::getRecvSpeed() + (_http_ts_player ? _http_ts_player->getRecvSpeed() : 0);
+}
+
+size_t HlsPlayer::getRecvTotalBytes() {
+    return TcpClient::getRecvTotalBytes() + (_http_ts_player ? _http_ts_player->getRecvTotalBytes() : 0);
+}
 //////////////////////////////////////////////////////////////////////////
 
 void HlsDemuxer::start(const EventPoller::Ptr &poller, TrackListener *listener) {
@@ -382,6 +396,7 @@ void HlsDemuxer::pushTask(std::function<void()> task) {
 }
 
 bool HlsDemuxer::inputFrame(const Frame::Ptr &frame) {
+    ++_input_frame_count;
     // 为了避免track准备时间过长, 因此在没准备好之前, 直接消费掉所有的帧  [AUTO-TRANSLATED:72b35430]
     // To avoid the track preparation time being too long, all frames are directly consumed before it is ready
     // In order to avoid the track preparation time is too long, so before it is ready, all frames are consumed directly
@@ -476,6 +491,15 @@ void HlsPlayerImp::onPacket(const char *data, size_t len) {
     if (_decoder && _demuxer) {
         _decoder->input((uint8_t *) data, len);
     }
+    _recvtotalbytes += HlsPlayer::getRecvTotalBytes();
+}
+
+void HlsPlayerImp::onSegmentDownloadFailed(const toolkit::SockException &ex) {
+    if (_decoder && ex) {
+        // 失败切片的输入残片不能与下一切片拼接；这里只清输入缓存，不 flush 解码帧。
+        // Input left by a failed segment must not join the next one; clear it without flushing decoded frames.
+        _decoder->clearInputCache();
+    }
 }
 
 void HlsPlayerImp::addTrackCompleted() {
@@ -527,4 +551,11 @@ vector<Track::Ptr> HlsPlayerImp::getTracks(bool ready) const {
     return static_pointer_cast<HlsDemuxer>(_demuxer)->getTracks(ready);
 }
 
+size_t HlsPlayerImp::getRecvSpeed() {
+    return PlayerImp<HlsPlayer, PlayerBase>::getRecvSpeed();
+}
+
+size_t HlsPlayerImp::getRecvTotalBytes() {
+     return _recvtotalbytes;
+}
 }//namespace mediakit

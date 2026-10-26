@@ -17,43 +17,72 @@
 using namespace std;
 using namespace toolkit;
 
+#define REGISTER_STATIC_VAR_INNER(var_name, line) var_name##_##line##__
+#define REGISTER_STATIC_VAR(var_name, line) REGISTER_STATIC_VAR_INNER(var_name, line)
+
+// 静态初始化阶段只登记插件地址，真正的注册动作延后到首次使用时执行  [AUTO-TRANSLATED:c9c1a0d2]
+// Only record the plugin address at static-init time; the real registration is deferred to first use
+// 注意: 必须在静态初始化路径上对插件符号取地址(odr-use)，否则 ext-codec 静态库中的obj不会被链接(LNK2019)
+// Note: the plugin symbol must be odr-used from the static init path, otherwise the objects in the
+// ext-codec static library won't be linked (LNK2019)
+#define REGISTER_CODEC(plugin) \
+extern CodecPlugin plugin;     \
+static toolkit::onceToken REGISTER_STATIC_VAR(s_token, __LINE__) ([]() { \
+    getPendingCodecPlugins().push_back(&plugin); \
+});
+
 namespace mediakit {
 
-static std::unordered_map<int, const CodecPlugin *> s_plugins;
+// 函数内静态对象，避免跨编译单元的静态初始化顺序问题  [AUTO-TRANSLATED:6f0a3e4b]
+// Function-local static object to avoid static initialization order issues across translation units
+static std::unordered_map<int, const CodecPlugin *> &getCodecPlugins() {
+    static std::unordered_map<int, const CodecPlugin *> plugins;
+    return plugins;
+}
 
-extern CodecPlugin h264_plugin;
-extern CodecPlugin h265_plugin;
-extern CodecPlugin jpeg_plugin;
-extern CodecPlugin aac_plugin;
-extern CodecPlugin opus_plugin;
-extern CodecPlugin g711a_plugin;
-extern CodecPlugin g711u_plugin;
-extern CodecPlugin l16_plugin;
-extern CodecPlugin mp3_plugin;
-extern CodecPlugin svac3_plugin;
+// 静态初始化阶段只登记插件地址，注册动作延后到首次使用时执行  [AUTO-TRANSLATED:c9c1a0d2]
+// Only record plugin addresses at static-init time; the real registration is deferred to first use
+static std::vector<const CodecPlugin *> &getPendingCodecPlugins() {
+    static std::vector<const CodecPlugin *> plugins;
+    return plugins;
+}
 
-onceToken g_plugins_token([]() { Factory::loadPlugins(); });
+// ext-codec 是独立静态库，插件符号的 odr-use 由 Factory.h 中的 REGISTER_CODEC 宏保证，
+// 详见该宏注释: 依赖静态初始化路径上的引用，否则链接器不会加载插件所在的obj(LNK2019)
+// ext-codec is a standalone static library; the odr-use of plugin symbols is guaranteed by the
+// REGISTER_CODEC macro in Factory.h (see its comment): without a reference from the static init
+// path, MSVC won't load the objects that define the plugins (LNK2019)
+REGISTER_CODEC(vp8_plugin);
+REGISTER_CODEC(vp9_plugin);
+REGISTER_CODEC(h264_plugin);
+REGISTER_CODEC(h265_plugin);
+REGISTER_CODEC(av1_plugin);
+REGISTER_CODEC(jpeg_plugin);
+REGISTER_CODEC(aac_plugin);
+REGISTER_CODEC(opus_plugin);
+REGISTER_CODEC(g711a_plugin)
+REGISTER_CODEC(g711u_plugin);
+REGISTER_CODEC(l16_plugin);
+REGISTER_CODEC(mp3_plugin);
+REGISTER_CODEC(mp2v_plugin);
+REGISTER_CODEC(mp2a_plugin);
 
-void Factory::loadPlugins() {
-    static bool load = false;
-    if (!load) {
-        load = true;
-        registerPlugin(h264_plugin);
-        registerPlugin(h265_plugin);
-        registerPlugin(jpeg_plugin);
-        registerPlugin(aac_plugin);
-        registerPlugin(opus_plugin);
-        registerPlugin(g711a_plugin);
-        registerPlugin(g711u_plugin);
-        registerPlugin(l16_plugin);
-        registerPlugin(mp3_plugin);
-        registerPlugin(svac3_plugin);
-    }
+// 首次调用时懒加载并注册所有编解码插件，之后直接查表，无需在各处重复调用  [AUTO-TRANSLATED:2a1f9d17]
+// Lazily register all codec plugins on first call, then just look up the table
+static const CodecPlugin *getCodecPlugin(CodecId codec) {
+    static const std::unordered_map<int, const CodecPlugin *> &plugins = []() -> const std::unordered_map<int, const CodecPlugin *> & {
+        for (auto plugin : getPendingCodecPlugins()) {
+            Factory::registerPlugin(*plugin);
+        }
+        return getCodecPlugins();
+    }();
+    auto it = plugins.find((int)codec);
+    return it == plugins.end() ? nullptr : it->second;
 }
 
 void Factory::registerPlugin(const CodecPlugin &plugin) {
     InfoL << "Load codec: " << getCodecName(plugin.getCodec());
-    s_plugins[(int)(plugin.getCodec())] = &plugin;
+    getCodecPlugins()[(int)(plugin.getCodec())] = &plugin;
 }
 
 Track::Ptr Factory::getTrackBySdp(const SdpTrack::Ptr &track) {
@@ -63,11 +92,11 @@ Track::Ptr Factory::getTrackBySdp(const SdpTrack::Ptr &track) {
         // Get the encoding type, sampling rate, and other information based on the traditional payload type
         codec = RtpPayload::getCodecId(track->_pt);
     }
-    auto it = s_plugins.find(codec);
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(codec);
+    if (!plugin) {
         return getTrackByCodecId(codec, track->_samplerate, track->_channel);
     }
-    return it->second->getTrackBySdp(track);
+    return plugin->getTrackBySdp(track);
 }
 
 Track::Ptr Factory::getTrackByAbstractTrack(const Track::Ptr &track) {
@@ -80,21 +109,21 @@ Track::Ptr Factory::getTrackByAbstractTrack(const Track::Ptr &track) {
 }
 
 RtpCodec::Ptr Factory::getRtpEncoderByCodecId(CodecId codec, uint8_t pt) {
-    auto it = s_plugins.find(codec);
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(codec);
+    if (!plugin) {
         WarnL << "Unsupported codec: " << getCodecName(codec) << ", use CommonRtpEncoder";
         return std::make_shared<CommonRtpEncoder>();
     }
-    return it->second->getRtpEncoderByCodecId(pt);
+    return plugin->getRtpEncoderByCodecId(pt);
 }
 
 RtpCodec::Ptr Factory::getRtpDecoderByCodecId(CodecId codec) {
-    auto it = s_plugins.find(codec);
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(codec);
+    if (!plugin) {
         WarnL << "Unsupported codec: " << getCodecName(codec) << ", use CommonRtpDecoder";
         return std::make_shared<CommonRtpDecoder>(codec, 10 * 1024);
     }
-    return it->second->getRtpDecoderByCodecId();
+    return plugin->getRtpDecoderByCodecId();
 }
 
 // ///////////////////////////rtmp相关///////////////////////////////////////////  [AUTO-TRANSLATED:da9645df]
@@ -109,9 +138,6 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
         if (str == "hev1" || str == "hvc1") {
             return CodecH265;
         }
-        if (str == "svac3") {
-            return CodecSVAC3;
-        }
         WarnL << "Unsupported codec: " << str;
         return CodecInvalid;
     }
@@ -119,12 +145,16 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
     if (val.type() != AMF_NULL) {
         auto type_id = (RtmpVideoCodec)val.as_integer();
         switch (type_id) {
+            case RtmpVideoCodec::fourcc_avc1:
             case RtmpVideoCodec::h264: return CodecH264;
             case RtmpVideoCodec::fourcc_hevc:
             case RtmpVideoCodec::h265: return CodecH265;
+            case RtmpVideoCodec::av1:
             case RtmpVideoCodec::fourcc_av1: return CodecAV1;
+            case RtmpVideoCodec::vp8:
+            case RtmpVideoCodec::fourcc_vp8: return CodecVP8;
+            case RtmpVideoCodec::vp9:
             case RtmpVideoCodec::fourcc_vp9: return CodecVP9;
-			case RtmpVideoCodec::svac3: return CodecSVAC3;
             default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
         }
     }
@@ -132,8 +162,8 @@ static CodecId getVideoCodecIdByAmf(const AMFValue &val) {
 }
 
 Track::Ptr Factory::getTrackByCodecId(CodecId codec, int sample_rate, int channels, int sample_bit) {
-    auto it = s_plugins.find(codec);
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(codec);
+    if (!plugin) {
         auto type = mediakit::getTrackType(codec);
         switch (type) {
             case TrackAudio: {
@@ -147,7 +177,7 @@ Track::Ptr Factory::getTrackByCodecId(CodecId codec, int sample_rate, int channe
             default: WarnL << "Unsupported codec: " << getCodecName(codec); return nullptr;
         }
     }
-    return it->second->getTrackByCodecId(sample_rate, channels, sample_bit);
+    return plugin->getTrackByCodecId(sample_rate, channels, sample_bit);
 }
 
 Track::Ptr Factory::getVideoTrackByAmf(const AMFValue &amf) {
@@ -176,7 +206,8 @@ static CodecId getAudioCodecIdByAmf(const AMFValue &val) {
             case RtmpAudioCodec::adpcm: return CodecADPCM;
             case RtmpAudioCodec::g711a: return CodecG711A;
             case RtmpAudioCodec::g711u: return CodecG711U;
-            case RtmpAudioCodec::opus: return CodecOpus;
+            case RtmpAudioCodec::opus:
+            case RtmpAudioCodec::fourcc_opus: return CodecOpus;
             default: WarnL << "Unsupported codec: " << (int)type_id; return CodecInvalid;
         }
     }
@@ -192,50 +223,50 @@ Track::Ptr Factory::getAudioTrackByAmf(const AMFValue &amf, int sample_rate, int
 }
 
 RtmpCodec::Ptr Factory::getRtmpDecoderByTrack(const Track::Ptr &track) {
-    auto it = s_plugins.find(track->getCodecId());
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(track->getCodecId());
+    if (!plugin) {
         WarnL << "Unsupported codec: " << track->getCodecName() << ", use CommonRtmpDecoder";
         return std::make_shared<CommonRtmpDecoder>(track);
     }
-    return it->second->getRtmpDecoderByTrack(track);
+    return plugin->getRtmpDecoderByTrack(track);
 }
 
 RtmpCodec::Ptr Factory::getRtmpEncoderByTrack(const Track::Ptr &track) {
-    auto it = s_plugins.find(track->getCodecId());
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(track->getCodecId());
+    if (!plugin) {
         auto amf = Factory::getAmfByCodecId(track->getCodecId());
         WarnL << "Unsupported codec: " << track->getCodecName() << (amf ? ", use CommonRtmpEncoder" : "");
         return amf ? std::make_shared<CommonRtmpEncoder>(track) : nullptr;
     }
-    return it->second->getRtmpEncoderByTrack(track);
+    return plugin->getRtmpEncoderByTrack(track);
 }
 
 AMFValue Factory::getAmfByCodecId(CodecId codecId) {
     GET_CONFIG(bool, enhanced, Rtmp::kEnhanced);
     switch (codecId) {
         case CodecAAC: return AMFValue((int)RtmpAudioCodec::aac);
-        case CodecH264: return AMFValue((int)RtmpVideoCodec::h264);
+        case CodecH264: return enhanced ? AMFValue((int)RtmpVideoCodec::fourcc_avc1) : AMFValue((int)RtmpVideoCodec::h264);
         case CodecH265: return enhanced ? AMFValue((int)RtmpVideoCodec::fourcc_hevc) : AMFValue((int)RtmpVideoCodec::h265);
         case CodecG711A: return AMFValue((int)RtmpAudioCodec::g711a);
         case CodecG711U: return AMFValue((int)RtmpAudioCodec::g711u);
-        case CodecOpus: return AMFValue((int)RtmpAudioCodec::opus);
+        case CodecOpus: return enhanced ? AMFValue((int)RtmpAudioCodec::fourcc_opus) : AMFValue((int)RtmpAudioCodec::opus);
         case CodecADPCM: return AMFValue((int)RtmpAudioCodec::adpcm);
         case CodecMP3: return AMFValue((int)RtmpAudioCodec::mp3);
-        case CodecAV1: return AMFValue((int)RtmpVideoCodec::fourcc_av1);
-        case CodecVP9: return AMFValue((int)RtmpVideoCodec::fourcc_vp9);
-		case CodecSVAC3: return AMFValue((int)RtmpVideoCodec::svac3);
+        case CodecAV1: return enhanced ? AMFValue((int)RtmpVideoCodec::fourcc_av1) : AMFValue((int)RtmpVideoCodec::av1);
+        case CodecVP8: return enhanced ? AMFValue((int)RtmpVideoCodec::fourcc_vp8) : AMFValue((int)RtmpVideoCodec::vp8);
+        case CodecVP9: return enhanced ? AMFValue((int)RtmpVideoCodec::fourcc_vp9) : AMFValue((int)RtmpVideoCodec::vp9);
         default: return AMFValue(AMF_NULL);
     }
 }
 
 Frame::Ptr Factory::getFrameFromPtr(CodecId codec, const char *data, size_t bytes, uint64_t dts, uint64_t pts) {
-    auto it = s_plugins.find(codec);
-    if (it == s_plugins.end()) {
+    auto plugin = getCodecPlugin(codec);
+    if (!plugin) {
         // 创建不支持codec的frame  [AUTO-TRANSLATED:00936c6c]
         // Create a frame that does not support the codec
         return std::make_shared<FrameFromPtr>(codec, (char *)data, bytes, dts, pts);
     }
-    return it->second->getFrameFromPtr(data, bytes, dts, pts);
+    return plugin->getFrameFromPtr(data, bytes, dts, pts);
 }
 
 Frame::Ptr Factory::getFrameFromBuffer(CodecId codec, Buffer::Ptr data, uint64_t dts, uint64_t pts) {
