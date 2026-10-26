@@ -12,17 +12,33 @@
 #define ZLMEDIAKIT_FILEREADER_H
 
 #include <stdlib.h>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include "Network/Buffer.h"
 #include "Util/ResourcePool.h"
 #include "Util/logger.h"
 #include "Thread/WorkThreadPool.h"
+#include "Common/StrCaseMap.h"
 
 #ifndef MIN
 #define MIN(a,b) ((a) < (b) ? (a) : (b) )
 #endif //MIN
 
 namespace mediakit {
+
+struct PlayChannelRequestContext {
+    std::string url;
+    std::string source_url;
+    std::string scheme;
+    std::string method = "GET";
+    StrCaseMap request_header;
+    std::string task_id;
+    uint64_t timeout_ms = 30 * 1000;
+};
 
 /**
  * http content部分基类定义
@@ -96,6 +112,9 @@ public:
     virtual int sendFile(int fd) {
         return -1;
     }
+
+    // 连接已断开，允许响应体执行自定义清理/取消逻辑。
+    virtual void onConnectionClosed() {}
 
     /**
      * 写入数据，默认抛出异常表示不支持写入
@@ -232,6 +251,86 @@ private:
     uint64_t _content_size = 0;
     std::string _path;
 };
+
+class HttpUrlBody : public HttpBody {
+public:
+    using Ptr = std::shared_ptr<HttpUrlBody>;
+    using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
+    HttpUrlBody(const std::string &url, const StrCaseMap &request_header = StrCaseMap());
+
+    int64_t remainSize() override;
+    toolkit::Buffer::Ptr readData(size_t size) override;
+    void readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) override;
+
+    int responseCode() const;
+    StrCaseMap responseHeader() const;
+    bool requestCompleted() const;
+    bool requestSuccess() const;
+    void setHeaderReadyCB(HeaderReadyCB cb);
+
+private:
+    void waitHeaderReady() const;
+
+private:
+    mutable std::mutex _mtx;
+    std::deque<toolkit::Buffer::Ptr> _cache;
+    std::function<void(const toolkit::Buffer::Ptr &buf)> _wait_cb;
+    bool _completed = false;
+    bool _header_ready = false;
+    bool _header_cb_fired = false;
+    bool _success = false;
+    int _response_code = 200;
+    StrCaseMap _response_header;
+    std::string _url;
+    StrCaseMap _request_header;
+    std::shared_ptr<void> _alive_token;
+    std::shared_ptr<void> _client_holder;
+    HeaderReadyCB _header_ready_cb;
+    mutable std::condition_variable _header_cv;
+};
+
+#if ENABLE_FERRY
+class PlayChannelUrlBody : public HttpBody {
+public:
+    using Ptr = std::shared_ptr<PlayChannelUrlBody>;
+    using HeaderReadyCB = std::function<void(int, const StrCaseMap &)>;
+    PlayChannelUrlBody(const std::string &url,
+                       const StrCaseMap &request_header = StrCaseMap(),
+                       const toolkit::EventPoller::Ptr &poller = nullptr);
+
+    int64_t remainSize() override;
+    toolkit::Buffer::Ptr readData(size_t size) override;
+    void readDataAsync(size_t size, const std::function<void(const toolkit::Buffer::Ptr &buf)> &cb) override;
+
+    int responseCode() const;
+    StrCaseMap responseHeader() const;
+    bool requestCompleted() const;
+    bool requestSuccess() const;
+    void setHeaderReadyCB(HeaderReadyCB cb);
+    void onConnectionClosed() override;
+
+private:
+    void waitHeaderReady() const;
+
+private:
+    mutable std::mutex _mtx;
+    std::deque<toolkit::Buffer::Ptr> _cache;
+    std::function<void(const toolkit::Buffer::Ptr &buf)> _wait_cb;
+    bool _completed = false;
+    bool _header_ready = false;
+    bool _header_cb_fired = false;
+    bool _success = false;
+    int _response_code = 200;
+    StrCaseMap _response_header;
+    std::string _url;
+    StrCaseMap _request_header;
+    std::shared_ptr<void> _alive_token;
+    std::shared_ptr<void> _client_holder;
+    std::function<void()> _on_connection_closed;
+    HeaderReadyCB _header_ready_cb;
+    mutable std::condition_variable _header_cv;
+};
+#endif
 
 class HttpArgs;
 

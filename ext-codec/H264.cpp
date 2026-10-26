@@ -115,7 +115,7 @@ struct BitStream {
 } // anonymous namespace
 
 // ---- H264 SPS 解析 ----
-static bool getAVCInfo(const char *sps_raw, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps) {
+bool getAVCInfo(const char *sps_raw, size_t sps_len, int &iVideoWidth, int &iVideoHeight, float &iVideoFps) {
     if (sps_len < 4 || sps_len > kMaxParameterSetSize) return false;
     try {
         // RBSP 分配也可能因恶意超大 NALU 抛出异常；将其纳入保护范围，才能维持本接口只返回 false 的失败语义。

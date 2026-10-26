@@ -14,6 +14,7 @@
 #include <map>
 #include <string>
 #include "Util/util.h"
+#include "Common/StrCaseMap.h"
 #include "Http/HttpBody.h"
 
 namespace mediakit {
@@ -27,37 +28,6 @@ void splitUrl(const std::string &url, std::string &host, uint16_t &port);
 // 解析proxy url,仅支持http  [AUTO-TRANSLATED:194b49d7]
 // Parse proxy url, only supports http
 void parseProxyUrl(const std::string &proxy_url, std::string &proxy_host, uint16_t &proxy_port, std::string &proxy_auth);
-
-struct StrCaseCompare {
-    bool operator()(const std::string &__x, const std::string &__y) const { return strcasecmp(__x.data(), __y.data()) < 0; }
-};
-
-class StrCaseMap : public std::multimap<std::string, std::string, StrCaseCompare> {
-public:
-    using Super = std::multimap<std::string, std::string, StrCaseCompare>;
-
-    std::string &operator[](const std::string &k) {
-        auto it = find(k);
-        if (it == end()) {
-            it = Super::emplace(k, "");
-        }
-        return it->second;
-    }
-
-    template <typename K, typename V>
-    void emplace(K &&k, V &&v) {
-        auto it = find(k);
-        if (it != end()) {
-            return;
-        }
-        Super::emplace(std::forward<K>(k), std::forward<V>(v));
-    }
-
-    template <typename K, typename V>
-    void emplace_force(K &&k, V &&v) {
-        Super::emplace(std::forward<K>(k), std::forward<V>(v));
-    }
-};
 
 // rtsp/http/sip解析类  [AUTO-TRANSLATED:188ca500]
 // rtsp/http/sip parsing class
